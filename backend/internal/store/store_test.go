@@ -1,0 +1,858 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/rust-meow/rust-meow/backend/internal/domain"
+)
+
+func TestEmptyLegacyCacheRebuildsAsConversationSchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "client.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `CREATE TABLE schema_version(version INTEGER NOT NULL);INSERT INTO schema_version VALUES(1);
+CREATE TABLE chats(jid TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',last_message_id TEXT NOT NULL DEFAULT '',last_message_text TEXT NOT NULL DEFAULT '',last_message_at INTEGER NOT NULL DEFAULT 0,unread_count INTEGER NOT NULL DEFAULT 0,muted_until INTEGER NOT NULL DEFAULT 0,archived INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE messages(id TEXT NOT NULL,chat_jid TEXT NOT NULL,sender_jid TEXT NOT NULL DEFAULT '',text TEXT NOT NULL DEFAULT '',timestamp INTEGER NOT NULL,from_me INTEGER NOT NULL DEFAULT 0,status INTEGER NOT NULL DEFAULT 0,kind TEXT NOT NULL DEFAULT 'text',reply_to_id TEXT NOT NULL DEFAULT '',edited_at INTEGER NOT NULL DEFAULT 0,revoked INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(chat_jid,id),FOREIGN KEY(chat_jid) REFERENCES chats(jid) ON DELETE CASCADE);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := domain.Message{ID: "m", ChatJID: "c@g.us", SenderJID: "u@s.whatsapp.net", Timestamp: time.Now()}
+	if err = s.ApplyMessage(ctx, m, true); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 9 {
+		t.Fatalf("version=%d", version)
+	}
+	var indexCount int
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='index' AND name='messages_unread_cursor_idx'`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 1 {
+		t.Fatal("missing unread cursor index")
+	}
+}
+
+func TestRichMessageContentRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.UnixMilli(1234)
+	messages := []domain.Message{
+		{ID: "sticker", ChatJID: "123@g.us", Timestamp: now, Kind: "sticker", Text: "Sticker", Image: &domain.Image{
+			MIMEType: "image/webp", DirectPath: "/sticker", MediaKey: []byte{1}, FileSHA256: []byte{2}, FileEncSHA256: []byte{3}, Width: 512, Height: 512, FileSize: 99, Animated: true,
+		}},
+		{ID: "audio", ChatJID: "123@g.us", Timestamp: now.Add(time.Millisecond), Kind: "audio", Text: "Voice message", Attachment: &domain.Attachment{
+			MIMEType: "audio/ogg", DirectPath: "/audio", MediaKey: []byte{4}, FileSHA256: []byte{5}, FileEncSHA256: []byte{6}, FileSize: 100, DurationSeconds: 7, VoiceNote: true,
+		}},
+		{ID: "contacts", ChatJID: "123@g.us", Timestamp: now.Add(2 * time.Millisecond), Kind: "contacts", Text: "Friends", Contacts: []domain.Contact{
+			{DisplayName: "Alice", VCard: "BEGIN:VCARD\nFN:Alice\nEND:VCARD"}, {DisplayName: "Bob", VCard: "BEGIN:VCARD\nFN:Bob\nEND:VCARD"},
+		}},
+		{ID: "location", ChatJID: "123@g.us", Timestamp: now.Add(3 * time.Millisecond), Kind: "location", Text: "Office", Location: &domain.Location{
+			Latitude: 12.9716, Longitude: 77.5946, Name: "Office", Address: "Bengaluru", URL: "https://maps.example/office", Live: true,
+		}},
+	}
+	if err = s.ApplyMessages(ctx, messages, false); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Messages(ctx, "123@g.us", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != len(messages) {
+		t.Fatalf("messages=%+v", page.Items)
+	}
+	byID := make(map[string]domain.Message, len(page.Items))
+	for _, message := range page.Items {
+		byID[message.ID] = message
+	}
+	if got := byID["sticker"].Image; got == nil || got.MIMEType != "image/webp" || !got.Animated || got.Width != 512 || string(got.MediaKey) != "\x01" {
+		t.Fatalf("sticker=%+v", got)
+	}
+	if got := byID["audio"].Attachment; got == nil || !got.VoiceNote || got.DurationSeconds != 7 || got.DirectPath != "/audio" {
+		t.Fatalf("audio=%+v", got)
+	}
+	if got := byID["contacts"].Contacts; len(got) != 2 || got[0].DisplayName != "Alice" || got[1].DisplayName != "Bob" {
+		t.Fatalf("contacts=%+v", got)
+	}
+	if got := byID["location"].Location; got == nil || got.Latitude != 12.9716 || got.Longitude != 77.5946 || !got.Live {
+		t.Fatalf("location=%+v", got)
+	}
+}
+
+func TestV8CacheMigratesInPlaceToRichContentSchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "client.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "existing", ChatJID: "123@g.us", Kind: "text", Text: "keep me", Timestamp: time.UnixMilli(1234)}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"image_animated", "media_file_name", "media_duration", "media_voice", "contacts_json", "location_lat", "location_lng", "location_name", "location_address", "location_url", "location_live"} {
+		if _, err = db.ExecContext(ctx, `ALTER TABLE messages DROP COLUMN `+column); err != nil {
+			t.Fatalf("drop %s: %v", column, err)
+		}
+	}
+	if _, err = db.ExecContext(ctx, `UPDATE schema_version SET version=8`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	message, err := s.Message(ctx, "123@g.us", "existing")
+	if err != nil || message.Text != "keep me" {
+		t.Fatalf("message=%+v err=%v", message, err)
+	}
+	var version int
+	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil || version != 9 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+}
+
+func TestNonEmptyLegacyCacheRequiresExplicitReset(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "client.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.ExecContext(ctx, `CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES(7);
+CREATE TABLE chats(jid TEXT PRIMARY KEY); INSERT INTO chats VALUES('old@s.whatsapp.net')`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(ctx, path); err == nil || !strings.Contains(err.Error(), "client cache reset required") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReactionPseudoMessageCannotBeReinsertedOrRendered(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "reaction", ChatJID: "g@g.us", Kind: "reaction", Timestamp: time.Now()}, true); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Messages(ctx, "g@g.us", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("rendered=%+v", page.Items)
+	}
+}
+
+func TestRejectsNewerSchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "client.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.ExecContext(ctx, `CREATE TABLE schema_version(version INTEGER NOT NULL);INSERT INTO schema_version VALUES(99)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if _, err = Open(ctx, path); err == nil || !strings.Contains(err.Error(), "newer than supported") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestApplyMessagesBatchesLargeConversation(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const count = 2500
+	messages := make([]domain.Message, count)
+	for i := range messages {
+		messages[i] = domain.Message{ID: fmt.Sprintf("%08d", i), ChatJID: "large@g.us", SenderJID: "u@s.whatsapp.net", Text: fmt.Sprintf("message %d", i), Timestamp: time.Unix(int64(i+1), 0), Status: domain.StatusDelivered, Kind: "text"}
+	}
+	started := time.Now()
+	if err = s.ApplyMessages(ctx, messages, false); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("batch persistence took %s", elapsed)
+	}
+	if err = s.ApplyMessages(ctx, messages, false); err != nil {
+		t.Fatal(err)
+	}
+	var stored int
+	chatID, err := s.ResolveChat(ctx, "large@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE chat_jid=?`, chatID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != count {
+		t.Fatalf("stored=%d", stored)
+	}
+	chat, err := s.Chat(ctx, "large@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.LastMessageID != "00002499" || chat.UnreadCount != 0 {
+		t.Fatalf("chat=%+v", chat)
+	}
+}
+
+func TestClearAccountDataRemovesAllPriorAccountRows(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	pending := domain.Message{ID: "wa-id", ChatJID: "old@g.us", SenderJID: "me@s.whatsapp.net", Text: "private", Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "text"}
+	if _, _, err = s.ReserveOutgoingMessage(ctx, "request-id", pending); err != nil {
+		t.Fatal(err)
+	}
+	incoming := domain.Message{ID: "incoming", ChatJID: "old@g.us", SenderJID: "other@s.whatsapp.net", Text: "secret", Timestamp: time.Now().Add(time.Second), Kind: "text"}
+	if err = s.ApplyMessage(ctx, incoming, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ReserveOutgoingReaction(ctx, "reaction-id", domain.Reaction{ChatJID: incoming.ChatJID, MessageID: incoming.ID, SenderJID: pending.SenderJID, Emoji: "👍", FromMe: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO sync_state(key,value) VALUES('checkpoint','old-account')`); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ClearAccountData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"legacy_reaction_replays", "reaction_repair_jobs", "outgoing_reactions", "outgoing_requests", "reactions", "messages", "chats", "sync_state"} {
+		var count int
+		if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s retained %d rows", table, count)
+		}
+	}
+}
+
+func TestReactionUpsertRemovalAndMessageHydration(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	message := domain.Message{ID: "m", ChatJID: "group@g.us", SenderJID: "author@s.whatsapp.net", Text: "hello", Timestamp: time.Unix(1, 0), Kind: "text"}
+	if err = s.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	reaction := domain.Reaction{ChatJID: message.ChatJID, MessageID: message.ID, SenderJID: "a@s.whatsapp.net", Emoji: "👍", Timestamp: time.Unix(2, 0)}
+	if err = s.ApplyReaction(ctx, reaction); err != nil {
+		t.Fatal(err)
+	}
+	stale := reaction
+	stale.Emoji = "👎"
+	stale.Timestamp = time.Unix(1, 0)
+	if applied, applyErr := s.ApplyReactionIfNewer(ctx, stale); applyErr != nil {
+		t.Fatal(applyErr)
+	} else if applied {
+		t.Fatal("stale reaction reported as applied")
+	}
+	if err = s.ApplyReaction(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Messages(ctx, message.ChatJID, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || len(page.Items[0].Reactions) != 1 || page.Items[0].Reactions[0].Emoji != "👍" {
+		t.Fatalf("page=%+v", page)
+	}
+	reaction.Emoji = ""
+	reaction.Timestamp = time.Unix(3, 0)
+	if err = s.ApplyReaction(ctx, reaction); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ApplyReaction(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	page, err = s.Messages(ctx, message.ChatJID, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items[0].Reactions) != 0 {
+		t.Fatalf("reaction not removed: %+v", page.Items[0].Reactions)
+	}
+}
+
+func TestOutgoingReactionReservationIsPayloadBoundAndReplayable(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	reaction := domain.Reaction{ChatJID: "group@g.us", MessageID: "m", SenderJID: "me@s.whatsapp.net", Emoji: "👍", FromMe: true}
+	reserved, completed, err := s.ReserveOutgoingReaction(ctx, "action", reaction)
+	if err != nil || completed || !reserved.Timestamp.IsZero() {
+		t.Fatalf("reserved=%+v completed=%v err=%v", reserved, completed, err)
+	}
+	different := reaction
+	different.Emoji = "👎"
+	if _, _, err = s.ReserveOutgoingReaction(ctx, "action", different); err == nil {
+		t.Fatal("reservation accepted a different payload")
+	}
+	reaction.Timestamp = time.UnixMilli(1234)
+	if err = s.CompleteOutgoingReaction(ctx, "action", reaction); err != nil {
+		t.Fatal(err)
+	}
+	replayed, completed, err := s.ReserveOutgoingReaction(ctx, "action", reaction)
+	if err != nil || !completed || !replayed.Timestamp.Equal(reaction.Timestamp) {
+		t.Fatalf("replayed=%+v completed=%v err=%v", replayed, completed, err)
+	}
+}
+
+func TestApplyReactionsBatchKeepsOneReactionPerSender(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	message := domain.Message{ID: "m", ChatJID: "group@g.us", Timestamp: time.Now()}
+	if err = s.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	reactions := []domain.Reaction{{ChatJID: message.ChatJID, MessageID: message.ID, SenderJID: "a@s.whatsapp.net", Emoji: "👍", Timestamp: time.Unix(1, 0)}, {ChatJID: message.ChatJID, MessageID: message.ID, SenderJID: "a@s.whatsapp.net", Emoji: "❤️", Timestamp: time.Unix(2, 0)}, {ChatJID: message.ChatJID, MessageID: message.ID, SenderJID: "b@s.whatsapp.net", Emoji: "😂", Timestamp: time.Unix(2, 0)}}
+	if err = s.ApplyReactions(ctx, reactions); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Messages(ctx, message.ChatJID, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(page.Items[0].Reactions); got != 2 {
+		t.Fatalf("reactions=%d", got)
+	}
+}
+
+func TestSelfReactionAliasesCollapseWithoutStaleOverwrite(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	pn := domain.Reaction{ChatJID: "g@g.us", MessageID: "m", SenderJID: "15551234@s.whatsapp.net", Emoji: "👍", Timestamp: time.UnixMilli(2000), FromMe: true}
+	if applied, applyErr := s.ApplyReactionIfNewer(ctx, pn); applyErr != nil || !applied {
+		t.Fatalf("PN applied=%v err=%v", applied, applyErr)
+	}
+	lid := pn
+	lid.SenderJID = "12345@lid"
+	lid.Emoji = "❤️"
+	lid.Timestamp = time.UnixMilli(3000)
+	if applied, applyErr := s.ApplyReactionIfNewer(ctx, lid); applyErr != nil || !applied {
+		t.Fatalf("LID applied=%v err=%v", applied, applyErr)
+	}
+	stale := pn
+	stale.Emoji = "😂"
+	stale.Timestamp = time.UnixMilli(1000)
+	if applied, applyErr := s.ApplyReactionIfNewer(ctx, stale); applyErr != nil || applied {
+		t.Fatalf("stale applied=%v err=%v", applied, applyErr)
+	}
+	var count int
+	var sender, emoji string
+	var timestamp int64
+	chatID, err := s.ResolveChat(ctx, lid.ChatJID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*),sender_jid,emoji,timestamp FROM reactions WHERE chat_jid=? AND message_id=? AND from_me=1`, chatID, lid.MessageID).Scan(&count, &sender, &emoji, &timestamp); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || sender != lid.SenderJID || emoji != lid.Emoji || timestamp != lid.Timestamp.UnixMilli() {
+		t.Fatalf("count=%d sender=%q emoji=%q timestamp=%d", count, sender, emoji, timestamp)
+	}
+}
+
+func TestApplyMessageIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := domain.Message{ID: "m1", ChatJID: "123@s.whatsapp.net", Text: "hello", Timestamp: time.Unix(10, 0), Status: domain.StatusDelivered}
+	if err := s.ApplyMessage(ctx, m, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplyMessage(ctx, m, true); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Chats(ctx, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := page.Items[0].UnreadCount; got != 1 {
+		t.Fatalf("unread=%d want 1", got)
+	}
+}
+
+func TestEnsureConversationMergesPNAndLIDWithoutLosingTransport(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	pn := "919999890760@s.whatsapp.net"
+	lid := "207236550930675@lid"
+	pnChat, _, err := s.EnsureConversation(ctx, pn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "old", ChatJID: pnChat, TransportJID: pn, Text: "old", Kind: "text", Timestamp: time.Unix(1, 0)}, false); err != nil {
+		t.Fatal(err)
+	}
+	lidChat, _, err := s.EnsureConversation(ctx, lid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "new", ChatJID: lidChat, TransportJID: lid, Text: "new", Kind: "text", Timestamp: time.Unix(2, 0)}, true); err != nil {
+		t.Fatal(err)
+	}
+	winner, merges, err := s.EnsureConversation(ctx, lid, pn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if winner != lidChat || len(merges) != 1 || merges[0].OldChatID != pnChat {
+		t.Fatalf("winner=%q merges=%+v", winner, merges)
+	}
+	if resolved, resolveErr := s.ResolveChat(ctx, pnChat); resolveErr != nil || resolved != winner {
+		t.Fatalf("redirect=%q err=%v", resolved, resolveErr)
+	}
+	page, err := s.Messages(ctx, pn, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 || page.Items[0].TransportJID != lid || page.Items[1].TransportJID != pn {
+		t.Fatalf("messages=%+v", page.Items)
+	}
+	count, err := s.ChatCount(ctx)
+	if err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+func TestConversationAddressesPrefersLIDAndRetainsPNFallback(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "addresses.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chatID, _, err := s.EnsureConversation(ctx, "919999890760@s.whatsapp.net", "200201394507780@lid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addresses, err := s.ConversationAddresses(ctx, chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addresses) != 2 || addresses[0] != "200201394507780@lid" || addresses[1] != "919999890760@s.whatsapp.net" {
+		t.Fatalf("addresses=%v", addresses)
+	}
+}
+
+func TestPhoneReassignmentDoesNotMergeDifferentLIDs(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	pn := "15550001111@s.whatsapp.net"
+	oldLID := "111@lid"
+	newLID := "222@lid"
+	oldChat, _, err := s.EnsureConversation(ctx, oldLID, pn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newChat, _, err := s.EnsureConversation(ctx, newLID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	winner, merges, err := s.EnsureConversation(ctx, newLID, pn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if winner != newChat || len(merges) != 0 {
+		t.Fatalf("winner=%q merges=%+v", winner, merges)
+	}
+	if resolved, _ := s.ResolveChat(ctx, pn); resolved != newChat {
+		t.Fatalf("PN resolved to %q", resolved)
+	}
+	if resolved, _ := s.ResolveChat(ctx, oldLID); resolved != oldChat {
+		t.Fatalf("old LID resolved to %q", resolved)
+	}
+	if count, countErr := s.ChatCount(ctx); countErr != nil || count != 2 {
+		t.Fatalf("count=%d err=%v", count, countErr)
+	}
+}
+
+func TestImageMetadataAndCachePathRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	message := domain.Message{
+		ID: "image-1", ChatJID: "c@g.us", SenderJID: "u@s.whatsapp.net",
+		Text: "caption", Timestamp: time.Unix(10, 0), Kind: "image",
+		Image: &domain.Image{
+			Caption: "caption", MIMEType: "image/jpeg", DirectPath: "/remote",
+			MediaKey: []byte{1, 2}, FileSHA256: []byte{3}, FileEncSHA256: []byte{4},
+			Width: 640, Height: 480, FileSize: 1234,
+		},
+	}
+	if err = s.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetImageLocalPath(ctx, message.ChatJID, message.ID, "/cache/photo.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	// Replaying remote metadata must not discard a locally downloaded cache path.
+	if err = s.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Message(ctx, message.ChatJID, message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Image == nil || got.Image.LocalPath != "/cache/photo.jpg" || got.Image.Caption != "caption" || got.Image.MIMEType != "image/jpeg" {
+		t.Fatalf("image=%+v", got.Image)
+	}
+	if got.Image.Width != 640 || got.Image.Height != 480 || got.Image.FileSize != 1234 || string(got.Image.MediaKey) != string([]byte{1, 2}) {
+		t.Fatalf("metadata=%+v", got.Image)
+	}
+}
+
+func TestStickerLocalPathCanBeCached(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	message := domain.Message{
+		ID: "sticker", ChatJID: "c@g.us", SenderJID: "u@s.whatsapp.net",
+		Timestamp: time.Now(), Kind: "sticker", Image: &domain.Image{MIMEType: "image/webp"},
+	}
+	if err = s.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetImageLocalPath(ctx, message.ChatJID, message.ID, "/cache/sticker.webp"); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.Message(ctx, message.ChatJID, message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Image == nil || stored.Image.LocalPath != "/cache/sticker.webp" {
+		t.Fatalf("stored sticker = %+v", stored.Image)
+	}
+}
+
+func TestLegacyImageWithoutDescriptorRemainsRepairable(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	legacy := domain.Message{ID: "old-image", ChatJID: "c@g.us", SenderJID: "u@s.whatsapp.net", Text: "Unsupported message", Timestamp: time.Now(), Kind: "image"}
+	if err = s.ApplyMessage(ctx, legacy, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Message(ctx, legacy.ChatJID, legacy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Image == nil {
+		t.Fatal("legacy image marker was discarded")
+	}
+}
+
+func TestHistoricalImageWithNilDescriptorBytesStoresEmptyBlobs(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	message := domain.Message{
+		ID: "history-image", ChatJID: "c@g.us", TransportJID: "c@g.us",
+		Text: "photo", Timestamp: time.Now(), Kind: "image",
+		Image: &domain.Image{MIMEType: "image/jpeg"},
+	}
+	if err = s.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	chatID, err := s.ResolveChat(ctx, message.ChatJID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mediaKeyType, fileHashType, encryptedHashType string
+	var mediaKeyLength, fileHashLength, encryptedHashLength int
+	if err = s.db.QueryRowContext(ctx, `SELECT typeof(image_media_key),length(image_media_key),typeof(image_file_sha256),length(image_file_sha256),typeof(image_file_enc_sha256),length(image_file_enc_sha256) FROM messages WHERE chat_jid=? AND id=?`, chatID, message.ID).
+		Scan(&mediaKeyType, &mediaKeyLength, &fileHashType, &fileHashLength, &encryptedHashType, &encryptedHashLength); err != nil {
+		t.Fatal(err)
+	}
+	if mediaKeyType != "blob" || fileHashType != "blob" || encryptedHashType != "blob" || mediaKeyLength != 0 || fileHashLength != 0 || encryptedHashLength != 0 {
+		t.Fatalf("types=(%s,%s,%s) lengths=(%d,%d,%d)", mediaKeyType, fileHashType, encryptedHashType, mediaKeyLength, fileHashLength, encryptedHashLength)
+	}
+}
+
+func TestMessagesCursor(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i := 0; i < 3; i++ {
+		m := domain.Message{ID: string(rune('a' + i)), ChatJID: "c@g.us", Timestamp: time.Unix(int64(i+1), 0)}
+		if err := s.ApplyMessage(ctx, m, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := s.Messages(ctx, "c@g.us", "", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Items) != 2 || first.NextCursor == "" {
+		t.Fatalf("first=%+v", first)
+	}
+	second, err := s.Messages(ctx, "c@g.us", first.NextCursor, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Items) != 1 || second.Items[0].ID != "a" {
+		t.Fatalf("second=%+v", second)
+	}
+}
+
+func TestReserveOutgoingIsPersistentAndPayloadBound(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	id, existed, err := s.ReserveOutgoing(ctx, "request-1", "c@g.us", "hello", "wa-1")
+	if err != nil || existed || id != "wa-1" {
+		t.Fatalf("first: id=%q existed=%v err=%v", id, existed, err)
+	}
+	id, existed, err = s.ReserveOutgoing(ctx, "request-1", "c@g.us", "hello", "wa-2")
+	if err != nil || !existed || id != "wa-1" {
+		t.Fatalf("retry: id=%q existed=%v err=%v", id, existed, err)
+	}
+	if _, _, err = s.ReserveOutgoing(ctx, "request-1", "c@g.us", "changed", "wa-3"); err == nil {
+		t.Fatal("expected payload conflict")
+	}
+}
+
+func TestReceiptRecoversFailedAndDoesNotRegressRead(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := domain.Message{ID: "m", ChatJID: "c@g.us", Timestamp: time.Now(), FromMe: true, Status: domain.StatusFailed}
+	if err = s.ApplyMessage(ctx, m, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpdateReceipt(ctx, m.ChatJID, m.ID, domain.StatusSent); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpdateReceipt(ctx, m.ChatJID, m.ID, domain.StatusRead); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpdateReceipt(ctx, m.ChatJID, m.ID, domain.StatusFailed); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Message(ctx, m.ChatJID, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusRead {
+		t.Fatalf("status=%v", got.Status)
+	}
+}
+
+func TestReserveOutgoingMessageIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := domain.Message{ID: "wa-1", ChatJID: "c@g.us", Text: "hello", Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending}
+	id, existed, err := s.ReserveOutgoingMessage(ctx, "request", m)
+	if err != nil || existed || id != m.ID {
+		t.Fatalf("id=%q existed=%v err=%v", id, existed, err)
+	}
+	if _, err = s.Message(ctx, m.ChatJID, m.ID); err != nil {
+		t.Fatalf("reservation committed without pending message: %v", err)
+	}
+	id, existed, err = s.ReserveOutgoingMessage(ctx, "request", m)
+	if err != nil || !existed || id != m.ID {
+		t.Fatalf("retry id=%q existed=%v err=%v", id, existed, err)
+	}
+}
+
+func TestMarkReadThroughPreservesNewerUnread(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	old := domain.Message{ID: "old", ChatJID: "c@g.us", SenderJID: "u@s.whatsapp.net", Timestamp: time.Unix(1, 0)}
+	newer := domain.Message{ID: "new", ChatJID: old.ChatJID, SenderJID: old.SenderJID, Timestamp: time.Unix(2, 0)}
+	if err = s.ApplyMessage(ctx, old, true); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ApplyMessage(ctx, newer, true); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.MarkReadThrough(ctx, old.ChatJID, old.ID); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := s.Chat(ctx, old.ChatJID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.UnreadCount != 1 {
+		t.Fatalf("unread=%d want 1", chat.UnreadCount)
+	}
+}
+
+func TestUnreadThroughCanAcknowledgeSenderGroupsIndependently(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i, sender := range []string{"a@s.whatsapp.net", "b@s.whatsapp.net", "a@s.whatsapp.net"} {
+		m := domain.Message{ID: fmt.Sprintf("m%d", i), ChatJID: "group@g.us", SenderJID: sender, Timestamp: time.Unix(int64(i+1), 0)}
+		if err = s.ApplyMessage(ctx, m, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := s.UnreadThrough(ctx, "group@g.us", "m2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("items=%d", len(items))
+	}
+	if err = s.MarkReadIDs(ctx, "group@g.us", []string{"m0", "m2"}); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := s.Chat(ctx, "group@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.UnreadCount != 1 {
+		t.Fatalf("unread=%d", chat.UnreadCount)
+	}
+}
+
+func TestEditAndRevokeUpdateCurrentPreviewAndSurviveReplay(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	original := domain.Message{ID: "m", ChatJID: "c@g.us", Text: "original", Kind: "text", Timestamp: time.Unix(1, 0)}
+	if err = s.ApplyMessage(ctx, original, false); err != nil {
+		t.Fatal(err)
+	}
+	edited := original
+	edited.Text = "edited"
+	edited.EditedAt = time.Unix(2, 0)
+	if err = s.ApplyMessage(ctx, edited, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ApplyMessage(ctx, original, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Message(ctx, original.ChatJID, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Text != "edited" {
+		t.Fatalf("replay overwrote edit: %+v", got)
+	}
+	revoked := edited
+	revoked.Text = "Message deleted"
+	revoked.Revoked = true
+	revoked.EditedAt = time.Unix(3, 0)
+	if err = s.ApplyMessage(ctx, revoked, false); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := s.Chat(ctx, original.ChatJID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.LastMessageText != "Message deleted" {
+		t.Fatalf("preview=%q", chat.LastMessageText)
+	}
+}
