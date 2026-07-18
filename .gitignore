@@ -1,0 +1,8 @@
+/build/
+/backend/rust-meow-backend
+/desktop/target/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
