@@ -34,6 +34,9 @@ message RpcRequest {
     RepairRecentReactionsRequest repair_recent_reactions = 13;
     SendImageRequest send_image = 14;
     GetMessageImageRequest get_message_image = 15;
+    SearchLocalRequest search_local = 16;
+    OpenContactRequest open_contact = 17;
+    ListMessagesAroundRequest list_messages_around = 18;
   }
 }
 
@@ -56,6 +59,9 @@ message RpcResponse {
     RepairRecentReactionsResponse repair_recent_reactions = 22;
     SendImageResponse send_image = 23;
     GetMessageImageResponse get_message_image = 24;
+    SearchLocalResponse search_local = 25;
+    OpenContactResponse open_contact = 26;
+    ListMessagesAroundResponse list_messages_around = 27;
   }
 }
 
@@ -140,6 +146,51 @@ message ListMessagesResponse {
   // Messages are always returned oldest-to-newest for direct rendering.
   repeated Message messages = 1;
   bool has_more = 2;
+}
+
+message SearchLocalRequest { string query = 1; }
+
+message ContactSearchResult {
+  // A direct WhatsApp address used only when the user chooses this result.
+  string contact_jid = 1;
+  // Present when this contact already has a local conversation.
+  string chat_id = 2;
+  string display_name = 3;
+  string secondary_name = 4;
+  string phone_number = 5;
+}
+
+message MessageSearchResult {
+  string chat_id = 1;
+  string message_id = 2;
+  string chat_title = 3;
+  string sender_name = 4;
+  int64 timestamp_ms = 5;
+  string snippet = 6;
+  string kind = 7;
+  bool archived = 8;
+  Chat chat = 9;
+}
+
+message SearchLocalResponse {
+  repeated ContactSearchResult contacts = 1;
+  repeated Chat groups = 2;
+  repeated MessageSearchResult messages = 3;
+}
+
+message OpenContactRequest { string contact_jid = 1; }
+message OpenContactResponse { Chat chat = 1; }
+
+message ListMessagesAroundRequest {
+  string chat_id = 1;
+  string message_id = 2;
+}
+
+message ListMessagesAroundResponse {
+  repeated Message messages = 1;
+  bool has_older = 2;
+  bool has_newer = 3;
+  string anchor_message_id = 4;
 }
 
 message SendTextRequest {

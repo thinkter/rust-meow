@@ -12,7 +12,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -298,6 +298,83 @@ fn fake_loop(
                 rpc_response::Result::ListMessages(proto::ListMessagesResponse {
                     messages,
                     has_more: start > 0,
+                })
+            }
+            Some(rpc_request::Request::SearchLocal(request)) => {
+                let query = request.query.to_lowercase();
+                let contacts = (0..8)
+                    .filter_map(|id| {
+                        let chat = fake_chat(id);
+                        (chat.title.to_lowercase().contains(&query)
+                            || chat.phone_number.contains(&query))
+                        .then_some(proto::ContactSearchResult {
+                            contact_jid: format!("1555{id:07}@s.whatsapp.net"),
+                            chat_id: chat.id,
+                            display_name: chat.title,
+                            secondary_name: chat.push_name,
+                            phone_number: chat.phone_number,
+                        })
+                    })
+                    .take(8)
+                    .collect();
+                let groups = (0..40)
+                    .filter(|id| *id % 5 == 0)
+                    .map(fake_chat)
+                    .filter(|chat| chat.title.to_lowercase().contains(&query))
+                    .take(6)
+                    .collect();
+                let messages = if query.chars().count() >= 3 {
+                    (975..1_000)
+                        .map(|id| {
+                            let chat = fake_chat(id % 20);
+                            proto::MessageSearchResult {
+                                chat_id: chat.id.clone(),
+                                message_id: format!("message-{id}"),
+                                chat_title: chat.title.clone(),
+                                sender_name: if id.is_multiple_of(2) {
+                                    "You"
+                                } else {
+                                    "Meow friend"
+                                }
+                                .into(),
+                                timestamp_ms: id as i64,
+                                snippet: format!("Fast native message {id} matching {query}"),
+                                kind: "text".into(),
+                                archived: chat.archived,
+                                chat: Some(chat),
+                            }
+                        })
+                        .take(20)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                rpc_response::Result::SearchLocal(proto::SearchLocalResponse {
+                    contacts,
+                    groups,
+                    messages,
+                })
+            }
+            Some(rpc_request::Request::OpenContact(_request)) => {
+                let mut chat = fake_chat(10_001);
+                chat.title = "New WhatsApp contact".into();
+                rpc_response::Result::OpenContact(proto::OpenContactResponse { chat: Some(chat) })
+            }
+            Some(rpc_request::Request::ListMessagesAround(request)) => {
+                let anchor = request
+                    .message_id
+                    .strip_prefix("message-")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(500);
+                let start = anchor.saturating_sub(25);
+                let end = (anchor + 26).min(1_000);
+                rpc_response::Result::ListMessagesAround(proto::ListMessagesAroundResponse {
+                    messages: (start..end)
+                        .map(|id| fake_message(&request.chat_id, id))
+                        .collect(),
+                    has_older: start > 0,
+                    has_newer: end < 1_000,
+                    anchor_message_id: request.message_id,
                 })
             }
             Some(rpc_request::Request::GetChatAvatar(request)) => {
