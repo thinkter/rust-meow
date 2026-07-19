@@ -15,11 +15,12 @@ use std::{
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
-    KeyDownEvent, ModifiersChangedEvent, ObjectFit, ParentElement as _, PathPromptOptions, Pixels,
-    Point, Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Subscription, Window, WindowBounds, WindowOptions, actions, canvas, div, img,
-    point, px, rgb, rgba, size, uniform_list,
+    AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+    KeyBinding, KeyDownEvent, ModifiersChangedEvent, ObjectFit, ParentElement as _,
+    PathPromptOptions, Pixels, Point, Render, ScrollStrategy, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window,
+    WindowBounds, WindowOptions, actions, canvas, div, img, point, px, rgb, rgba, size,
+    uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
@@ -28,6 +29,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
+    scroll::{ScrollableElement as _, ScrollbarAxis},
     v_flex, v_virtual_list,
 };
 use gpui_component_assets::Assets;
@@ -196,6 +198,129 @@ struct ChatSwitcher {
     highlighted: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+struct SearchResults {
+    contacts: Vec<proto::ContactSearchResult>,
+    groups: Vec<proto::Chat>,
+    messages: Vec<proto::MessageSearchResult>,
+}
+
+#[derive(Clone, Debug)]
+enum SearchResultRow {
+    Header {
+        title: &'static str,
+        count: usize,
+    },
+    Contact {
+        result_index: usize,
+        source_index: usize,
+    },
+    Group {
+        result_index: usize,
+        source_index: usize,
+    },
+    Message {
+        result_index: usize,
+        source_index: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum SearchTarget {
+    Contact(String),
+    Group(proto::Chat),
+    Message {
+        chat: Option<proto::Chat>,
+        chat_id: String,
+        message_id: String,
+    },
+}
+
+impl SearchResults {
+    fn len(&self) -> usize {
+        self.contacts.len() + self.groups.len() + self.messages.len()
+    }
+
+    fn target(&self, mut index: usize) -> Option<SearchTarget> {
+        if let Some(contact) = self.contacts.get(index) {
+            return Some(SearchTarget::Contact(contact.contact_jid.clone()));
+        }
+        index = index.checked_sub(self.contacts.len())?;
+        if let Some(group) = self.groups.get(index) {
+            return Some(SearchTarget::Group(group.clone()));
+        }
+        index = index.checked_sub(self.groups.len())?;
+        self.messages
+            .get(index)
+            .map(|message| SearchTarget::Message {
+                chat: message.chat.clone(),
+                chat_id: message.chat_id.clone(),
+                message_id: message.message_id.clone(),
+            })
+    }
+
+    fn rows(&self) -> Vec<SearchResultRow> {
+        let mut rows = Vec::with_capacity(self.len() + 3);
+        if !self.contacts.is_empty() {
+            rows.push(SearchResultRow::Header {
+                title: "Contacts",
+                count: self.contacts.len(),
+            });
+            rows.extend(self.contacts.iter().enumerate().map(|(result_index, _)| {
+                SearchResultRow::Contact {
+                    result_index,
+                    source_index: result_index,
+                }
+            }));
+        }
+        if !self.groups.is_empty() {
+            rows.push(SearchResultRow::Header {
+                title: "Groups",
+                count: self.groups.len(),
+            });
+            rows.extend(
+                self.groups
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, _)| SearchResultRow::Group {
+                        result_index: self.contacts.len() + offset,
+                        source_index: offset,
+                    }),
+            );
+        }
+        if !self.messages.is_empty() {
+            rows.push(SearchResultRow::Header {
+                title: "Messages",
+                count: self.messages.len(),
+            });
+            rows.extend(self.messages.iter().enumerate().map(|(offset, _)| {
+                SearchResultRow::Message {
+                    result_index: self.contacts.len() + self.groups.len() + offset,
+                    source_index: offset,
+                }
+            }));
+        }
+        rows
+    }
+
+    fn row_index_for_result(&self, result_index: usize) -> Option<usize> {
+        let mut row_start = 0;
+        let mut result_start = 0;
+        for count in [self.contacts.len(), self.groups.len(), self.messages.len()] {
+            if count == 0 {
+                continue;
+            }
+            row_start += 1; // section header
+            if result_index < result_start + count {
+                return Some(row_start + result_index - result_start);
+            }
+            row_start += count;
+            result_start += count;
+        }
+        None
+    }
+}
+
 impl ChatSwitcher {
     fn new(chat_ids: Vec<String>, reverse: bool) -> Option<Self> {
         if chat_ids.len() < 2 {
@@ -273,6 +398,15 @@ struct RustMeow {
     bridge: BackendClient,
     store: Store,
     composer: Entity<InputState>,
+    search_input: Entity<InputState>,
+    search_query: String,
+    search_results: SearchResults,
+    search_generation: u64,
+    search_highlighted: usize,
+    search_error: Option<String>,
+    search_scroll: VirtualListScrollHandle,
+    search_target_message_id: Option<String>,
+    pending_search_scroll_id: Option<String>,
     emoji_search: Entity<InputState>,
     emoji_query: String,
     emoji_category: EmojiCategory,
@@ -322,6 +456,11 @@ impl RustMeow {
                 .clean_on_escape()
         });
         let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji"));
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search contacts, groups, messages")
+                .clean_on_escape()
+        });
         let _subscriptions = vec![
             cx.subscribe_in(&composer, window, {
                 let composer = composer.clone();
@@ -342,6 +481,15 @@ impl RustMeow {
                         this.emoji_query = emoji_search.read(cx).value().to_string();
                         this.rebuild_emoji_results();
                         cx.notify();
+                    }
+                }
+            }),
+            cx.subscribe_in(&search_input, window, {
+                let search_input = search_input.clone();
+                move |this, _, event, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let query = search_input.read(cx).value().to_string();
+                        this.set_search_query(query, cx);
                     }
                 }
             }),
@@ -368,6 +516,15 @@ impl RustMeow {
             bridge,
             store: Store::default(),
             composer,
+            search_input,
+            search_query: String::new(),
+            search_results: SearchResults::default(),
+            search_generation: 0,
+            search_highlighted: 0,
+            search_error: None,
+            search_scroll: VirtualListScrollHandle::new(),
+            search_target_message_id: None,
+            pending_search_scroll_id: None,
             emoji_search,
             emoji_query: String::new(),
             emoji_category: EmojiCategory::All,
@@ -426,6 +583,145 @@ impl RustMeow {
         }
     }
 
+    fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
+        self.search_query = query;
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_results = SearchResults::default();
+        self.search_highlighted = 0;
+        self.search_error = None;
+        self.search_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        let trimmed = self.search_query.trim().to_owned();
+        let generation = self.search_generation;
+        if trimmed.chars().count() < 2 {
+            cx.notify();
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(150)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_generation != generation || this.search_query.trim() != trimmed {
+                    return;
+                }
+                this.request(
+                    rpc_request::Request::SearchLocal(proto::SearchLocalRequest {
+                        query: trimmed.clone(),
+                    }),
+                    PendingRequest::Search {
+                        query: trimmed,
+                        generation,
+                    },
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.screen != Screen::Chats {
+            return;
+        }
+        self.settings_open = false;
+        self.chat_switcher = None;
+        self.reaction_details = None;
+        self.image_viewer = None;
+        self.search_input
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_query.clear();
+        self.search_results = SearchResults::default();
+        self.search_highlighted = 0;
+        self.search_error = None;
+        self.search_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.search_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    fn move_search_selection(&mut self, reverse: bool) {
+        let count = self.search_results.len();
+        if count == 0 {
+            self.search_highlighted = 0;
+        } else if reverse {
+            self.search_highlighted = self.search_highlighted.checked_sub(1).unwrap_or(count - 1);
+        } else {
+            self.search_highlighted = (self.search_highlighted + 1) % count;
+        }
+        if let Some(row_index) = self
+            .search_results
+            .row_index_for_result(self.search_highlighted)
+        {
+            self.search_scroll
+                .scroll_to_item(row_index, ScrollStrategy::Center);
+        }
+    }
+
+    fn activate_search_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.search_results.target(self.search_highlighted) else {
+            return;
+        };
+        match target {
+            SearchTarget::Contact(contact_jid) => {
+                self.request(
+                    rpc_request::Request::OpenContact(proto::OpenContactRequest {
+                        contact_jid: contact_jid.clone(),
+                    }),
+                    PendingRequest::OpenContact,
+                );
+            }
+            SearchTarget::Group(chat) => {
+                let chat_id = chat.id.clone();
+                self.store.upsert_chat(chat);
+                self.clear_search(window, cx);
+                self.open_chat(chat_id, window, cx);
+            }
+            SearchTarget::Message {
+                chat,
+                chat_id,
+                message_id,
+            } => {
+                if let Some(chat) = chat {
+                    self.store.upsert_chat(chat);
+                }
+                self.clear_search(window, cx);
+                self.message_generation = self.message_generation.wrapping_add(1);
+                self.store.select_chat(chat_id.clone());
+                self.chat_view = if self.store.chat(&chat_id).is_some_and(|chat| chat.archived) {
+                    ChatView::Archived
+                } else {
+                    ChatView::Inbox
+                };
+                record_recent_chat(&mut self.recent_chat_ids, &chat_id);
+                let draft = self.chat_drafts.get(&chat_id).cloned().unwrap_or_default();
+                self.replying_to_message_id = draft.reply_to_message_id;
+                self.composer
+                    .update(cx, |input, cx| input.set_value(draft.text, window, cx));
+                self.emoji_target = None;
+                self.reaction_details = None;
+                self.image_viewer = None;
+                self.scroll_to_bottom_generation = None;
+                self.image_download_attempted.clear();
+                self.image_failures.clear();
+                self.search_target_message_id = Some(message_id.clone());
+                self.request(
+                    rpc_request::Request::ListMessagesAround(proto::ListMessagesAroundRequest {
+                        chat_id: chat_id.clone(),
+                        message_id: message_id.clone(),
+                    }),
+                    PendingRequest::MessagesAround {
+                        chat_id,
+                        message_id,
+                        generation: self.message_generation,
+                    },
+                );
+            }
+        }
+        cx.notify();
+    }
+
     fn handle_bridge(
         &mut self,
         message: BridgeMessage,
@@ -468,6 +764,25 @@ impl RustMeow {
             return;
         };
         if let rpc_response::Result::Error(error) = result {
+            if let PendingRequest::Search { generation, .. } = &pending {
+                if *generation == self.search_generation {
+                    self.search_error = Some(error.message);
+                }
+                return;
+            }
+            if let PendingRequest::MessagesAround {
+                chat_id,
+                generation,
+                ..
+            } = &pending
+                && *generation == self.message_generation
+            {
+                self.search_target_message_id = None;
+                self.pending_search_scroll_id = None;
+                self.load_selected_chat(chat_id.clone());
+                self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
+                return;
+            }
             match &pending {
                 PendingRequest::SendText {
                     chat_id,
@@ -673,6 +988,53 @@ impl RustMeow {
                 if let Some(chat_id) = newest_chat_id {
                     self.repair_recent_reactions(chat_id);
                 }
+            }
+            (
+                PendingRequest::Search { query, generation },
+                rpc_response::Result::SearchLocal(results),
+            ) if generation == self.search_generation && self.search_query.trim() == query => {
+                self.search_results = SearchResults {
+                    contacts: results.contacts,
+                    groups: results.groups,
+                    messages: results.messages,
+                };
+                self.search_highlighted = 0;
+                self.search_error = None;
+                self.search_scroll.scroll_to_item(0, ScrollStrategy::Top);
+            }
+            (PendingRequest::OpenContact, rpc_response::Result::OpenContact(opened)) => {
+                if let Some(chat) = opened.chat {
+                    let chat_id = chat.id.clone();
+                    self.store.upsert_chat(chat);
+                    self.clear_search(window, cx);
+                    self.open_chat(chat_id, window, cx);
+                }
+            }
+            (
+                PendingRequest::MessagesAround {
+                    chat_id,
+                    message_id,
+                    generation,
+                },
+                rpc_response::Result::ListMessagesAround(page),
+            ) if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str())
+                && generation == self.message_generation
+                && page.anchor_message_id == message_id =>
+            {
+                self.store
+                    .replace_message_window(page.messages, page.has_older, page.has_newer);
+                self.pending_search_scroll_id = Some(message_id.clone());
+                self.search_target_message_id = Some(message_id.clone());
+                cx.spawn(async move |this, cx| {
+                    Timer::after(Duration::from_secs(3)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.search_target_message_id.as_deref() == Some(message_id.as_str()) {
+                            this.search_target_message_id = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
             }
             (PendingRequest::Avatar { chat_id }, rpc_response::Result::GetChatAvatar(avatar))
                 if avatar.chat_id == chat_id =>
@@ -1459,6 +1821,8 @@ impl RustMeow {
         self.reaction_details = None;
         self.image_viewer = None;
         self.scroll_to_bottom_generation = None;
+        self.search_target_message_id = None;
+        self.pending_search_scroll_id = None;
         self.image_download_attempted.clear();
         self.image_failures.clear();
         self.request(
@@ -1778,6 +2142,7 @@ impl RustMeow {
         let dark = cx.theme().is_dark();
         let chat_view = self.chat_view;
         let visible_chat_ids = Rc::new(self.store.chat_ids(chat_view));
+        let search_active = self.search_query.trim().chars().count() >= 2;
         let visible_count = visible_chat_ids.len();
         let has_more = !self.store.next_chat_cursor.is_empty();
         let virtual_count = visible_count + usize::from(has_more);
@@ -1817,7 +2182,7 @@ impl RustMeow {
             .border_color(cx.theme().border)
             .child(
                 v_flex()
-                    .h(px(88. * ui_scale))
+                    .h(px(132. * ui_scale))
                     .px_3()
                     .py_2()
                     .gap_1()
@@ -1908,83 +2273,89 @@ impl RustMeow {
                                 track
                                     .child(div().h_full().w_full().rounded_full().bg(rgb(0x25d366)))
                             }),
-                    ),
+                    )
+                    .child(div().pt_1().child(Input::new(&self.search_input).w_full())),
             )
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .child(
-                        uniform_list(
-                            list_id,
-                            virtual_count,
-                            cx.processor(move |this, range: Range<usize>, _, cx| {
-                                let loaded = visible_for_list.len();
-                                if range.end >= loaded && !this.store.next_chat_cursor.is_empty() {
-                                    this.load_chats(this.store.next_chat_cursor.clone());
-                                }
-                                if this.store.connection == proto::ConnectionState::Connected
-                                    && this
-                                        .store
-                                        .pending
-                                        .values()
-                                        .filter(|pending| {
-                                            matches!(pending, PendingRequest::Avatar { .. })
-                                        })
-                                        .count()
-                                        < 4
-                                    && let Some(chat_id) = range.clone().find_map(|index| {
-                                        visible_for_list.get(index).and_then(|chat_id| {
-                                            this.store.chat(chat_id).and_then(|chat| {
-                                                (chat.avatar_path.is_empty()
-                                                    && chat.kind() != proto::ChatKind::Other
-                                                    && !this.avatar_attempted.contains(&chat.id))
-                                                .then(|| chat.id.clone())
+                    .when(!search_active, |list| {
+                        list.child(
+                            uniform_list(
+                                list_id,
+                                virtual_count,
+                                cx.processor(move |this, range: Range<usize>, _, cx| {
+                                    let loaded = visible_for_list.len();
+                                    if range.end >= loaded
+                                        && !this.store.next_chat_cursor.is_empty()
+                                    {
+                                        this.load_chats(this.store.next_chat_cursor.clone());
+                                    }
+                                    if this.store.connection == proto::ConnectionState::Connected
+                                        && this
+                                            .store
+                                            .pending
+                                            .values()
+                                            .filter(|pending| {
+                                                matches!(pending, PendingRequest::Avatar { .. })
+                                            })
+                                            .count()
+                                            < 4
+                                        && let Some(chat_id) = range.clone().find_map(|index| {
+                                            visible_for_list.get(index).and_then(|chat_id| {
+                                                this.store.chat(chat_id).and_then(|chat| {
+                                                    (chat.avatar_path.is_empty()
+                                                        && chat.kind() != proto::ChatKind::Other
+                                                        && !this
+                                                            .avatar_attempted
+                                                            .contains(&chat.id))
+                                                    .then(|| chat.id.clone())
+                                                })
                                             })
                                         })
-                                    })
-                                {
-                                    this.load_avatar(chat_id);
-                                }
-                                range
-                                    .map(|index| {
-                                        let Some(chat) = visible_for_list
-                                            .get(index)
-                                            .and_then(|id| this.store.chat(id))
-                                            .cloned()
-                                        else {
-                                            return div()
-                                                .id(("loading-chat", index))
-                                                .h(px(72.))
-                                                .px_4()
-                                                .flex()
-                                                .items_center()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child("Loading more chats…");
-                                        };
-                                        let selected = this.store.selected_chat_id.as_deref()
-                                            == Some(chat.id.as_str());
-                                        let avatar = Avatar::new()
-                                            .name(chat.title.clone())
-                                            .with_size(px(42. * ui_scale));
-                                        let avatar = if chat.avatar_path.is_empty() {
-                                            avatar
-                                        } else {
-                                            avatar.src(PathBuf::from(chat.avatar_path.clone()))
-                                        };
-                                        let preview = if chat.phone_number.is_empty() {
-                                            chat.last_message_preview.clone()
-                                        } else if chat.last_message_preview.is_empty() {
-                                            chat.phone_number.clone()
-                                        } else {
-                                            format!(
-                                                "{} · {}",
-                                                chat.phone_number, chat.last_message_preview
-                                            )
-                                        };
-                                        div()
+                                    {
+                                        this.load_avatar(chat_id);
+                                    }
+                                    range
+                                        .map(|index| {
+                                            let Some(chat) = visible_for_list
+                                                .get(index)
+                                                .and_then(|id| this.store.chat(id))
+                                                .cloned()
+                                            else {
+                                                return div()
+                                                    .id(("loading-chat", index))
+                                                    .h(px(72.))
+                                                    .px_4()
+                                                    .flex()
+                                                    .items_center()
+                                                    .text_sm()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child("Loading more chats…");
+                                            };
+                                            let selected = this.store.selected_chat_id.as_deref()
+                                                == Some(chat.id.as_str());
+                                            let avatar = Avatar::new()
+                                                .name(chat.title.clone())
+                                                .with_size(px(42. * ui_scale));
+                                            let avatar = if chat.avatar_path.is_empty() {
+                                                avatar
+                                            } else {
+                                                avatar.src(PathBuf::from(chat.avatar_path.clone()))
+                                            };
+                                            let preview = if chat.phone_number.is_empty() {
+                                                chat.last_message_preview.clone()
+                                            } else if chat.last_message_preview.is_empty() {
+                                                chat.phone_number.clone()
+                                            } else {
+                                                format!(
+                                                    "{} · {}",
+                                                    chat.phone_number, chat.last_message_preview
+                                                )
+                                            };
+                                            div()
                                             .id(("chat", index))
                                             .h(px(72. * ui_scale))
                                             .px_3()
@@ -2038,13 +2409,14 @@ impl RustMeow {
                                                             .child(preview),
                                                     ),
                                             )
-                                    })
-                                    .collect::<Vec<_>>()
-                            }),
+                                        })
+                                        .collect::<Vec<_>>()
+                                }),
+                            )
+                            .h_full(),
                         )
-                        .h_full(),
-                    )
-                    .when(visible_count == 0 && !has_more, |list| {
+                    })
+                    .when(!search_active && visible_count == 0 && !has_more, |list| {
                         list.child(
                             div()
                                 .absolute()
@@ -2061,8 +2433,292 @@ impl RustMeow {
                                     "No chats yet"
                                 }),
                         )
+                    })
+                    .when(search_active, |list| {
+                        list.child(self.render_search_results(cx))
                     }),
             )
+    }
+
+    fn render_search_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let pending = self.store.pending.values().any(|pending| {
+            matches!(pending, PendingRequest::Search { generation, .. } if *generation == self.search_generation)
+        });
+        let total = self.search_results.len();
+        let query_len = self.search_query.trim().chars().count();
+        let mut content = v_flex().absolute().inset_0().bg(cx.theme().background);
+        if pending && total == 0 {
+            return content.child(
+                div()
+                    .p_4()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Searching local data…"),
+            );
+        }
+        if let Some(error) = self.search_error.clone() {
+            return content.child(div().p_4().text_sm().text_color(rgb(0xb91c1c)).child(error));
+        }
+        if total == 0 {
+            return content.child(
+                div()
+                    .p_4()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if query_len < 3 {
+                        "No contacts or groups found · type 3 characters to search messages"
+                    } else {
+                        "No local results"
+                    }),
+            );
+        }
+
+        let rows = Rc::new(self.search_results.rows());
+        let row_sizes = Rc::new(
+            rows.iter()
+                .map(|row| {
+                    let height = match row {
+                        SearchResultRow::Header { .. } => 30.,
+                        SearchResultRow::Contact { .. } | SearchResultRow::Group { .. } => 58.,
+                        SearchResultRow::Message { .. } => 68.,
+                    };
+                    size(px(1.), px(height * self.ui_scale))
+                })
+                .collect::<Vec<_>>(),
+        );
+        let rows_for_list = rows.clone();
+        content = content.child(
+            v_flex()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    v_virtual_list(
+                        cx.entity().clone(),
+                        "search-result-list",
+                        row_sizes,
+                        move |this, visible_range, _, cx| {
+                            visible_range
+                                .filter_map(|row_index| rows_for_list.get(row_index).cloned())
+                                .filter_map(|row| this.render_search_result_row(row, cx))
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    .track_scroll(&self.search_scroll),
+                )
+                .scrollbar(&self.search_scroll, ScrollbarAxis::Vertical),
+        );
+        if query_len < 3 {
+            content = content.child(
+                div()
+                    .flex_none()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Type 3 characters to include messages"),
+            );
+        }
+        content
+    }
+
+    fn render_search_result_row(
+        &self,
+        row: SearchResultRow,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let selected_background = if cx.theme().is_dark() {
+            rgb(0x173f35)
+        } else {
+            rgb(0xd9fdd3)
+        };
+        let hover_background = if cx.theme().is_dark() {
+            rgb(0x202c33)
+        } else {
+            rgb(0xf0f2f5)
+        };
+        match row {
+            SearchResultRow::Header { title, count } => Some(
+                h_flex()
+                    .h(px(30. * self.ui_scale))
+                    .px_3()
+                    .items_center()
+                    .justify_between()
+                    .bg(cx.theme().secondary)
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(title)
+                    .child(count.to_string())
+                    .into_any_element(),
+            ),
+            SearchResultRow::Contact {
+                result_index,
+                source_index,
+            } => {
+                let contact = self.search_results.contacts.get(source_index)?.clone();
+                let subtitle = match (
+                    contact.secondary_name.is_empty(),
+                    contact.phone_number.is_empty(),
+                ) {
+                    (false, false) => {
+                        format!("{} · {}", contact.secondary_name, contact.phone_number)
+                    }
+                    (false, true) => contact.secondary_name.clone(),
+                    (true, false) => contact.phone_number.clone(),
+                    (true, true) => "WhatsApp contact".into(),
+                };
+                Some(
+                    h_flex()
+                        .id(("search-contact", result_index))
+                        .h(px(58. * self.ui_scale))
+                        .px_3()
+                        .gap_3()
+                        .items_center()
+                        .cursor_pointer()
+                        .when(result_index == self.search_highlighted, |row| {
+                            row.bg(selected_background)
+                        })
+                        .hover(move |style| style.bg(hover_background))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.search_highlighted = result_index;
+                            this.activate_search_result(window, cx);
+                        }))
+                        .child(
+                            Avatar::new()
+                                .name(contact.display_name.clone())
+                                .with_size(px(38.)),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(contact.display_name),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(subtitle),
+                                ),
+                        )
+                        .into_any_element(),
+                )
+            }
+            SearchResultRow::Group {
+                result_index,
+                source_index,
+            } => {
+                let chat = self.search_results.groups.get(source_index)?.clone();
+                let preview = if chat.last_message_preview.is_empty() {
+                    "No messages yet".to_string()
+                } else {
+                    chat.last_message_preview.clone()
+                };
+                Some(
+                    h_flex()
+                        .id(("search-group", result_index))
+                        .h(px(58. * self.ui_scale))
+                        .px_3()
+                        .gap_3()
+                        .items_center()
+                        .cursor_pointer()
+                        .when(result_index == self.search_highlighted, |row| {
+                            row.bg(selected_background)
+                        })
+                        .hover(move |style| style.bg(hover_background))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.search_highlighted = result_index;
+                            this.activate_search_result(window, cx);
+                        }))
+                        .child(Avatar::new().name(chat.title.clone()).with_size(px(38.)))
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(chat.title),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(preview),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if chat.archived { "Archived" } else { "Group" }),
+                        )
+                        .into_any_element(),
+                )
+            }
+            SearchResultRow::Message {
+                result_index,
+                source_index,
+            } => {
+                let message = self.search_results.messages.get(source_index)?.clone();
+                let meta = if message.archived {
+                    format!("{} · Archived", message.sender_name)
+                } else {
+                    message.sender_name.clone()
+                };
+                Some(
+                    v_flex()
+                        .id(("search-message", result_index))
+                        .h(px(68. * self.ui_scale))
+                        .px_3()
+                        .py_2()
+                        .cursor_pointer()
+                        .when(result_index == self.search_highlighted, |row| {
+                            row.bg(selected_background)
+                        })
+                        .hover(move |style| style.bg(hover_background))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.search_highlighted = result_index;
+                            this.activate_search_result(window, cx);
+                        }))
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .truncate()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(message.chat_title),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(meta),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(message.snippet),
+                        )
+                        .into_any_element(),
+                )
+            }
+        }
     }
 
     fn render_conversation(
@@ -2117,6 +2773,16 @@ impl RustMeow {
                 .fold(px(0.), |height, size| height + size.height + px(8.));
             self.message_scroll
                 .set_offset(point(old_offset.x, old_offset.y - inserted_height));
+        }
+        if let Some(target_id) = self.pending_search_scroll_id.take()
+            && let Some(index) = self
+                .store
+                .messages
+                .iter()
+                .position(|message| message.id == target_id)
+        {
+            self.message_scroll
+                .scroll_to_item(index, ScrollStrategy::Center);
         }
         let connected = self.store.connection == proto::ConnectionState::Connected;
         let has_older = self.store.has_older_messages;
@@ -2981,6 +3647,7 @@ impl RustMeow {
             .map(|reply| reply.id.clone());
         let chat_id = message.chat_id.clone();
         let message_id = message.id.clone();
+        let search_target = self.search_target_message_id.as_deref() == Some(message.id.as_str());
         let reply_action_message_id = message_id.clone();
         let message_image_chat_id = chat_id.clone();
         let message_image_id = message_id.clone();
@@ -3037,6 +3704,9 @@ impl RustMeow {
                     .max_w(px(560.))
                     .when(!sticker, |bubble| bubble.px_3().py_2())
                     .rounded_lg()
+                    .when(search_target, |bubble| {
+                        bubble.border_2().border_color(rgb(0x25d366))
+                    })
                     .gap_1()
                     .bg(if sticker {
                         gpui::transparent_black().into()
@@ -3444,7 +4114,47 @@ impl Render for RustMeow {
                     }
                 }),
             )
-            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.modifiers.secondary() && event.keystroke.key == "k" {
+                    this.focus_search(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                let composer_focused = this.composer.read(cx).focus_handle(cx).is_focused(window);
+                let emoji_focused = this
+                    .emoji_search
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window);
+                let search_focused = this
+                    .search_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window);
+                if event.keystroke.key == "/"
+                    && !event.keystroke.modifiers.modified()
+                    && !composer_focused
+                    && !emoji_focused
+                    && !search_focused
+                {
+                    this.focus_search(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                if search_focused && this.search_query.trim().chars().count() >= 2 {
+                    match event.keystroke.key.as_str() {
+                        "down" => this.move_search_selection(false),
+                        "up" => this.move_search_selection(true),
+                        "enter" => this.activate_search_result(window, cx),
+                        "escape" => this.clear_search(window, cx),
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if this.chat_switcher.is_some() && event.keystroke.key == "escape" {
                     this.cancel_chat_switcher();
                     cx.stop_propagation();
@@ -3588,6 +4298,91 @@ fn main() {
 #[cfg(test)]
 mod reaction_details_ui_tests {
     use super::*;
+
+    #[test]
+    fn search_results_keep_contacts_groups_and_messages_in_priority_order() {
+        let results = SearchResults {
+            contacts: vec![proto::ContactSearchResult {
+                contact_jid: "alice@s.whatsapp.net".into(),
+                ..Default::default()
+            }],
+            groups: vec![proto::Chat {
+                id: "group".into(),
+                ..Default::default()
+            }],
+            messages: vec![proto::MessageSearchResult {
+                chat_id: "chat".into(),
+                message_id: "message".into(),
+                ..Default::default()
+            }],
+        };
+        assert!(matches!(results.target(0), Some(SearchTarget::Contact(_))));
+        assert!(matches!(results.target(1), Some(SearchTarget::Group(_))));
+        assert!(matches!(
+            results.target(2),
+            Some(SearchTarget::Message { .. })
+        ));
+        assert!(results.target(3).is_none());
+        let rows = results.rows();
+        assert_eq!(rows.len(), 6);
+        assert!(matches!(
+            rows[0],
+            SearchResultRow::Header {
+                title: "Contacts",
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[1],
+            SearchResultRow::Contact {
+                result_index: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[2],
+            SearchResultRow::Header {
+                title: "Groups",
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[3],
+            SearchResultRow::Group {
+                result_index: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[4],
+            SearchResultRow::Header {
+                title: "Messages",
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[5],
+            SearchResultRow::Message {
+                result_index: 2,
+                ..
+            }
+        ));
+        assert_eq!(results.row_index_for_result(0), Some(1));
+        assert_eq!(results.row_index_for_result(1), Some(3));
+        assert_eq!(results.row_index_for_result(2), Some(5));
+        assert_eq!(results.row_index_for_result(3), None);
+    }
+
+    #[test]
+    fn virtual_search_row_mapping_skips_empty_sections() {
+        let results = SearchResults {
+            groups: vec![proto::Chat::default(), proto::Chat::default()],
+            ..Default::default()
+        };
+        assert_eq!(results.rows().len(), 3);
+        assert_eq!(results.row_index_for_result(0), Some(1));
+        assert_eq!(results.row_index_for_result(1), Some(2));
+    }
 
     #[test]
     fn inspector_state_is_scoped_to_exact_message_and_emoji() {
