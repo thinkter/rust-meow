@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,12 +19,13 @@ import (
 	bridgev1 "github.com/rust-meow/rust-meow/backend/gen/bridgev1"
 	"github.com/rust-meow/rust-meow/backend/internal/bridge"
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
+	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
 	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"github.com/rust-meow/rust-meow/backend/internal/wa"
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 8
+const ProtocolVersion uint32 = 9
 const maxTextBytes = 65_536
 
 type Server struct {
@@ -236,6 +238,35 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			messages[i] = s.wireMessageWithIdentities(page.Items[i], identities)
 		}
 		return &bridgev1.RpcResponse_ListMessages{ListMessages: &bridgev1.ListMessagesResponse{Messages: messages, HasMore: page.NextCursor != ""}}, nil
+	case *bridgev1.RpcRequest_SearchLocal:
+		query := strings.TrimSpace(req.SearchLocal.GetQuery())
+		if !utf8.ValidString(query) || utf8.RuneCountInString(query) < 2 || len(query) > 256 {
+			return nil, fail("invalid_argument", "query must be valid UTF-8 containing 2 to 256 bytes", false)
+		}
+		return s.searchLocal(query)
+	case *bridgev1.RpcRequest_OpenContact:
+		if req.OpenContact.GetContactJid() == "" {
+			return nil, fail("invalid_argument", "contact_jid is required", false)
+		}
+		chat, err := s.wa.OpenContact(s.ctx, req.OpenContact.GetContactJid())
+		if err != nil {
+			return nil, fail("invalid_argument", err.Error(), false)
+		}
+		return &bridgev1.RpcResponse_OpenContact{OpenContact: &bridgev1.OpenContactResponse{Chat: s.wireChat(chat)}}, nil
+	case *bridgev1.RpcRequest_ListMessagesAround:
+		if req.ListMessagesAround.GetChatId() == "" || req.ListMessagesAround.GetMessageId() == "" {
+			return nil, fail("invalid_argument", "chat_id and message_id are required", false)
+		}
+		window, err := s.store.MessagesAround(s.ctx, req.ListMessagesAround.GetChatId(), req.ListMessagesAround.GetMessageId(), 25)
+		if err != nil {
+			return nil, err
+		}
+		messages := make([]*bridgev1.Message, len(window.Items))
+		identities := make(map[string]wireIdentity)
+		for i := range window.Items {
+			messages[i] = s.wireMessageWithIdentities(window.Items[i], identities)
+		}
+		return &bridgev1.RpcResponse_ListMessagesAround{ListMessagesAround: &bridgev1.ListMessagesAroundResponse{Messages: messages, HasOlder: window.HasOlder, HasNewer: window.HasNewer, AnchorMessageId: window.AnchorID}}, nil
 	case *bridgev1.RpcRequest_SendText:
 		if req.SendText.GetClientMessageId() == "" || req.SendText.GetChatId() == "" || req.SendText.GetText() == "" {
 			return nil, fail("invalid_argument", "client_message_id, chat_id and text are required", false)
@@ -344,6 +375,77 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 	}
 }
 
+func (s *Server) searchLocal(query string) (any, error) {
+	contacts, err := s.wa.SearchContacts(s.ctx, query, 8)
+	if err != nil {
+		return nil, err
+	}
+	contactResults := make([]*bridgev1.ContactSearchResult, len(contacts))
+	for i := range contacts {
+		contactResults[i] = &bridgev1.ContactSearchResult{ContactJid: contacts[i].JID, ChatId: contacts[i].ChatID, DisplayName: contacts[i].DisplayName, SecondaryName: contacts[i].SecondaryName, PhoneNumber: contacts[i].PhoneNumber}
+	}
+	groups, err := s.store.Groups(s.ctx)
+	if err != nil {
+		return nil, err
+	}
+	type rankedGroup struct {
+		chat  domain.Chat
+		score int
+	}
+	matcher := searchutil.New(query)
+	rankedGroups := make([]rankedGroup, 0, len(groups))
+	for _, group := range groups {
+		if score := matcher.Score(group.Name); score != searchutil.NoMatch {
+			rankedGroups = append(rankedGroups, rankedGroup{chat: group, score: score + 250})
+		}
+	}
+	sort.Slice(rankedGroups, func(i, j int) bool {
+		if rankedGroups[i].score != rankedGroups[j].score {
+			return rankedGroups[i].score > rankedGroups[j].score
+		}
+		if !rankedGroups[i].chat.LastMessageAt.Equal(rankedGroups[j].chat.LastMessageAt) {
+			return rankedGroups[i].chat.LastMessageAt.After(rankedGroups[j].chat.LastMessageAt)
+		}
+		return rankedGroups[i].chat.JID < rankedGroups[j].chat.JID
+	})
+	if len(rankedGroups) > 6 {
+		rankedGroups = rankedGroups[:6]
+	}
+	groupResults := make([]*bridgev1.Chat, len(rankedGroups))
+	for i := range rankedGroups {
+		groupResults[i] = s.wireChat(rankedGroups[i].chat)
+	}
+	messageResults := make([]*bridgev1.MessageSearchResult, 0)
+	if utf8.RuneCountInString(searchutil.Normalize(query)) >= 3 {
+		hits, searchErr := s.store.SearchMessages(s.ctx, query, 20)
+		if searchErr != nil {
+			return nil, searchErr
+		}
+		chatCache := make(map[string]*bridgev1.Chat)
+		for _, hit := range hits {
+			chat, ok := chatCache[hit.Chat.JID]
+			if !ok {
+				chat = s.wireChat(hit.Chat)
+				chatCache[hit.Chat.JID] = chat
+			}
+			senderName := "You"
+			if !hit.FromMe {
+				senderName = preferredContactName(s.wa.ContactDetails(s.ctx, hit.SenderJID), hit.SenderJID)
+			}
+			messageResults = append(messageResults, &bridgev1.MessageSearchResult{ChatId: hit.Chat.JID, MessageId: hit.MessageID, ChatTitle: chat.GetTitle(), SenderName: senderName, TimestampMs: hit.Timestamp.UnixMilli(), Snippet: truncateRunes(hit.Text, 180), Kind: hit.Kind, Archived: hit.Chat.Archived, Chat: chat})
+		}
+	}
+	return &bridgev1.RpcResponse_SearchLocal{SearchLocal: &bridgev1.SearchLocalResponse{Contacts: contactResults, Groups: groupResults, Messages: messageResults}}, nil
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "…"
+}
+
 func success(result any) *bridgev1.RpcResponse {
 	response := &bridgev1.RpcResponse{}
 	switch value := result.(type) {
@@ -370,6 +472,12 @@ func success(result any) *bridgev1.RpcResponse {
 	case *bridgev1.RpcResponse_SendImage:
 		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageImage:
+		response.Result = value
+	case *bridgev1.RpcResponse_SearchLocal:
+		response.Result = value
+	case *bridgev1.RpcResponse_OpenContact:
+		response.Result = value
+	case *bridgev1.RpcResponse_ListMessagesAround:
 		response.Result = value
 	case *bridgev1.RpcResponse_MarkRead:
 		response.Result = value
