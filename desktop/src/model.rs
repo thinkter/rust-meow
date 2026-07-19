@@ -75,6 +75,16 @@ pub enum PendingRequest {
         prepend: bool,
         generation: u64,
     },
+    Search {
+        query: String,
+        generation: u64,
+    },
+    OpenContact,
+    MessagesAround {
+        chat_id: String,
+        message_id: String,
+        generation: u64,
+    },
     Avatar {
         chat_id: String,
     },
@@ -244,6 +254,26 @@ impl Store {
             self.messages.truncate(MAX_ACTIVE_MESSAGES);
             self.has_newer_messages = true;
         }
+        self.reindex_messages();
+        self.rebuild_message_sizes();
+    }
+
+    pub fn replace_message_window(
+        &mut self,
+        mut messages: Vec<proto::Message>,
+        has_older: bool,
+        has_newer: bool,
+    ) {
+        messages.sort_by(|left, right| {
+            (left.timestamp_ms, left.id.as_str()).cmp(&(right.timestamp_ms, right.id.as_str()))
+        });
+        if messages.len() > MAX_ACTIVE_MESSAGES {
+            messages.drain(..messages.len() - MAX_ACTIVE_MESSAGES);
+        }
+        self.messages = messages;
+        self.has_older_messages = has_older;
+        self.has_newer_messages = has_newer;
+        self.newer_activity = false;
         self.reindex_messages();
         self.rebuild_message_sizes();
     }
@@ -1029,5 +1059,29 @@ mod tests {
         assert_eq!(store.selected_chat_id.as_deref(), Some("c:new"));
         assert!(store.chats.iter().all(|chat| chat.id != "c:old"));
         assert_eq!(store.chat_index.get("c:new"), Some(&0));
+    }
+
+    #[test]
+    fn centered_message_window_preserves_order_and_navigation_flags() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(3), message(1), message(2)], true, true);
+        assert_eq!(
+            store
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2", "3"]
+        );
+        assert!(store.has_older_messages);
+        assert!(store.has_newer_messages);
+        assert!(!store.newer_activity);
+        assert_eq!(
+            store.message("2").map(|message| message.id.as_str()),
+            Some("2")
+        );
     }
 }
