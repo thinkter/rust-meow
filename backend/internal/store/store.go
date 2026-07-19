@@ -72,8 +72,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if hasVersionTable {
-		if err := db.QueryRowContext(ctx, `SELECT max(version) FROM schema_version`).Scan(&currentVersion); err == nil && currentVersion > 9 {
-			return fmt.Errorf("database schema version %d is newer than supported version 9", currentVersion)
+		if err := db.QueryRowContext(ctx, `SELECT max(version) FROM schema_version`).Scan(&currentVersion); err == nil && currentVersion > 10 {
+			return fmt.Errorf("database schema version %d is newer than supported version 10", currentVersion)
 		}
 	}
 	// v8 deliberately replaces raw-JID chat identity with opaque local
@@ -293,37 +293,38 @@ CREATE INDEX IF NOT EXISTS legacy_reaction_replays_request_idx ON legacy_reactio
 		return err
 	}
 	defer tx.Rollback()
-	// v6 preserves every legacy reaction event before the pseudo-message rows
-	// are deleted. These exact event IDs can be re-requested from the primary.
-	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO legacy_reaction_replays(chat_jid,transport_jid,event_message_id,sender_jid,timestamp,from_me)
+	if currentVersion < 9 {
+		// v6 preserves every legacy reaction event before the pseudo-message rows
+		// are deleted. These exact event IDs can be re-requested from the primary.
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO legacy_reaction_replays(chat_jid,transport_jid,event_message_id,sender_jid,timestamp,from_me)
 	SELECT chat_jid,transport_jid,id,sender_jid,timestamp,from_me FROM messages WHERE kind='reaction'`); err != nil {
-		return fmt.Errorf("preserve legacy reaction events: %w", err)
-	}
-	// Preserve one real WhatsApp reaction-event anchor per affected chat before
-	// removing the old pseudo-message representation. Asking the primary for the
-	// 50 messages immediately before this anchor recovers target-message reaction
-	// aggregates without scanning unrelated chats.
-	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO reaction_repair_jobs(chat_jid,transport_jid,anchor_message_id,anchor_timestamp,anchor_from_me,legacy_reaction_at,legacy_reaction_id)
+			return fmt.Errorf("preserve legacy reaction events: %w", err)
+		}
+		// Preserve one real WhatsApp reaction-event anchor per affected chat before
+		// removing the old pseudo-message representation. Asking the primary for the
+		// 50 messages immediately before this anchor recovers target-message reaction
+		// aggregates without scanning unrelated chats.
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO reaction_repair_jobs(chat_jid,transport_jid,anchor_message_id,anchor_timestamp,anchor_from_me,legacy_reaction_at,legacy_reaction_id)
 	SELECT m.chat_jid,m.transport_jid,m.id,m.timestamp,m.from_me,m.timestamp,m.id FROM messages m
 	WHERE m.kind='reaction' AND NOT EXISTS (
   SELECT 1 FROM messages newer WHERE newer.chat_jid=m.chat_jid AND newer.kind='reaction'
     AND (newer.timestamp>m.timestamp OR (newer.timestamp=m.timestamp AND newer.id>m.id))
 )`); err != nil {
-		return fmt.Errorf("record legacy reaction repair jobs: %w", err)
-	}
-	if _, err = tx.ExecContext(ctx, `UPDATE reaction_repair_jobs SET
+			return fmt.Errorf("record legacy reaction repair jobs: %w", err)
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE reaction_repair_jobs SET
 	legacy_reaction_at=CASE WHEN legacy_reaction_at=0 THEN anchor_timestamp ELSE legacy_reaction_at END,
 	legacy_reaction_id=CASE WHEN legacy_reaction_id='' THEN anchor_message_id ELSE legacy_reaction_id END
 	WHERE legacy_reaction_at=0 OR legacy_reaction_id=''`); err != nil {
-		return fmt.Errorf("backfill legacy reaction repair timestamps: %w", err)
-	}
-	// Use the first visible message after the legacy reaction span as the peer
-	// history cursor. It is accepted by the primary and keeps the bounded
-	// 50-message page centered on the affected targets. An earlier cursor is not
-	// a safe fallback because the peer history request is exclusive and would
-	// omit that cursor message itself. Leave the cursor empty until a later
-	// visible message exists; BeginReactionRepair will adopt one dynamically.
-	if _, err = tx.ExecContext(ctx, `UPDATE reaction_repair_jobs SET
+			return fmt.Errorf("backfill legacy reaction repair timestamps: %w", err)
+		}
+		// Use the first visible message after the legacy reaction span as the peer
+		// history cursor. It is accepted by the primary and keeps the bounded
+		// 50-message page centered on the affected targets. An earlier cursor is not
+		// a safe fallback because the peer history request is exclusive and would
+		// omit that cursor message itself. Leave the cursor empty until a later
+		// visible message exists; BeginReactionRepair will adopt one dynamically.
+		if _, err = tx.ExecContext(ctx, `UPDATE reaction_repair_jobs SET
 	anchor_message_id=COALESCE(
 	  (SELECT id FROM messages WHERE chat_jid=reaction_repair_jobs.chat_jid AND kind<>'reaction' AND (timestamp>reaction_repair_jobs.legacy_reaction_at OR (timestamp=reaction_repair_jobs.legacy_reaction_at AND id>reaction_repair_jobs.legacy_reaction_id)) ORDER BY timestamp ASC,id ASC LIMIT 1),
 	  ''),
@@ -333,30 +334,61 @@ CREATE INDEX IF NOT EXISTS legacy_reaction_replays_request_idx ON legacy_reactio
 	anchor_from_me=COALESCE(
 	  (SELECT from_me FROM messages WHERE chat_jid=reaction_repair_jobs.chat_jid AND kind<>'reaction' AND (timestamp>reaction_repair_jobs.legacy_reaction_at OR (timestamp=reaction_repair_jobs.legacy_reaction_at AND id>reaction_repair_jobs.legacy_reaction_id)) ORDER BY timestamp ASC,id ASC LIMIT 1),
 	  0)`); err != nil {
-		return fmt.Errorf("select visible reaction repair cursors: %w", err)
-	}
-	if currentVersion < 5 {
-		if _, err = tx.ExecContext(ctx, `UPDATE reaction_repair_jobs SET requested_at=0,attempts=0,completed_at=0`); err != nil {
-			return fmt.Errorf("reset v5 reaction repair jobs: %w", err)
+			return fmt.Errorf("select visible reaction repair cursors: %w", err)
 		}
-	}
-	if currentVersion < 6 {
-		if _, err = tx.ExecContext(ctx, `UPDATE reaction_repair_jobs SET requested_at=0,attempts=0,completed_at=0 WHERE chat_jid IN (SELECT DISTINCT chat_jid FROM legacy_reaction_replays)`); err != nil {
-			return fmt.Errorf("reset targeted v6 reaction repairs: %w", err)
+		if currentVersion < 5 {
+			if _, err = tx.ExecContext(ctx, `UPDATE reaction_repair_jobs SET requested_at=0,attempts=0,completed_at=0`); err != nil {
+				return fmt.Errorf("reset v5 reaction repair jobs: %w", err)
+			}
 		}
-	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM messages WHERE kind='reaction'`); err != nil {
-		return fmt.Errorf("remove legacy reaction messages: %w", err)
-	}
-	if _, err = tx.ExecContext(ctx, `UPDATE chats SET
+		if currentVersion < 6 {
+			if _, err = tx.ExecContext(ctx, `UPDATE reaction_repair_jobs SET requested_at=0,attempts=0,completed_at=0 WHERE chat_jid IN (SELECT DISTINCT chat_jid FROM legacy_reaction_replays)`); err != nil {
+				return fmt.Errorf("reset targeted v6 reaction repairs: %w", err)
+			}
+		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM messages WHERE kind='reaction'`); err != nil {
+			return fmt.Errorf("remove legacy reaction messages: %w", err)
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE chats SET
 last_message_id=COALESCE((SELECT id FROM messages WHERE chat_jid=chats.jid ORDER BY timestamp DESC,id DESC LIMIT 1),''),
 last_message_text=COALESCE((SELECT text FROM messages WHERE chat_jid=chats.jid ORDER BY timestamp DESC,id DESC LIMIT 1),''),
 last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=chats.jid ORDER BY timestamp DESC,id DESC LIMIT 1),0),
 unread_count=(SELECT count(*) FROM messages WHERE chat_jid=chats.jid AND unread=1)`); err != nil {
-		return fmt.Errorf("repair chat metadata after reaction cleanup: %w", err)
+			return fmt.Errorf("repair chat metadata after reaction cleanup: %w", err)
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=9`); err != nil {
+			return fmt.Errorf("record schema v9: %w", err)
+		}
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=9`); err != nil {
-		return fmt.Errorf("record schema v9: %w", err)
+	if currentVersion < 10 {
+		const searchSchema = `
+CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(
+  text, image_caption, media_file_name, contacts_json, location_name, location_address,
+  content='messages', content_rowid='rowid', tokenize='trigram', detail='none'
+);
+CREATE TRIGGER IF NOT EXISTS message_search_ai AFTER INSERT ON messages BEGIN
+  INSERT INTO message_search(rowid,text,image_caption,media_file_name,contacts_json,location_name,location_address)
+  VALUES(new.rowid,new.text,new.image_caption,new.media_file_name,new.contacts_json,new.location_name,new.location_address);
+END;
+CREATE TRIGGER IF NOT EXISTS message_search_ad AFTER DELETE ON messages BEGIN
+  INSERT INTO message_search(message_search,rowid,text,image_caption,media_file_name,contacts_json,location_name,location_address)
+  VALUES('delete',old.rowid,old.text,old.image_caption,old.media_file_name,old.contacts_json,old.location_name,old.location_address);
+END;
+CREATE TRIGGER IF NOT EXISTS message_search_au AFTER UPDATE OF text,image_caption,media_file_name,contacts_json,location_name,location_address ON messages BEGIN
+  INSERT INTO message_search(message_search,rowid,text,image_caption,media_file_name,contacts_json,location_name,location_address)
+  VALUES('delete',old.rowid,old.text,old.image_caption,old.media_file_name,old.contacts_json,old.location_name,old.location_address);
+  INSERT INTO message_search(rowid,text,image_caption,media_file_name,contacts_json,location_name,location_address)
+  VALUES(new.rowid,new.text,new.image_caption,new.media_file_name,new.contacts_json,new.location_name,new.location_address);
+END;`
+		if _, err = tx.ExecContext(ctx, searchSchema); err != nil {
+			return fmt.Errorf("create message search index: %w", err)
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO message_search(message_search) VALUES('rebuild')`); err != nil {
+			return fmt.Errorf("backfill message search index: %w", err)
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=10`); err != nil {
+			return fmt.Errorf("record schema v10: %w", err)
+		}
 	}
 	return tx.Commit()
 }

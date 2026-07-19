@@ -41,7 +41,7 @@ CREATE TABLE messages(id TEXT NOT NULL,chat_jid TEXT NOT NULL,sender_jid TEXT NO
 	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 9 {
+	if version != 10 {
 		t.Fatalf("version=%d", version)
 	}
 	var indexCount int
@@ -120,6 +120,9 @@ func TestV8CacheMigratesInPlaceToRichContentSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err = db.ExecContext(ctx, `DROP TRIGGER message_search_ai; DROP TRIGGER message_search_ad; DROP TRIGGER message_search_au; DROP TABLE message_search`); err != nil {
+		t.Fatal(err)
+	}
 	for _, column := range []string{"image_animated", "media_file_name", "media_duration", "media_voice", "contacts_json", "location_lat", "location_lng", "location_name", "location_address", "location_url", "location_live"} {
 		if _, err = db.ExecContext(ctx, `ALTER TABLE messages DROP COLUMN `+column); err != nil {
 			t.Fatalf("drop %s: %v", column, err)
@@ -141,7 +144,7 @@ func TestV8CacheMigratesInPlaceToRichContentSchema(t *testing.T) {
 		t.Fatalf("message=%+v err=%v", message, err)
 	}
 	var version int
-	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil || version != 9 {
+	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil || version != 10 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 }
