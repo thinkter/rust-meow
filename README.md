@@ -13,6 +13,8 @@ This repository currently implements the first two MVP slices:
 - idempotent live/history message reduction into SQLite;
 - unified local conversations that bind WhatsApp PN and LID transport aliases;
 - cursor-paged chats and keyset-paged messages;
+- prioritized fuzzy local search across contacts, groups, and message metadata,
+  with exact-message navigation;
 - text send/receive, delivery/read receipts, mark-read, reconnect, logout, and
   graceful shutdown;
 - confirmed logout with a fail-closed, transactional local account-data wipe;
