@@ -3709,7 +3709,7 @@ impl RustMeow {
                     })
                     .gap_1()
                     .bg(if sticker {
-                        gpui::transparent_black().into()
+                        gpui::transparent_black()
                     } else if message.from_me {
                         if cx.theme().is_dark() {
                             rgb(0x173f35).into()
