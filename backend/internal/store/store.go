@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
+	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
 	_ "modernc.org/sqlite"
 )
 
@@ -786,6 +789,121 @@ FROM chats WHERE (last_message_at < ? OR (last_message_at = ? AND jid < ?)) ORDE
 	return page, rows.Err()
 }
 
+func (s *Store) Groups(ctx context.Context) ([]domain.Chat, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT jid,preferred_jid,name,last_message_id,last_message_text,last_message_at,unread_count,muted_until,archived
+FROM chats WHERE preferred_jid LIKE '%@g.us' ORDER BY last_message_at DESC,jid DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	groups := make([]domain.Chat, 0)
+	for rows.Next() {
+		var chat domain.Chat
+		var timestamp, muted int64
+		if err = rows.Scan(&chat.JID, &chat.AddressJID, &chat.Name, &chat.LastMessageID, &chat.LastMessageText, &timestamp, &chat.UnreadCount, &muted, &chat.Archived); err != nil {
+			return nil, err
+		}
+		chat.LastMessageAt = unixMilli(timestamp)
+		chat.MutedUntil = unixMilli(muted)
+		groups = append(groups, chat)
+	}
+	return groups, rows.Err()
+}
+
+func (s *Store) SearchMessages(ctx context.Context, query string, limit int) ([]domain.MessageSearchHit, error) {
+	matcher := searchutil.New(query)
+	trigrams := searchTrigrams(matcher.Query())
+	if len(trigrams) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id,m.chat_jid,m.sender_jid,m.text,m.timestamp,m.from_me,m.kind,
+m.image_caption,m.media_file_name,m.contacts_json,m.location_name,m.location_address,
+c.preferred_jid,c.name,c.last_message_id,c.last_message_text,c.last_message_at,c.unread_count,c.muted_until,c.archived
+FROM message_search JOIN messages m ON m.rowid=message_search.rowid JOIN chats c ON c.jid=m.chat_jid
+WHERE message_search MATCH ? AND m.kind<>'reaction' AND m.revoked=0 ORDER BY rank,m.timestamp DESC LIMIT 256`, strings.Join(trigrams, " OR "))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hits := make([]domain.MessageSearchHit, 0, limit)
+	for rows.Next() {
+		var hit domain.MessageSearchHit
+		var imageCaption, fileName, contactsJSON, locationName, locationAddress string
+		var timestamp, chatTimestamp, muted int64
+		if err = rows.Scan(&hit.MessageID, &hit.Chat.JID, &hit.SenderJID, &hit.Text, &timestamp, &hit.FromMe, &hit.Kind,
+			&imageCaption, &fileName, &contactsJSON, &locationName, &locationAddress,
+			&hit.Chat.AddressJID, &hit.Chat.Name, &hit.Chat.LastMessageID, &hit.Chat.LastMessageText, &chatTimestamp, &hit.Chat.UnreadCount, &muted, &hit.Chat.Archived); err != nil {
+			return nil, err
+		}
+		hit.Timestamp = unixMilli(timestamp)
+		hit.Chat.LastMessageAt = unixMilli(chatTimestamp)
+		hit.Chat.MutedUntil = unixMilli(muted)
+		fields := []struct {
+			value string
+			bonus int
+		}{
+			{hit.Text, 200}, {imageCaption, 180}, {fileName, 160},
+			{contactsJSON, 150}, {locationName, 150}, {locationAddress, 150},
+		}
+		hit.Score = searchutil.NoMatch
+		searchParts := make([]string, 0, len(fields))
+		for _, field := range fields {
+			if field.value == "" {
+				continue
+			}
+			searchParts = append(searchParts, field.value)
+			if score := matcher.Score(field.value); score != searchutil.NoMatch && score+field.bonus > hit.Score {
+				hit.Score = score + field.bonus
+			}
+		}
+		if hit.Score == searchutil.NoMatch {
+			continue
+		}
+		hit.SearchText = strings.Join(searchParts, " · ")
+		hits = append(hits, hit)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Score != hits[j].Score {
+			return hits[i].Score > hits[j].Score
+		}
+		if !hits[i].Timestamp.Equal(hits[j].Timestamp) {
+			return hits[i].Timestamp.After(hits[j].Timestamp)
+		}
+		if hits[i].Chat.JID != hits[j].Chat.JID {
+			return hits[i].Chat.JID < hits[j].Chat.JID
+		}
+		return hits[i].MessageID < hits[j].MessageID
+	})
+	if limit <= 0 || limit > 20 {
+		limit = 20
+	}
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	return hits, nil
+}
+
+func searchTrigrams(query string) []string {
+	runes := []rune(query)
+	if len(runes) < 3 {
+		return nil
+	}
+	seen := make(map[string]bool, len(runes)-2)
+	terms := make([]string, 0, len(runes)-2)
+	for index := 0; index+3 <= len(runes); index++ {
+		term := string(runes[index : index+3])
+		if seen[term] {
+			continue
+		}
+		seen[term] = true
+		terms = append(terms, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+	}
+	return terms
+}
+
 func (s *Store) attachReactions(ctx context.Context, chatJID string, messages []domain.Message) error {
 	if len(messages) == 0 {
 		return nil
@@ -1018,6 +1136,72 @@ func (s *Store) MessagesBefore(ctx context.Context, chatJID string, timestampMS 
 		cursor = encodeCursor(timestampMS, messageID)
 	}
 	return s.Messages(ctx, chatJID, cursor, limit)
+}
+
+func (s *Store) MessagesAround(ctx context.Context, chatJID, messageID string, sideLimit int) (domain.MessageWindow, error) {
+	resolved, err := s.ResolveChat(ctx, chatJID)
+	if err != nil {
+		return domain.MessageWindow{}, err
+	}
+	anchor, err := s.Message(ctx, resolved, messageID)
+	if err != nil {
+		return domain.MessageWindow{}, err
+	}
+	if sideLimit <= 0 || sideLimit > 50 {
+		sideLimit = 25
+	}
+	older, hasOlder, err := s.messagesRelative(ctx, resolved, anchor.Timestamp.UnixMilli(), anchor.ID, sideLimit, true)
+	if err != nil {
+		return domain.MessageWindow{}, err
+	}
+	newer, hasNewer, err := s.messagesRelative(ctx, resolved, anchor.Timestamp.UnixMilli(), anchor.ID, sideLimit, false)
+	if err != nil {
+		return domain.MessageWindow{}, err
+	}
+	items := make([]domain.Message, 0, len(older)+1+len(newer))
+	items = append(items, older...)
+	items = append(items, anchor)
+	items = append(items, newer...)
+	if err = s.attachReactions(ctx, resolved, items); err != nil {
+		return domain.MessageWindow{}, err
+	}
+	return domain.MessageWindow{Items: items, HasOlder: hasOlder, HasNewer: hasNewer, AnchorID: anchor.ID}, nil
+}
+
+func (s *Store) messagesRelative(ctx context.Context, chatID string, timestamp int64, messageID string, limit int, older bool) ([]domain.Message, bool, error) {
+	operator, direction := ">", "ASC"
+	if older {
+		operator, direction = "<", "DESC"
+	}
+	query := `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,edited_at,revoked,
+image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
+image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live
+FROM messages WHERE chat_jid=? AND kind<>'reaction' AND (timestamp ` + operator + ` ? OR (timestamp=? AND id ` + operator + ` ?))
+ORDER BY timestamp ` + direction + `,id ` + direction + ` LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, query, chatID, timestamp, timestamp, messageID, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := make([]domain.Message, 0, limit)
+	for rows.Next() {
+		message, _, scanErr := scanStoredMessage(rows)
+		if scanErr != nil {
+			return nil, false, scanErr
+		}
+		items = append(items, message)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	if older {
+		slices.Reverse(items)
+	}
+	return items, hasMore, nil
 }
 
 type messageScanner interface{ Scan(...any) error }

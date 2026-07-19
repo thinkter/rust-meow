@@ -103,6 +103,77 @@ func TestRichMessageContentRoundTrips(t *testing.T) {
 	}
 }
 
+func TestMessageSearchIndexesUpdatesAndStructuredMetadata(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "search.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.UnixMilli(10_000)
+	messages := []domain.Message{
+		{ID: "meeting", ChatJID: "team@g.us", Text: "Quarterly meeting notes", Kind: "text", Timestamp: now},
+		{ID: "document", ChatJID: "team@g.us", Text: "Document", Kind: "document", Timestamp: now.Add(time.Millisecond), Attachment: &domain.Attachment{FileName: "roadmap-final.pdf"}},
+		{ID: "location", ChatJID: "team@g.us", Text: "Location", Kind: "location", Timestamp: now.Add(2 * time.Millisecond), Location: &domain.Location{Name: "Cubbon Park", Address: "Bengaluru"}},
+	}
+	if err = s.ApplyMessages(ctx, messages, false); err != nil {
+		t.Fatal(err)
+	}
+	for query, wantID := range map[string]string{"meting": "meeting", "roadmp": "document", "cubbon": "location"} {
+		hits, searchErr := s.SearchMessages(ctx, query, 20)
+		if searchErr != nil {
+			t.Fatal(searchErr)
+		}
+		if len(hits) == 0 || hits[0].MessageID != wantID {
+			t.Fatalf("query=%q hits=%+v", query, hits)
+		}
+	}
+	updated := messages[0]
+	updated.Text = "Renamed planning session"
+	updated.EditedAt = now.Add(time.Second)
+	if err = s.ApplyMessage(ctx, updated, false); err != nil {
+		t.Fatal(err)
+	}
+	if hits, searchErr := s.SearchMessages(ctx, "quarterly", 20); searchErr != nil || len(hits) != 0 {
+		t.Fatalf("stale search hit survived update: hits=%+v err=%v", hits, searchErr)
+	}
+	if hits, searchErr := s.SearchMessages(ctx, "planning", 20); searchErr != nil || len(hits) != 1 || hits[0].MessageID != "meeting" {
+		t.Fatalf("updated search missing: hits=%+v err=%v", hits, searchErr)
+	}
+	if err = s.ClearAccountData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if hits, searchErr := s.SearchMessages(ctx, "planning", 20); searchErr != nil || len(hits) != 0 {
+		t.Fatalf("search hit survived deletion: hits=%+v err=%v", hits, searchErr)
+	}
+}
+
+func TestMessagesAroundReturnsCenteredOrderedWindow(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "around.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	messages := make([]domain.Message, 100)
+	for i := range messages {
+		messages[i] = domain.Message{ID: fmt.Sprintf("%03d", i), ChatJID: "team@g.us", Text: fmt.Sprintf("message %d", i), Kind: "text", Timestamp: time.UnixMilli(int64(i + 1))}
+	}
+	if err = s.ApplyMessages(ctx, messages, false); err != nil {
+		t.Fatal(err)
+	}
+	window, err := s.MessagesAround(ctx, "team@g.us", "050", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(window.Items) != 51 || window.Items[0].ID != "025" || window.Items[25].ID != "050" || window.Items[50].ID != "075" {
+		t.Fatalf("window=%+v", window.Items)
+	}
+	if !window.HasOlder || !window.HasNewer || window.AnchorID != "050" {
+		t.Fatalf("metadata=%+v", window)
+	}
+}
+
 func TestV8CacheMigratesInPlaceToRichContentSchema(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "client.db")
@@ -142,6 +213,10 @@ func TestV8CacheMigratesInPlaceToRichContentSchema(t *testing.T) {
 	message, err := s.Message(ctx, "123@g.us", "existing")
 	if err != nil || message.Text != "keep me" {
 		t.Fatalf("message=%+v err=%v", message, err)
+	}
+	hits, err := s.SearchMessages(ctx, "keep", 20)
+	if err != nil || len(hits) != 1 || hits[0].MessageID != "existing" {
+		t.Fatalf("migrated search index was not backfilled: hits=%+v err=%v", hits, err)
 	}
 	var version int
 	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil || version != 10 {

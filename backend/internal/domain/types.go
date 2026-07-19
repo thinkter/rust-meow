@@ -14,6 +14,25 @@ type Chat struct {
 	Archived        bool
 }
 
+type MessageSearchHit struct {
+	Chat       Chat
+	MessageID  string
+	SenderJID  string
+	Text       string
+	Kind       string
+	Timestamp  time.Time
+	FromMe     bool
+	SearchText string
+	Score      int
+}
+
+type MessageWindow struct {
+	Items    []Message
+	HasOlder bool
+	HasNewer bool
+	AnchorID string
+}
+
 type Message struct {
 	ID           string
 	ChatJID      string
