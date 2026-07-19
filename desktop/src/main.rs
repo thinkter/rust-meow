@@ -1,0 +1,3723 @@
+mod bridge;
+mod emoji_picker;
+mod model;
+mod proto;
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    io::Read as _,
+    ops::Range,
+    path::PathBuf,
+    rc::Rc,
+    time::Duration,
+};
+
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyDownEvent, ModifiersChangedEvent, ObjectFit, ParentElement as _, PathPromptOptions, Pixels,
+    Point, Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Subscription, Window, WindowBounds, WindowOptions, actions, canvas, div, img,
+    point, px, rgb, rgba, size, uniform_list,
+};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
+    VirtualListScrollHandle,
+    avatar::Avatar,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    input::{Input, InputEvent, InputState},
+    v_flex, v_virtual_list,
+};
+use gpui_component_assets::Assets;
+use qrcode::{Color, QrCode};
+use smol::Timer;
+use uuid::Uuid;
+
+use bridge::{BackendClient, BridgeMessage, PROTOCOL_VERSION};
+use emoji_picker::{EmojiCategory, filtered as filter_emojis};
+use model::{
+    CHAT_PAGE_SIZE, ChatView, MESSAGE_PAGE_SIZE, PendingRequest, Screen, Store, message_text,
+    reaction_counts, reaction_sender_detail, reaction_sender_name, reactions_for_emoji,
+};
+use proto::{backend_event, envelope, rpc_request, rpc_response};
+
+const DARK_GREEN: u32 = 0x075e54;
+const PANEL: u32 = 0xf7faf9;
+const EMOJI_COLUMNS: usize = 9;
+const PARTICIPANT_AVATAR_REFRESH: Duration = Duration::from_secs(15 * 60);
+const REACTION_REPAIR_RETRY: Duration = Duration::from_secs(10 * 60 + 1);
+const MAX_TEXT_BYTES: usize = 65_536;
+const MAX_CAPTION_BYTES: usize = 4_096;
+const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+const MIN_UI_SCALE: f32 = 1.0;
+const MAX_UI_SCALE: f32 = 1.5;
+const UI_SCALE_STEP: f32 = 0.1;
+const BASE_UI_FONT_SIZE: f32 = 16.0;
+const BASE_MONO_FONT_SIZE: f32 = 13.0;
+const MAX_RECENT_CHATS: usize = 10;
+
+actions!(rust_meow, [CycleRecentChat, CycleRecentChatReverse]);
+
+fn validate_text_message(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("Type a message before sending".into());
+    }
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(format!(
+            "Message is too long ({} of {MAX_TEXT_BYTES} bytes)",
+            text.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_image_message(path: &std::path::Path, caption: &str) -> Result<(), String> {
+    if caption.len() > MAX_CAPTION_BYTES {
+        return Err(format!(
+            "Caption is too long ({} of {MAX_CAPTION_BYTES} bytes)",
+            caption.len()
+        ));
+    }
+    let metadata =
+        fs::metadata(path).map_err(|_| "The selected image cannot be read".to_string())?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("The selected image is not a non-empty file".into());
+    }
+    if metadata.len() > MAX_IMAGE_BYTES {
+        return Err("Image is larger than the 32 MiB limit".into());
+    }
+    let mut file =
+        fs::File::open(path).map_err(|_| "The selected image cannot be opened".to_string())?;
+    let mut header = [0_u8; 12];
+    let read = file
+        .read(&mut header)
+        .map_err(|_| "The selected image cannot be read".to_string())?;
+    let supported = (read >= 3 && header[..3] == [0xff, 0xd8, 0xff])
+        || (read >= 8 && header[..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a])
+        || (read >= 6 && matches!(&header[..6], b"GIF87a" | b"GIF89a"))
+        || (read >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP");
+    if !supported {
+        return Err("Choose a JPEG, PNG, GIF, or WebP image".into());
+    }
+    Ok(())
+}
+
+fn normalized_ui_scale(scale: f32) -> f32 {
+    ((scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE) * 10.0).round()) / 10.0
+}
+
+fn settings_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("RUST_MEOW_CONFIG_DIR") {
+        return PathBuf::from(path).join("settings");
+    }
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join("Library/Application Support"));
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|path| path.join(".config"))
+        });
+    base.unwrap_or_else(std::env::temp_dir)
+        .join("rust-meow")
+        .join("settings")
+}
+
+fn load_ui_scale() -> f32 {
+    fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .map(normalized_ui_scale)
+        .unwrap_or(1.0)
+}
+
+fn save_ui_scale(scale: f32) -> std::io::Result<()> {
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, format!("{scale:.1}\n"))
+}
+
+fn apply_theme_scale(scale: f32, window: &mut Window, cx: &mut gpui::App) {
+    let theme = Theme::global_mut(cx);
+    theme.font_size = px(BASE_UI_FONT_SIZE * scale);
+    theme.mono_font_size = px(BASE_MONO_FONT_SIZE * scale);
+    window.set_rem_size(theme.font_size);
+    window.refresh();
+}
+
+#[derive(Clone, Debug)]
+enum EmojiTarget {
+    Composer,
+    Reaction { chat_id: String, message_id: String },
+}
+
+#[derive(Clone)]
+struct ReactionDetails {
+    chat_id: String,
+    message_id: String,
+    emoji: String,
+    reactions: Rc<Vec<proto::Reaction>>,
+}
+
+#[derive(Clone, Debug)]
+struct ImageViewer {
+    chat_id: String,
+    message_id: String,
+    path: String,
+    caption: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ChatDraft {
+    text: String,
+    reply_to_message_id: Option<String>,
+}
+
+impl ChatDraft {
+    fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.reply_to_message_id.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChatSwitcher {
+    chat_ids: Vec<String>,
+    highlighted: usize,
+}
+
+impl ChatSwitcher {
+    fn new(chat_ids: Vec<String>, reverse: bool) -> Option<Self> {
+        if chat_ids.len() < 2 {
+            return None;
+        }
+        let highlighted = if reverse { chat_ids.len() - 1 } else { 1 };
+        Some(Self {
+            chat_ids,
+            highlighted,
+        })
+    }
+
+    fn cycle(&mut self, reverse: bool) {
+        if reverse {
+            self.highlighted = self
+                .highlighted
+                .checked_sub(1)
+                .unwrap_or(self.chat_ids.len() - 1);
+        } else {
+            self.highlighted = (self.highlighted + 1) % self.chat_ids.len();
+        }
+    }
+
+    fn selected_chat_id(&self) -> Option<&str> {
+        self.chat_ids.get(self.highlighted).map(String::as_str)
+    }
+}
+
+fn record_recent_chat(history: &mut Vec<String>, chat_id: &str) {
+    history.retain(|existing| existing != chat_id);
+    history.insert(0, chat_id.to_owned());
+    history.truncate(MAX_RECENT_CHATS);
+}
+
+fn remap_recent_chat_ids(history: &mut Vec<String>, old_id: &str, new_id: &str) {
+    for chat_id in history.iter_mut() {
+        if chat_id == old_id {
+            *chat_id = new_id.to_owned();
+        }
+    }
+    let mut seen = HashSet::new();
+    history.retain(|chat_id| seen.insert(chat_id.clone()));
+    history.truncate(MAX_RECENT_CHATS);
+}
+
+fn remap_chat_draft(
+    drafts: &mut HashMap<String, ChatDraft>,
+    old_id: &str,
+    new_id: &str,
+    old_was_selected: bool,
+) {
+    let Some(old_draft) = drafts.remove(old_id) else {
+        return;
+    };
+    if old_was_selected {
+        drafts.insert(new_id.to_owned(), old_draft);
+    } else {
+        drafts.entry(new_id.to_owned()).or_insert(old_draft);
+    }
+}
+
+impl ReactionDetails {
+    fn new(chat_id: String, message: &proto::Message, emoji: String) -> Option<Self> {
+        let reactions = reactions_for_emoji(message, &emoji);
+        (!reactions.is_empty()).then(|| Self {
+            chat_id,
+            message_id: message.id.clone(),
+            emoji,
+            reactions: Rc::new(reactions),
+        })
+    }
+}
+
+struct RustMeow {
+    bridge: BackendClient,
+    store: Store,
+    composer: Entity<InputState>,
+    emoji_search: Entity<InputState>,
+    emoji_query: String,
+    emoji_category: EmojiCategory,
+    emoji_results: Rc<Vec<&'static emojis::Emoji>>,
+    emoji_target: Option<EmojiTarget>,
+    reaction_details: Option<ReactionDetails>,
+    image_viewer: Option<ImageViewer>,
+    replying_to_message_id: Option<String>,
+    chat_drafts: HashMap<String, ChatDraft>,
+    recent_chat_ids: Vec<String>,
+    chat_switcher: Option<ChatSwitcher>,
+    settings_open: bool,
+    ui_scale: f32,
+    chat_view: ChatView,
+    message_scroll: VirtualListScrollHandle,
+    scroll_to_bottom_generation: Option<u64>,
+    next_request_id: u64,
+    last_event_sequence: u64,
+    pending_prepend_anchor: Option<(String, Point<Pixels>)>,
+    message_generation: u64,
+    sync_complete_reloaded: bool,
+    confirming_logout: bool,
+    avatar_attempted: HashSet<String>,
+    avatar_retries: HashMap<String, u8>,
+    participant_avatar_attempted: HashSet<String>,
+    image_download_attempted: HashSet<(String, String)>,
+    image_failures: HashMap<(String, String), String>,
+    reaction_repair_attempted: HashSet<String>,
+    latest_reaction_intents: HashMap<(String, String), String>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl RustMeow {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let ui_scale = load_ui_scale();
+        apply_theme_scale(ui_scale, window, cx);
+        let fake = std::env::args().any(|arg| arg == "--fake-backend")
+            || std::env::var_os("RUST_MEOW_FAKE").is_some();
+        let (bridge, startup_error) = match BackendClient::start(fake) {
+            Ok(bridge) => (bridge, None),
+            Err(error) => (BackendClient::disconnected(), Some(error.to_string())),
+        };
+        let receiver = bridge.incoming.clone();
+        let composer = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Type a message")
+                .clean_on_escape()
+        });
+        let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji"));
+        let _subscriptions = vec![
+            cx.subscribe_in(&composer, window, {
+                let composer = composer.clone();
+                move |this, _, event, window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let text = composer.read(cx).value().to_string();
+                        this.update_active_draft_text(text);
+                    }
+                    if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                        this.send_text(window, cx);
+                    }
+                }
+            }),
+            cx.subscribe_in(&emoji_search, window, {
+                let emoji_search = emoji_search.clone();
+                move |this, _, event, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.emoji_query = emoji_search.read(cx).value().to_string();
+                        this.rebuild_emoji_results();
+                        cx.notify();
+                    }
+                }
+            }),
+        ];
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            while let Ok(message) = receiver.recv().await {
+                if window
+                    .update(|window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.handle_bridge(message, window, cx);
+                            cx.notify();
+                        })
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let mut this = Self {
+            bridge,
+            store: Store::default(),
+            composer,
+            emoji_search,
+            emoji_query: String::new(),
+            emoji_category: EmojiCategory::All,
+            emoji_results: Rc::new(filter_emojis(EmojiCategory::All, "")),
+            emoji_target: None,
+            reaction_details: None,
+            image_viewer: None,
+            replying_to_message_id: None,
+            chat_drafts: HashMap::new(),
+            recent_chat_ids: Vec::new(),
+            chat_switcher: None,
+            settings_open: false,
+            ui_scale,
+            chat_view: ChatView::Inbox,
+            message_scroll: VirtualListScrollHandle::new(),
+            scroll_to_bottom_generation: None,
+            next_request_id: 1,
+            last_event_sequence: 0,
+            pending_prepend_anchor: None,
+            message_generation: 0,
+            sync_complete_reloaded: false,
+            confirming_logout: false,
+            avatar_attempted: HashSet::new(),
+            avatar_retries: HashMap::new(),
+            participant_avatar_attempted: HashSet::new(),
+            image_download_attempted: HashSet::new(),
+            image_failures: HashMap::new(),
+            reaction_repair_attempted: HashSet::new(),
+            latest_reaction_intents: HashMap::new(),
+            _subscriptions,
+        };
+        if let Some(error) = startup_error {
+            this.store.screen = Screen::Fatal;
+            this.store.fatal_error = Some(format!("Could not start the local backend: {error}"));
+            return this;
+        }
+        this.request(
+            rpc_request::Request::Hello(proto::HelloRequest {
+                desktop_version: env!("CARGO_PKG_VERSION").into(),
+                minimum_protocol_version: PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION,
+            }),
+            PendingRequest::Hello,
+        );
+        this
+    }
+
+    fn request(&mut self, request: rpc_request::Request, pending: PendingRequest) {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.store.pending.insert(id, pending);
+        if let Err(error) = self.bridge.send(id, request) {
+            self.store.pending.remove(&id);
+            self.store.screen = Screen::Fatal;
+            self.store.fatal_error = Some(error.to_string());
+        }
+    }
+
+    fn handle_bridge(
+        &mut self,
+        message: BridgeMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let envelope = match message {
+            BridgeMessage::Envelope(envelope) => envelope,
+            BridgeMessage::Exited(error) => {
+                self.store.connection = proto::ConnectionState::Failed;
+                self.store.connection_detail = error;
+                self.store.toast_error =
+                    Some("Backend stopped. Restart Rust Meow to reconnect.".into());
+                return;
+            }
+        };
+        match envelope.body {
+            Some(envelope::Body::Response(response)) => {
+                self.handle_response(envelope.request_id, response, window, cx)
+            }
+            Some(envelope::Body::Event(event)) if envelope.request_id == 0 => {
+                self.handle_event(event)
+            }
+            _ => self.store.toast_error = Some("Ignored an invalid backend envelope".into()),
+        }
+    }
+
+    fn handle_response(
+        &mut self,
+        request_id: u64,
+        response: proto::RpcResponse,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.store.pending.remove(&request_id) else {
+            return;
+        };
+        let Some(result) = response.result else {
+            self.store.toast_error = Some("Backend returned an empty response".into());
+            return;
+        };
+        if let rpc_response::Result::Error(error) = result {
+            match &pending {
+                PendingRequest::SendText {
+                    chat_id,
+                    draft_text,
+                    reply_to_message_id,
+                }
+                | PendingRequest::SendImage {
+                    chat_id,
+                    draft_text,
+                    reply_to_message_id,
+                } => self.restore_failed_draft(
+                    chat_id,
+                    draft_text,
+                    reply_to_message_id.clone(),
+                    window,
+                    cx,
+                ),
+                _ => {}
+            }
+            if matches!(&pending, PendingRequest::RepairRecentReactions { .. })
+                && error.code == "not_found"
+            {
+                return;
+            }
+            if let PendingRequest::RepairRecentReactions { chat_id } = &pending
+                && error.retryable
+            {
+                self.schedule_reaction_repair_retry(chat_id.clone(), cx);
+                return;
+            }
+            if let PendingRequest::SendReaction {
+                chat_id,
+                message_id,
+                emoji,
+                client_reaction_id,
+                attempt,
+            } = &pending
+                && error.retryable
+                && *attempt < 3
+            {
+                let chat_id = chat_id.clone();
+                let message_id = message_id.clone();
+                let emoji = emoji.clone();
+                let client_reaction_id = client_reaction_id.clone();
+                let next_attempt = *attempt + 1;
+                cx.spawn(async move |this, cx| {
+                    Timer::after(Duration::from_secs(u64::from(next_attempt))).await;
+                    let _ = this.update(cx, |this, _| {
+                        if !this.reaction_intent_is_current(
+                            &chat_id,
+                            &message_id,
+                            &client_reaction_id,
+                        ) {
+                            return;
+                        }
+                        this.send_reaction_request(
+                            chat_id,
+                            message_id,
+                            emoji,
+                            client_reaction_id,
+                            next_attempt,
+                        );
+                    });
+                })
+                .detach();
+                return;
+            }
+            if let PendingRequest::SendReaction {
+                chat_id,
+                message_id,
+                client_reaction_id,
+                ..
+            } = &pending
+            {
+                self.clear_reaction_intent_if_current(chat_id, message_id, client_reaction_id);
+            }
+            if let PendingRequest::Avatar { chat_id } = &pending {
+                if error.retryable {
+                    let retries = self.avatar_retries.entry(chat_id.clone()).or_default();
+                    if *retries < 3 {
+                        *retries += 1;
+                        let retry_chat_id = chat_id.clone();
+                        let delay = Duration::from_secs(5 * u64::from(*retries));
+                        cx.spawn(async move |this, cx| {
+                            Timer::after(delay).await;
+                            let _ = this.update(cx, |this, cx| {
+                                this.avatar_attempted.remove(&retry_chat_id);
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                return;
+            }
+            if let PendingRequest::ParticipantAvatar { participant_id } = &pending {
+                if error.retryable {
+                    let retry_key = format!("participant:{participant_id}");
+                    let retries = self.avatar_retries.entry(retry_key.clone()).or_default();
+                    if *retries < 3 {
+                        *retries += 1;
+                        let retry_participant_id = participant_id.clone();
+                        let delay = Duration::from_secs(5 * u64::from(*retries));
+                        cx.spawn(async move |this, cx| {
+                            Timer::after(delay).await;
+                            let _ = this.update(cx, |this, cx| {
+                                this.participant_avatar_attempted
+                                    .remove(&retry_participant_id);
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                return;
+            }
+            if let PendingRequest::MessageImage {
+                chat_id,
+                message_id,
+            } = &pending
+            {
+                // Keep the attempt latched so virtualization does not create a
+                // retry storm. The row now exposes an explicit retry action.
+                self.image_failures.insert(
+                    (chat_id.clone(), message_id.clone()),
+                    if error.retryable {
+                        "Couldn't load photo · Click to retry".into()
+                    } else {
+                        "Photo is no longer available".into()
+                    },
+                );
+                return;
+            }
+            if let PendingRequest::MarkRead {
+                chat_id,
+                previous_unread,
+            } = &pending
+            {
+                self.store.restore_unread(chat_id, *previous_unread);
+                self.store.last_mark_read_id = None;
+            }
+            if matches!(&pending, PendingRequest::Logout) {
+                self.confirming_logout = false;
+                self.store.screen = Screen::Fatal;
+                self.store.fatal_error = Some(format!(
+                    "Logout stopped because local account data could not be safely cleared ({}: {}). Rust Meow will not re-pair until this is resolved.",
+                    error.code, error.message
+                ));
+                return;
+            }
+            if matches!(&pending, PendingRequest::Messages { prepend: true, .. }) {
+                self.pending_prepend_anchor = None;
+            }
+            let message = format!("{}: {}", error.code, error.message);
+            if matches!(pending, PendingRequest::Hello) {
+                self.store.fatal_error = Some(message);
+                self.store.screen = Screen::Fatal;
+            } else {
+                self.store.toast_error = Some(message);
+            }
+            return;
+        }
+        match (pending, result) {
+            (PendingRequest::Hello, rpc_response::Result::Hello(hello)) => {
+                if hello.protocol_version != PROTOCOL_VERSION {
+                    self.store.screen = Screen::Fatal;
+                    self.store.fatal_error = Some(format!(
+                        "Protocol mismatch: desktop v{PROTOCOL_VERSION}, backend v{}",
+                        hello.protocol_version
+                    ));
+                } else {
+                    self.request(
+                        rpc_request::Request::GetAuthState(proto::GetAuthStateRequest {}),
+                        PendingRequest::Auth,
+                    );
+                }
+            }
+            (PendingRequest::Auth, rpc_response::Result::AuthState(auth)) => {
+                self.store.connection = auth.connection_state();
+                if auth.paired {
+                    self.store.screen = Screen::Syncing;
+                    self.load_chats(String::new());
+                } else {
+                    self.begin_pairing();
+                }
+            }
+            (PendingRequest::Chats { cursor }, rpc_response::Result::ListChats(page)) => {
+                let newest_chat_id = if cursor.is_empty() {
+                    page.chats.first().map(|chat| chat.id.clone())
+                } else {
+                    None
+                };
+                self.store.replace_chat_page(
+                    &cursor,
+                    page.chats,
+                    page.total_count,
+                    page.next_cursor,
+                );
+                self.store.screen = Screen::Chats;
+                // Repair the newest chat proactively so legacy reactions are
+                // restored even before the user clicks back into it after an
+                // upgrade. Other affected chats remain lazy-on-open.
+                if let Some(chat_id) = newest_chat_id {
+                    self.repair_recent_reactions(chat_id);
+                }
+            }
+            (PendingRequest::Avatar { chat_id }, rpc_response::Result::GetChatAvatar(avatar))
+                if avatar.chat_id == chat_id =>
+            {
+                self.store.set_chat_avatar(&chat_id, avatar.avatar_path);
+                self.avatar_retries.remove(&chat_id);
+            }
+            (
+                PendingRequest::ParticipantAvatar { participant_id },
+                rpc_response::Result::GetParticipantAvatar(avatar),
+            ) if avatar.participant_id == participant_id => {
+                self.store
+                    .set_participant_avatar(participant_id.clone(), avatar.avatar_path);
+                self.avatar_retries
+                    .remove(&format!("participant:{participant_id}"));
+                cx.spawn(async move |this, cx| {
+                    Timer::after(PARTICIPANT_AVATAR_REFRESH).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.participant_avatar_attempted.remove(&participant_id);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            (
+                PendingRequest::Messages {
+                    chat_id,
+                    prepend,
+                    generation,
+                },
+                rpc_response::Result::ListMessages(page),
+            ) if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str())
+                && generation == self.message_generation =>
+            {
+                self.store.has_older_messages = page.has_more;
+                if prepend {
+                    self.store.prepend_messages(page.messages);
+                } else {
+                    for message in page.messages {
+                        self.store.upsert_message(message);
+                    }
+                    self.scroll_to_bottom_generation = Some(generation);
+                }
+            }
+            (PendingRequest::SendText { .. }, rpc_response::Result::SendText(sent)) => {
+                if let Some(message) = sent.message {
+                    self.store.upsert_message(message);
+                    self.scroll_to_bottom_generation = Some(self.message_generation);
+                }
+            }
+            (PendingRequest::SendImage { .. }, rpc_response::Result::SendImage(sent)) => {
+                if let Some(message) = sent.message {
+                    self.store.upsert_message(message);
+                    self.scroll_to_bottom_generation = Some(self.message_generation);
+                }
+            }
+            (
+                PendingRequest::MessageImage {
+                    chat_id,
+                    message_id,
+                },
+                rpc_response::Result::GetMessageImage(image),
+            ) if image.chat_id == chat_id && image.message_id == message_id => {
+                let key = (chat_id.clone(), message_id.clone());
+                if image.image_path.is_empty() {
+                    self.image_failures
+                        .insert(key, "Photo is no longer available".into());
+                } else {
+                    self.image_failures.remove(&key);
+                    self.store
+                        .set_message_image_path(&chat_id, &message_id, image.image_path);
+                }
+            }
+            (
+                PendingRequest::SendReaction {
+                    chat_id,
+                    message_id,
+                    client_reaction_id,
+                    ..
+                },
+                rpc_response::Result::SendReaction(sent),
+            ) => {
+                if let Some(reaction) = sent.reaction
+                    && reaction.chat_id == chat_id
+                    && reaction.message_id == message_id
+                {
+                    self.store.apply_reaction(reaction, sent.removed);
+                    self.refresh_reaction_details();
+                }
+                self.clear_reaction_intent_if_current(&chat_id, &message_id, &client_reaction_id);
+            }
+            (
+                PendingRequest::RepairRecentReactions { chat_id },
+                rpc_response::Result::RepairRecentReactions(repair),
+            ) if repair.chat_id == chat_id => {
+                // A peer history request can be accepted without a response
+                // ever arriving (for example if the primary goes offline).
+                // Keep a bounded fallback retry armed in both the requested
+                // and rate-limited cases; completed jobs become a silent
+                // not_found on the harmless later probe.
+                self.schedule_reaction_repair_retry(chat_id, cx);
+            }
+            (PendingRequest::Logout, rpc_response::Result::Logout(_)) => {
+                self.begin_pairing();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_event(&mut self, event: proto::BackendEvent) {
+        if event.sequence == 0 || event.sequence <= self.last_event_sequence {
+            return;
+        }
+        if self.last_event_sequence != 0
+            && event.sequence > self.last_event_sequence.saturating_add(1)
+        {
+            self.store.toast_error = Some(format!(
+                "Backend event gap ({} → {}); refreshing local state",
+                self.last_event_sequence, event.sequence
+            ));
+            self.load_chats(String::new());
+            if self.store.selected_chat_id.is_some() {
+                self.refresh_latest();
+            }
+        }
+        self.last_event_sequence = event.sequence;
+        match event.event {
+            Some(backend_event::Event::ConnectionChanged(connection)) => {
+                let state = connection.state();
+                self.store.connection = state;
+                self.store.connection_detail = connection.detail;
+                if state == proto::ConnectionState::LoggedOut {
+                    if self.store.logout_pending() {
+                        self.store.connection_detail =
+                            "Logged out; securely clearing local account data…".into();
+                    } else {
+                        self.begin_pairing();
+                    }
+                } else if state == proto::ConnectionState::Connected {
+                    if self.store.screen == Screen::Pairing {
+                        self.request(
+                            rpc_request::Request::GetAuthState(proto::GetAuthStateRequest {}),
+                            PendingRequest::Auth,
+                        );
+                    }
+                    if let Some(chat_id) = self.store.selected_chat_id.clone() {
+                        self.repair_recent_reactions(chat_id);
+                    }
+                }
+            }
+            Some(backend_event::Event::PairingQr(qr)) => {
+                self.store.qr_code = Some(qr.code);
+                self.store.qr_expires_at_ms = qr.expires_at_ms;
+                self.store.screen = Screen::Pairing;
+            }
+            Some(backend_event::Event::SyncProgress(sync)) => {
+                self.store.apply_sync_progress(
+                    sync.chats_processed,
+                    sync.messages_processed,
+                    sync.complete,
+                );
+
+                // WhatsApp may deliver a large initial history in many chunks.
+                // Do not lock the user behind a modal syncing screen while
+                // already-persisted chats are usable. Refresh the newest chat
+                // page after each chunk and let the remaining import continue
+                // in the local backend.
+                self.store.screen = Screen::Chats;
+                if sync.complete {
+                    self.store.connection_detail.clear();
+                    if !self.sync_complete_reloaded {
+                        self.sync_complete_reloaded = true;
+                        self.load_chats(String::new());
+                    }
+                } else {
+                    self.store.connection_detail = format!(
+                        "Importing older history… {} chats · {} messages",
+                        self.store.sync_chats, self.store.sync_messages
+                    );
+                    self.load_chats(String::new());
+                }
+            }
+            Some(backend_event::Event::ChatUpserted(upsert)) => {
+                if let Some(chat) = upsert.chat {
+                    self.store.upsert_chat(chat);
+                }
+            }
+            Some(backend_event::Event::ChatMerged(merge)) => {
+                let old_was_selected =
+                    self.store.selected_chat_id.as_deref() == Some(merge.old_chat_id.as_str());
+                let selected = self
+                    .store
+                    .merge_chat_id(&merge.old_chat_id, &merge.new_chat_id);
+                remap_recent_chat_ids(
+                    &mut self.recent_chat_ids,
+                    &merge.old_chat_id,
+                    &merge.new_chat_id,
+                );
+                if let Some(switcher) = self.chat_switcher.as_mut() {
+                    remap_recent_chat_ids(
+                        &mut switcher.chat_ids,
+                        &merge.old_chat_id,
+                        &merge.new_chat_id,
+                    );
+                    switcher.highlighted = switcher
+                        .highlighted
+                        .min(switcher.chat_ids.len().saturating_sub(1));
+                }
+                remap_chat_draft(
+                    &mut self.chat_drafts,
+                    &merge.old_chat_id,
+                    &merge.new_chat_id,
+                    old_was_selected,
+                );
+                self.avatar_attempted.remove(&merge.old_chat_id);
+                self.reaction_repair_attempted.remove(&merge.old_chat_id);
+                self.latest_reaction_intents
+                    .retain(|(chat_id, _), _| chat_id != &merge.old_chat_id);
+                self.load_chats(String::new());
+                if selected {
+                    self.load_selected_chat(merge.new_chat_id);
+                }
+            }
+            Some(backend_event::Event::MessageUpserted(upsert)) => {
+                if let Some(message) = upsert.message {
+                    if self.store.has_newer_messages
+                        && self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str())
+                    {
+                        self.store.newer_activity = true;
+                    } else {
+                        self.store.upsert_message(message);
+                        self.refresh_reaction_details();
+                    }
+                }
+            }
+            Some(backend_event::Event::ReceiptUpdated(receipt)) => {
+                self.store.update_receipt(receipt)
+            }
+            Some(backend_event::Event::ReactionUpdated(update)) => {
+                if let Some(reaction) = update.reaction {
+                    self.store.apply_reaction(reaction, update.removed);
+                    self.refresh_reaction_details();
+                }
+            }
+            Some(backend_event::Event::RecentReactionsRepaired(repair))
+                if self.store.selected_chat_id.as_deref() == Some(repair.chat_id.as_str()) =>
+            {
+                self.refresh_latest();
+            }
+            Some(backend_event::Event::RecentReactionsRepaired(_)) => {}
+            Some(backend_event::Event::Problem(problem)) => {
+                if problem.fatal {
+                    self.store.screen = Screen::Fatal;
+                    self.store.fatal_error = Some(problem.message);
+                } else {
+                    self.store.toast_error = Some(problem.message);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn load_chats(&mut self, cursor: String) {
+        if self.store.pending.values().any(|pending| {
+            matches!(pending, PendingRequest::Chats { cursor: pending_cursor } if pending_cursor == &cursor)
+        }) {
+            return;
+        }
+        self.request(
+            rpc_request::Request::ListChats(proto::ListChatsRequest {
+                cursor: cursor.clone(),
+                limit: CHAT_PAGE_SIZE,
+            }),
+            PendingRequest::Chats { cursor },
+        );
+    }
+
+    fn load_avatar(&mut self, chat_id: String) {
+        let pending_avatars = self
+            .store
+            .pending
+            .values()
+            .filter(|pending| {
+                matches!(
+                    pending,
+                    PendingRequest::Avatar { .. } | PendingRequest::ParticipantAvatar { .. }
+                )
+            })
+            .count();
+        if self.avatar_attempted.contains(&chat_id) || pending_avatars >= 4 {
+            return;
+        }
+        self.avatar_attempted.insert(chat_id.clone());
+        self.request(
+            rpc_request::Request::GetChatAvatar(proto::GetChatAvatarRequest {
+                chat_id: chat_id.clone(),
+            }),
+            PendingRequest::Avatar { chat_id },
+        );
+    }
+
+    fn load_participant_avatar(&mut self, participant_id: String) {
+        let pending = self
+            .store
+            .pending
+            .values()
+            .filter(|pending| {
+                matches!(
+                    pending,
+                    PendingRequest::Avatar { .. } | PendingRequest::ParticipantAvatar { .. }
+                )
+            })
+            .count();
+        if participant_id.is_empty()
+            || self.participant_avatar_attempted.contains(&participant_id)
+            || pending >= 4
+        {
+            return;
+        }
+        self.participant_avatar_attempted
+            .insert(participant_id.clone());
+        self.request(
+            rpc_request::Request::GetParticipantAvatar(proto::GetParticipantAvatarRequest {
+                participant_id: participant_id.clone(),
+            }),
+            PendingRequest::ParticipantAvatar { participant_id },
+        );
+    }
+
+    fn load_message_image(&mut self, chat_id: String, message_id: String) {
+        let key = (chat_id.clone(), message_id.clone());
+        let pending_media = self
+            .store
+            .pending
+            .values()
+            .filter(|pending| {
+                matches!(
+                    pending,
+                    PendingRequest::Avatar { .. }
+                        | PendingRequest::ParticipantAvatar { .. }
+                        | PendingRequest::MessageImage { .. }
+                )
+            })
+            .count();
+        if self.image_download_attempted.contains(&key) || pending_media >= 4 {
+            return;
+        }
+        self.image_download_attempted.insert(key);
+        self.request(
+            rpc_request::Request::GetMessageImage(proto::GetMessageImageRequest {
+                chat_id: chat_id.clone(),
+                message_id: message_id.clone(),
+            }),
+            PendingRequest::MessageImage {
+                chat_id,
+                message_id,
+            },
+        );
+    }
+
+    fn retry_message_image(&mut self, chat_id: String, message_id: String) {
+        let key = (chat_id.clone(), message_id.clone());
+        self.image_failures.remove(&key);
+        self.image_download_attempted.remove(&key);
+        self.store
+            .set_message_image_path(&chat_id, &message_id, String::new());
+        self.image_viewer = None;
+        self.load_message_image(chat_id, message_id);
+    }
+
+    fn open_image_viewer(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        path: String,
+        caption: String,
+    ) {
+        self.image_viewer = Some(ImageViewer {
+            chat_id,
+            message_id,
+            path,
+            caption,
+        });
+        self.emoji_target = None;
+        self.reaction_details = None;
+    }
+
+    fn repair_recent_reactions(&mut self, chat_id: String) {
+        if self.store.connection != proto::ConnectionState::Connected
+            || !self.reaction_repair_attempted.insert(chat_id.clone())
+        {
+            return;
+        }
+        self.request(
+            rpc_request::Request::RepairRecentReactions(proto::RepairRecentReactionsRequest {
+                chat_id: chat_id.clone(),
+            }),
+            PendingRequest::RepairRecentReactions { chat_id },
+        );
+    }
+
+    fn schedule_reaction_repair_retry(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            Timer::after(REACTION_REPAIR_RETRY).await;
+            let _ = this.update(cx, |this, _| {
+                this.reaction_repair_attempted.remove(&chat_id);
+                if this.store.selected_chat_id.as_deref() == Some(chat_id.as_str()) {
+                    this.repair_recent_reactions(chat_id);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn rebuild_emoji_results(&mut self) {
+        self.emoji_results = Rc::new(filter_emojis(self.emoji_category, &self.emoji_query));
+    }
+
+    fn set_emoji_category(&mut self, category: EmojiCategory) {
+        self.emoji_category = category;
+        self.rebuild_emoji_results();
+    }
+
+    fn toggle_composer_emoji(&mut self) {
+        self.emoji_target = match self.emoji_target {
+            Some(EmojiTarget::Composer) => None,
+            _ => Some(EmojiTarget::Composer),
+        };
+    }
+
+    fn open_reaction_picker(&mut self, chat_id: String, message_id: String) {
+        self.reaction_details = None;
+        self.emoji_target = Some(EmojiTarget::Reaction {
+            chat_id,
+            message_id,
+        });
+    }
+
+    fn update_active_draft_text(&mut self, text: String) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        let draft = self.chat_drafts.entry(chat_id.clone()).or_default();
+        draft.text = text;
+        if draft.is_empty() {
+            self.chat_drafts.remove(&chat_id);
+        }
+    }
+
+    fn update_active_draft_reply(&mut self, reply_to_message_id: Option<String>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        let draft = self.chat_drafts.entry(chat_id.clone()).or_default();
+        draft.reply_to_message_id = reply_to_message_id;
+        if draft.is_empty() {
+            self.chat_drafts.remove(&chat_id);
+        }
+    }
+
+    fn clear_active_draft(&mut self) {
+        if let Some(chat_id) = self.store.selected_chat_id.as_ref() {
+            self.chat_drafts.remove(chat_id);
+        }
+        self.replying_to_message_id = None;
+    }
+
+    fn restore_failed_draft(
+        &mut self,
+        chat_id: &str,
+        draft_text: &str,
+        reply_to_message_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let failed_draft = ChatDraft {
+            text: draft_text.to_owned(),
+            reply_to_message_id,
+        };
+        let should_restore = self
+            .chat_drafts
+            .get(chat_id)
+            .is_none_or(ChatDraft::is_empty);
+        if !should_restore {
+            return;
+        }
+        self.chat_drafts
+            .insert(chat_id.to_owned(), failed_draft.clone());
+        if self.store.selected_chat_id.as_deref() == Some(chat_id)
+            && self.composer.read(cx).value().is_empty()
+        {
+            self.replying_to_message_id = failed_draft.reply_to_message_id;
+            self.composer.update(cx, |input, cx| {
+                input.set_value(failed_draft.text, window, cx)
+            });
+        }
+    }
+
+    fn start_reply(&mut self, message_id: String) {
+        if self.store.message(&message_id).is_none() {
+            return;
+        }
+        self.replying_to_message_id = Some(message_id.clone());
+        self.update_active_draft_reply(Some(message_id));
+        self.emoji_target = None;
+        self.reaction_details = None;
+    }
+
+    fn cancel_reply(&mut self) {
+        self.replying_to_message_id = None;
+        self.update_active_draft_reply(None);
+    }
+
+    fn scroll_to_message(&mut self, message_id: &str) {
+        if let Some(index) = self
+            .store
+            .messages
+            .iter()
+            .position(|message| message.id == message_id)
+        {
+            self.message_scroll
+                .scroll_to_item(index, ScrollStrategy::Center);
+        }
+    }
+
+    fn open_reaction_details(&mut self, chat_id: String, message_id: String, emoji: String) {
+        if self.store.selected_chat_id.as_deref() != Some(chat_id.as_str()) {
+            return;
+        }
+        let Some(message) = self.store.message(&message_id) else {
+            return;
+        };
+        let Some(details) = ReactionDetails::new(chat_id, message, emoji) else {
+            return;
+        };
+        self.emoji_target = None;
+        self.reaction_details = Some(details);
+    }
+
+    fn refresh_reaction_details(&mut self) {
+        let Some(details) = self.reaction_details.as_ref() else {
+            return;
+        };
+        if self.store.selected_chat_id.as_deref() != Some(details.chat_id.as_str()) {
+            self.reaction_details = None;
+            return;
+        }
+        let Some(message) = self.store.message(&details.message_id) else {
+            self.reaction_details = None;
+            return;
+        };
+        let reactions = reactions_for_emoji(message, &details.emoji);
+        if reactions.is_empty() {
+            self.reaction_details = None;
+        } else if let Some(details) = self.reaction_details.as_mut() {
+            details.reactions = Rc::new(reactions);
+        }
+    }
+
+    fn choose_emoji(&mut self, emoji: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match self.emoji_target.clone() {
+            Some(EmojiTarget::Composer) => {
+                self.composer
+                    .update(cx, |input, cx| input.insert(emoji, window, cx));
+            }
+            Some(EmojiTarget::Reaction {
+                chat_id,
+                message_id,
+            }) => {
+                self.send_reaction_request(
+                    chat_id,
+                    message_id,
+                    emoji.to_string(),
+                    Uuid::new_v4().to_string(),
+                    0,
+                );
+                self.emoji_target = None;
+            }
+            None => {}
+        }
+    }
+
+    fn remove_reaction(&mut self) {
+        let Some(EmojiTarget::Reaction {
+            chat_id,
+            message_id,
+        }) = self.emoji_target.clone()
+        else {
+            return;
+        };
+        self.send_reaction_request(
+            chat_id,
+            message_id,
+            String::new(),
+            Uuid::new_v4().to_string(),
+            0,
+        );
+        self.emoji_target = None;
+    }
+
+    fn send_reaction_request(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        emoji: String,
+        client_reaction_id: String,
+        attempt: u8,
+    ) {
+        let intent_key = (chat_id.clone(), message_id.clone());
+        if attempt == 0 {
+            self.latest_reaction_intents
+                .insert(intent_key, client_reaction_id.clone());
+        } else if !self.reaction_intent_is_current(&chat_id, &message_id, &client_reaction_id) {
+            return;
+        }
+        self.request(
+            rpc_request::Request::SendReaction(proto::SendReactionRequest {
+                chat_id: chat_id.clone(),
+                message_id: message_id.clone(),
+                emoji: emoji.clone(),
+                client_reaction_id: client_reaction_id.clone(),
+            }),
+            PendingRequest::SendReaction {
+                chat_id,
+                message_id,
+                emoji,
+                client_reaction_id,
+                attempt,
+            },
+        );
+    }
+
+    fn reaction_intent_is_current(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        client_reaction_id: &str,
+    ) -> bool {
+        self.latest_reaction_intents
+            .get(&(chat_id.to_owned(), message_id.to_owned()))
+            .is_some_and(|latest| latest == client_reaction_id)
+    }
+
+    fn clear_reaction_intent_if_current(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        client_reaction_id: &str,
+    ) {
+        let key = (chat_id.to_owned(), message_id.to_owned());
+        if self
+            .latest_reaction_intents
+            .get(&key)
+            .is_some_and(|latest| latest == client_reaction_id)
+        {
+            self.latest_reaction_intents.remove(&key);
+        }
+    }
+
+    fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = if cx.theme().is_dark() {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        };
+        Theme::change(mode, Some(window), cx);
+        apply_theme_scale(self.ui_scale, window, cx);
+        cx.notify();
+    }
+
+    fn set_ui_scale(&mut self, scale: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.ui_scale = normalized_ui_scale(scale);
+        apply_theme_scale(self.ui_scale, window, cx);
+        self.store.invalidate_all_message_heights();
+        if let Err(error) = save_ui_scale(self.ui_scale) {
+            self.store.toast_error = Some(format!("Could not save UI scale: {error}"));
+        }
+        cx.notify();
+    }
+
+    fn adjust_ui_scale(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_ui_scale(self.ui_scale + delta, window, cx);
+    }
+
+    fn toggle_chat_view(&mut self) {
+        self.chat_view = match self.chat_view {
+            ChatView::Inbox => ChatView::Archived,
+            ChatView::Archived => ChatView::Inbox,
+        };
+        self.message_generation = self.message_generation.wrapping_add(1);
+        self.store.selected_chat_id = None;
+        self.emoji_target = None;
+        self.reaction_details = None;
+        self.image_viewer = None;
+        self.replying_to_message_id = None;
+        self.chat_switcher = None;
+    }
+
+    fn recent_chat_candidates(&self) -> Vec<String> {
+        let Some(selected_chat_id) = self.store.selected_chat_id.as_deref() else {
+            return Vec::new();
+        };
+        let mut candidates = self
+            .recent_chat_ids
+            .iter()
+            .filter(|chat_id| self.store.chat(chat_id).is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(selected_index) = candidates
+            .iter()
+            .position(|chat_id| chat_id == selected_chat_id)
+        {
+            candidates.swap(0, selected_index);
+        } else if self.store.chat(selected_chat_id).is_some() {
+            candidates.insert(0, selected_chat_id.to_owned());
+        }
+        candidates.truncate(MAX_RECENT_CHATS);
+        candidates
+    }
+
+    fn cycle_recent_chat(&mut self, reverse: bool) {
+        if self.store.screen != Screen::Chats || self.store.selected_chat_id.is_none() {
+            return;
+        }
+        if let Some(switcher) = self.chat_switcher.as_mut() {
+            switcher.cycle(reverse);
+            return;
+        }
+        let Some(switcher) = ChatSwitcher::new(self.recent_chat_candidates(), reverse) else {
+            return;
+        };
+        self.emoji_target = None;
+        self.reaction_details = None;
+        self.image_viewer = None;
+        self.settings_open = false;
+        self.chat_switcher = Some(switcher);
+    }
+
+    fn cancel_chat_switcher(&mut self) {
+        self.chat_switcher = None;
+    }
+
+    fn commit_chat_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected_chat_id = self
+            .chat_switcher
+            .take()
+            .and_then(|switcher| switcher.selected_chat_id().map(str::to_owned));
+        if let Some(chat_id) = selected_chat_id {
+            self.open_chat(chat_id, window, cx);
+        }
+    }
+
+    fn commit_chat_switcher_to(
+        &mut self,
+        chat_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_switcher = None;
+        self.open_chat(chat_id, window, cx);
+    }
+
+    fn open_chat(&mut self, chat_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.chat(&chat_id).is_none() {
+            return;
+        }
+        self.chat_view = if self.store.chat(&chat_id).is_some_and(|chat| chat.archived) {
+            ChatView::Archived
+        } else {
+            ChatView::Inbox
+        };
+        record_recent_chat(&mut self.recent_chat_ids, &chat_id);
+        self.load_selected_chat(chat_id.clone());
+        let draft = self.chat_drafts.get(&chat_id).cloned().unwrap_or_default();
+        self.replying_to_message_id = draft.reply_to_message_id;
+        self.composer
+            .update(cx, |input, cx| input.set_value(draft.text, window, cx));
+    }
+
+    fn load_selected_chat(&mut self, chat_id: String) {
+        self.message_generation = self.message_generation.wrapping_add(1);
+        self.store.select_chat(chat_id.clone());
+        self.emoji_target = None;
+        self.reaction_details = None;
+        self.image_viewer = None;
+        self.scroll_to_bottom_generation = None;
+        self.image_download_attempted.clear();
+        self.image_failures.clear();
+        self.request(
+            rpc_request::Request::ListMessages(proto::ListMessagesRequest {
+                chat_id: chat_id.clone(),
+                before_timestamp_ms: 0,
+                before_message_id: String::new(),
+                limit: MESSAGE_PAGE_SIZE,
+            }),
+            PendingRequest::Messages {
+                chat_id: chat_id.clone(),
+                prepend: false,
+                generation: self.message_generation,
+            },
+        );
+        self.repair_recent_reactions(chat_id);
+    }
+
+    fn load_older_messages(&mut self) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        if self.store.pending.values().any(|pending| {
+            matches!(pending, PendingRequest::Messages {
+                chat_id: pending_chat,
+                prepend: true,
+                generation,
+            } if pending_chat == &chat_id && *generation == self.message_generation)
+        }) {
+            return;
+        }
+        let Some(first) = self.store.messages.first() else {
+            return;
+        };
+        self.pending_prepend_anchor = Some((first.id.clone(), self.message_scroll.offset()));
+        self.request(
+            rpc_request::Request::ListMessages(proto::ListMessagesRequest {
+                chat_id: chat_id.clone(),
+                before_timestamp_ms: first.timestamp_ms,
+                before_message_id: first.id.clone(),
+                limit: MESSAGE_PAGE_SIZE,
+            }),
+            PendingRequest::Messages {
+                chat_id,
+                prepend: true,
+                generation: self.message_generation,
+            },
+        );
+    }
+
+    fn refresh_latest(&mut self) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        self.load_selected_chat(chat_id);
+    }
+
+    fn begin_pairing(&mut self) {
+        if self.store.screen == Screen::Pairing
+            && self
+                .store
+                .pending
+                .values()
+                .any(|pending| matches!(pending, PendingRequest::Pairing))
+        {
+            return;
+        }
+        self.store.clear_account_state();
+        self.store.screen = Screen::Pairing;
+        self.store.connection = proto::ConnectionState::Pairing;
+        self.message_generation = self.message_generation.wrapping_add(1);
+        self.pending_prepend_anchor = None;
+        self.sync_complete_reloaded = false;
+        self.last_event_sequence = 0;
+        self.confirming_logout = false;
+        self.avatar_attempted.clear();
+        self.avatar_retries.clear();
+        self.participant_avatar_attempted.clear();
+        self.image_download_attempted.clear();
+        self.image_failures.clear();
+        self.reaction_repair_attempted.clear();
+        self.latest_reaction_intents.clear();
+        self.emoji_target = None;
+        self.reaction_details = None;
+        self.image_viewer = None;
+        self.replying_to_message_id = None;
+        self.chat_drafts.clear();
+        self.recent_chat_ids.clear();
+        self.chat_switcher = None;
+        self.chat_view = ChatView::Inbox;
+        self.request(
+            rpc_request::Request::StartPairing(proto::StartPairingRequest {}),
+            PendingRequest::Pairing,
+        );
+    }
+
+    fn request_logout(&mut self) {
+        if self.store.logout_pending() {
+            return;
+        }
+        self.request(
+            rpc_request::Request::Logout(proto::LogoutRequest {}),
+            PendingRequest::Logout,
+        );
+    }
+
+    fn send_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let draft_text = self.composer.read(cx).value().to_string();
+        let text = draft_text.trim().to_string();
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            self.store.toast_error = Some("Choose a conversation before sending".into());
+            return;
+        };
+        if self.store.connection != proto::ConnectionState::Connected {
+            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            return;
+        }
+        if let Err(error) = validate_text_message(&text) {
+            self.store.toast_error = Some(error);
+            return;
+        }
+        self.store.toast_error = None;
+        let reply_to_message_id = self.replying_to_message_id.clone();
+        self.clear_active_draft();
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let client_message_id = Uuid::new_v4().to_string();
+        self.request(
+            rpc_request::Request::SendText(proto::SendTextRequest {
+                client_message_id: client_message_id.clone(),
+                chat_id,
+                text,
+                reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
+            }),
+            PendingRequest::SendText {
+                chat_id: self.store.selected_chat_id.clone().unwrap_or_default(),
+                draft_text,
+                reply_to_message_id,
+            },
+        );
+    }
+
+    fn choose_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.connection != proto::ConnectionState::Connected
+            || self.store.selected_chat_id.is_none()
+        {
+            return;
+        }
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose an image to send".into()),
+        });
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let path = selected.await.ok()?.ok()??.into_iter().next()?;
+            window
+                .update(|window, cx| view.update(cx, |this, cx| this.send_image(path, window, cx)))
+                .ok()
+        })
+        .detach();
+    }
+
+    fn send_image(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            self.store.toast_error = Some("Choose a conversation before sending".into());
+            return;
+        };
+        if self.store.connection != proto::ConnectionState::Connected {
+            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            return;
+        }
+        let draft_text = self.composer.read(cx).value().to_string();
+        let caption = draft_text.trim().to_string();
+        if let Err(error) = validate_image_message(&path, &caption) {
+            self.store.toast_error = Some(error);
+            return;
+        }
+        self.store.toast_error = None;
+        let reply_to_message_id = self.replying_to_message_id.clone();
+        self.clear_active_draft();
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.request(
+            rpc_request::Request::SendImage(proto::SendImageRequest {
+                client_message_id: Uuid::new_v4().to_string(),
+                chat_id,
+                image_path: path.to_string_lossy().into_owned(),
+                caption,
+                reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
+            }),
+            PendingRequest::SendImage {
+                chat_id: self.store.selected_chat_id.clone().unwrap_or_default(),
+                draft_text,
+                reply_to_message_id,
+            },
+        );
+    }
+
+    fn mark_read(&mut self) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        let Some(last) = self
+            .store
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !message.from_me)
+        else {
+            return;
+        };
+        let through_message_id = last.id.clone();
+        if self.store.last_mark_read_id.as_deref() == Some(through_message_id.as_str()) {
+            return;
+        }
+        self.store.last_mark_read_id = Some(through_message_id.clone());
+        let previous_unread = self.store.mark_selected_chat_read_locally().unwrap_or(0);
+        self.request(
+            rpc_request::Request::MarkRead(proto::MarkReadRequest {
+                chat_id,
+                through_message_id,
+            }),
+            PendingRequest::MarkRead {
+                chat_id: self.store.selected_chat_id.clone().unwrap_or_default(),
+                previous_unread,
+            },
+        );
+    }
+
+    fn render_pairing(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let qr = self
+            .store
+            .qr_code
+            .as_deref()
+            .and_then(|code| QrCode::new(code.as_bytes()).ok());
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .child(
+                div()
+                    .text_2xl()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("Link Rust Meow"),
+            )
+            .child("WhatsApp → Linked devices → Link a device")
+            .child(match qr {
+                Some(qr) => qr_canvas(qr),
+                None => div()
+                    .size(px(240.))
+                    .rounded_lg()
+                    .bg(if cx.theme().is_dark() {
+                        cx.theme().secondary
+                    } else {
+                        rgb(PANEL).into()
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child("Waiting for QR…"),
+            })
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("The code refreshes automatically."),
+            )
+            .child(
+                Button::new("retry-pairing")
+                    .label("Refresh pairing code")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.begin_pairing();
+                        cx.notify();
+                    })),
+            )
+    }
+
+    fn render_center(
+        &self,
+        title: impl Into<SharedString>,
+        detail: impl Into<SharedString>,
+    ) -> gpui::Div {
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(title.into()),
+            )
+            .child(div().text_sm().child(detail.into()))
+    }
+
+    fn render_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let selected = self.store.selected_chat_id.clone();
+        let compact = window.viewport_size().width < px(800. * self.ui_scale);
+        let show_sidebar = !compact || selected.is_none();
+        let show_conversation = !compact || selected.is_some();
+        h_flex()
+            .size_full()
+            .when(show_sidebar, |root| root.child(self.render_sidebar(cx)))
+            .when(show_conversation, |root| {
+                root.child(self.render_conversation(compact, window, cx))
+            })
+    }
+
+    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let ui_scale = self.ui_scale;
+        let total = self.store.total_chats;
+        let logout_pending = self.store.logout_pending();
+        let dark = cx.theme().is_dark();
+        let chat_view = self.chat_view;
+        let visible_chat_ids = Rc::new(self.store.chat_ids(chat_view));
+        let visible_count = visible_chat_ids.len();
+        let has_more = !self.store.next_chat_cursor.is_empty();
+        let virtual_count = visible_count + usize::from(has_more);
+        let list_id = if chat_view == ChatView::Archived {
+            "archived-chat-list"
+        } else {
+            "inbox-chat-list"
+        };
+        let view_title = if chat_view == ChatView::Archived {
+            "Archived"
+        } else {
+            "Rust Meow"
+        };
+        let local_status = if self.store.sync_active {
+            format!(
+                "{} local · scanned {} chats · {} messages",
+                total, self.store.sync_chats, self.store.sync_messages
+            )
+        } else if chat_view == ChatView::Archived {
+            format!(
+                "{}{} archived · {} chats local",
+                visible_count,
+                if has_more { "+" } else { "" },
+                total
+            )
+        } else {
+            format!("{} chats local", total)
+        };
+        let selected_background = if dark { rgb(0x173a35) } else { rgb(0xe7f5ef) };
+        let hover_background = if dark { rgb(0x152f2c) } else { rgb(0xeff5f2) };
+        let visible_for_list = visible_chat_ids.clone();
+        v_flex()
+            .h_full()
+            .w(px(340. * ui_scale))
+            .min_w(px(280. * ui_scale))
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .child(
+                v_flex()
+                    .h(px(88. * ui_scale))
+                    .px_3()
+                    .py_2()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(view_title),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("theme")
+                                            .small()
+                                            .label(if dark { "Light" } else { "Dark" })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.toggle_theme(window, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("archived")
+                                            .small()
+                                            .label(if chat_view == ChatView::Archived {
+                                                "Chats"
+                                            } else {
+                                                "Archived"
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_chat_view();
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(Button::new("settings").small().label("⚙").on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.settings_open = !this.settings_open;
+                                            this.reaction_details = None;
+                                            this.image_viewer = None;
+                                            cx.notify();
+                                        }),
+                                    ))
+                                    .child(
+                                        Button::new("logout")
+                                            .small()
+                                            .label(if logout_pending {
+                                                "Clearing…"
+                                            } else if self.confirming_logout {
+                                                "Confirm"
+                                            } else {
+                                                "Log out"
+                                            })
+                                            .disabled(logout_pending)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if this.confirming_logout {
+                                                    this.request_logout();
+                                                } else {
+                                                    this.confirming_logout = true;
+                                                }
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(local_status),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(3.))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .bg(cx.theme().secondary)
+                            .when(self.store.sync_active, |track| {
+                                track.flex().justify_center().child(
+                                    div().h_full().w(px(72.)).rounded_full().bg(rgb(0x25d366)),
+                                )
+                            })
+                            .when(self.store.sync_complete, |track| {
+                                track
+                                    .child(div().h_full().w_full().rounded_full().bg(rgb(0x25d366)))
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        uniform_list(
+                            list_id,
+                            virtual_count,
+                            cx.processor(move |this, range: Range<usize>, _, cx| {
+                                let loaded = visible_for_list.len();
+                                if range.end >= loaded && !this.store.next_chat_cursor.is_empty() {
+                                    this.load_chats(this.store.next_chat_cursor.clone());
+                                }
+                                if this.store.connection == proto::ConnectionState::Connected
+                                    && this
+                                        .store
+                                        .pending
+                                        .values()
+                                        .filter(|pending| {
+                                            matches!(pending, PendingRequest::Avatar { .. })
+                                        })
+                                        .count()
+                                        < 4
+                                    && let Some(chat_id) = range.clone().find_map(|index| {
+                                        visible_for_list.get(index).and_then(|chat_id| {
+                                            this.store.chat(chat_id).and_then(|chat| {
+                                                (chat.avatar_path.is_empty()
+                                                    && chat.kind() != proto::ChatKind::Other
+                                                    && !this.avatar_attempted.contains(&chat.id))
+                                                .then(|| chat.id.clone())
+                                            })
+                                        })
+                                    })
+                                {
+                                    this.load_avatar(chat_id);
+                                }
+                                range
+                                    .map(|index| {
+                                        let Some(chat) = visible_for_list
+                                            .get(index)
+                                            .and_then(|id| this.store.chat(id))
+                                            .cloned()
+                                        else {
+                                            return div()
+                                                .id(("loading-chat", index))
+                                                .h(px(72.))
+                                                .px_4()
+                                                .flex()
+                                                .items_center()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("Loading more chats…");
+                                        };
+                                        let selected = this.store.selected_chat_id.as_deref()
+                                            == Some(chat.id.as_str());
+                                        let avatar = Avatar::new()
+                                            .name(chat.title.clone())
+                                            .with_size(px(42. * ui_scale));
+                                        let avatar = if chat.avatar_path.is_empty() {
+                                            avatar
+                                        } else {
+                                            avatar.src(PathBuf::from(chat.avatar_path.clone()))
+                                        };
+                                        let preview = if chat.phone_number.is_empty() {
+                                            chat.last_message_preview.clone()
+                                        } else if chat.last_message_preview.is_empty() {
+                                            chat.phone_number.clone()
+                                        } else {
+                                            format!(
+                                                "{} · {}",
+                                                chat.phone_number, chat.last_message_preview
+                                            )
+                                        };
+                                        div()
+                                            .id(("chat", index))
+                                            .h(px(72. * ui_scale))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .gap_3()
+                                            .when(selected, |row| row.bg(selected_background))
+                                            .hover(move |style| style.bg(hover_background))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.open_chat(chat.id.clone(), window, cx);
+                                                cx.notify();
+                                            }))
+                                            .child(avatar)
+                                            .child(
+                                                v_flex()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .gap_1()
+                                                    .child(
+                                                        h_flex()
+                                                            .justify_between()
+                                                            .child(
+                                                                div()
+                                                                    .truncate()
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .child(chat.title.clone()),
+                                                            )
+                                                            .when(chat.unread_count > 0, |line| {
+                                                                line.child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(if dark {
+                                                                            rgb(0x25d366)
+                                                                        } else {
+                                                                            rgb(DARK_GREEN)
+                                                                        })
+                                                                        .child(
+                                                                            chat.unread_count
+                                                                                .to_string(),
+                                                                        ),
+                                                                )
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .text_sm()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(preview),
+                                                    ),
+                                            )
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .h_full(),
+                    )
+                    .when(visible_count == 0 && !has_more, |list| {
+                        list.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .px_4()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if chat_view == ChatView::Archived {
+                                    "No archived chats"
+                                } else {
+                                    "No chats yet"
+                                }),
+                        )
+                    }),
+            )
+    }
+
+    fn render_conversation(
+        &mut self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let Some(chat) = self.store.selected_chat().cloned() else {
+            return self
+                .render_center("Rust Meow", "Choose a conversation to start messaging")
+                .flex_1();
+        };
+        if chat.avatar_path.is_empty()
+            && chat.kind() != proto::ChatKind::Other
+            && self.store.connection == proto::ConnectionState::Connected
+        {
+            self.load_avatar(chat.id.clone());
+        }
+        let available = window.viewport_size().width - if compact { px(56.) } else { px(396.) };
+        let wrap_width = if available < px(160.) {
+            px(160.)
+        } else if available > px(536.) {
+            px(536.)
+        } else {
+            available
+        };
+        self.measure_message_heights(wrap_width, cx.theme().font_size, window);
+        let sizes = self.store.message_sizes();
+        if let Some(generation) = self.scroll_to_bottom_generation.take() {
+            let item_count = sizes.len();
+            cx.on_next_frame(window, move |this, _, cx| {
+                if item_count > 0
+                    && this.message_generation == generation
+                    && this.store.messages.len() == item_count
+                {
+                    this.message_scroll
+                        .scroll_to_item(item_count.saturating_sub(1), ScrollStrategy::Bottom);
+                    cx.notify();
+                }
+            });
+        }
+        if let Some((anchor_id, old_offset)) = self.pending_prepend_anchor.take()
+            && let Some(anchor_index) = self
+                .store
+                .messages
+                .iter()
+                .position(|message| message.id == anchor_id)
+        {
+            let inserted_height = sizes[..anchor_index]
+                .iter()
+                .fold(px(0.), |height, size| height + size.height + px(8.));
+            self.message_scroll
+                .set_offset(point(old_offset.x, old_offset.y - inserted_height));
+        }
+        let connected = self.store.connection == proto::ConnectionState::Connected;
+        let has_older = self.store.has_older_messages;
+        let has_newer = self.store.has_newer_messages || self.store.newer_activity;
+        let dark = cx.theme().is_dark();
+        let conversation_background = if dark { rgb(0x0d1715) } else { rgb(0xf4f0e8) };
+        let connection_detail = if self.store.connection_detail.is_empty() {
+            connection_label(self.store.connection).to_string()
+        } else {
+            self.store.connection_detail.clone()
+        };
+        let mut identity_parts = Vec::new();
+        if !chat.phone_number.is_empty() {
+            identity_parts.push(chat.phone_number.clone());
+        }
+        if !chat.business_name.is_empty() && chat.business_name != chat.title {
+            identity_parts.push(chat.business_name.clone());
+        }
+        if !chat.push_name.is_empty()
+            && chat.push_name != chat.title
+            && chat.push_name != chat.business_name
+        {
+            identity_parts.push(chat.push_name.clone());
+        }
+        identity_parts.push(connection_detail);
+        let identity_line = identity_parts.join(" · ");
+        let reply_context = self.replying_to_message_id.as_deref().map(|message_id| {
+            self.store.message(message_id).map_or_else(
+                || {
+                    (
+                        "Original message".to_string(),
+                        "Message unavailable".to_string(),
+                    )
+                },
+                |message| {
+                    let sender = if message.from_me {
+                        "You".to_string()
+                    } else if message.sender_name.trim().is_empty() {
+                        "Unknown contact".to_string()
+                    } else {
+                        message.sender_name.trim().to_string()
+                    };
+                    (sender, message_preview(message))
+                },
+            )
+        });
+        let header_avatar = Avatar::new()
+            .name(chat.title.clone())
+            .with_size(px(38. * self.ui_scale));
+        let header_avatar = if chat.avatar_path.is_empty() {
+            header_avatar
+        } else {
+            header_avatar.src(PathBuf::from(chat.avatar_path.clone()))
+        };
+        v_flex()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .child(
+                h_flex()
+                    .h(px(64. * self.ui_scale))
+                    .px_4()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .when(compact, |header| {
+                        header.child(Button::new("back").label("‹").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.store.selected_chat_id = None;
+                                this.reaction_details = None;
+                                this.cancel_reply();
+                                cx.notify();
+                            },
+                        )))
+                    })
+                    .child(header_avatar)
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(chat.title),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(identity_line),
+                            ),
+                    ),
+            )
+            .child(
+                div().flex_1().min_h_0().bg(conversation_background).child(
+                    v_virtual_list(
+                        cx.entity().clone(),
+                        "messages",
+                        sizes,
+                        |this, range: Range<usize>, window, cx| {
+                            let visible_images = range
+                                .clone()
+                                .filter_map(|index| this.store.messages.get(index))
+                                .filter_map(|message| match message.content.as_ref() {
+                                    Some(proto::message::Content::Image(image))
+                                        if image.local_path.is_empty() && image.downloadable =>
+                                    {
+                                        Some((message.chat_id.clone(), message.id.clone()))
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>();
+                            for (chat_id, message_id) in visible_images {
+                                this.load_message_image(chat_id, message_id);
+                            }
+                            if this
+                                .store
+                                .selected_chat()
+                                .is_some_and(|chat| chat.kind() == proto::ChatKind::Group)
+                            {
+                                let participants = range
+                                    .clone()
+                                    .filter_map(|index| this.store.messages.get(index))
+                                    .filter(|message| {
+                                        !message.from_me
+                                            && message.sender_avatar_path.is_empty()
+                                            && this
+                                                .store
+                                                .participant_avatar_path(&message.sender_id)
+                                                .is_none()
+                                            && !message.sender_id.is_empty()
+                                    })
+                                    .map(|message| message.sender_id.clone())
+                                    .collect::<HashSet<_>>();
+                                for participant_id in participants {
+                                    this.load_participant_avatar(participant_id);
+                                }
+                            }
+                            if window.is_window_active()
+                                && range.end == this.store.messages.len()
+                                && !this.store.has_newer_messages
+                                && !this.store.newer_activity
+                            {
+                                this.mark_read();
+                            }
+                            range.map(|index| this.render_message(index, cx)).collect()
+                        },
+                    )
+                    .track_scroll(&self.message_scroll)
+                    .p_4()
+                    .gap_2(),
+                ),
+            )
+            .when(has_older, |column| {
+                column.child(Button::new("older").label("Load older messages").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.load_older_messages();
+                        cx.notify();
+                    }),
+                ))
+            })
+            .when(has_newer, |column| {
+                column.child(
+                    Button::new("jump-latest")
+                        .primary()
+                        .label("Jump to latest messages")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.refresh_latest();
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(!connected, |column| {
+                column.child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .bg(if dark { rgb(0x594918) } else { rgb(0xffe9b5) })
+                        .child("Offline — messages will be available after reconnection"),
+                )
+            })
+            .when(self.emoji_target.is_some(), |column| {
+                column.child(self.render_emoji_picker(cx))
+            })
+            .child(
+                v_flex()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .when_some(reply_context, |composer, (sender, preview)| {
+                        composer.child(
+                            h_flex()
+                                .mx_3()
+                                .mt_2()
+                                .px_3()
+                                .py_2()
+                                .gap_3()
+                                .rounded_md()
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    v_flex()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0x25d366))
+                                                .child(format!("Replying to {sender}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(preview),
+                                        ),
+                                )
+                                .child(Button::new("cancel-reply").small().label("×").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.cancel_reply();
+                                        cx.notify();
+                                    }),
+                                )),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .p_3()
+                            .gap_2()
+                            .child(
+                                Button::new("emoji-picker")
+                                    .label("😀")
+                                    .disabled(!connected)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_composer_emoji();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("send-image")
+                                    .label("📷")
+                                    .disabled(!connected)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.choose_image(window, cx)
+                                    })),
+                            )
+                            .child(Input::new(&self.composer).disabled(!connected).flex_1())
+                            .child(
+                                Button::new("send")
+                                    .primary()
+                                    .label("Send")
+                                    .disabled(!connected)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.send_text(window, cx)
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_emoji_picker(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let row_count = self.emoji_results.len().div_ceil(EMOJI_COLUMNS);
+        let selected = self.emoji_category;
+        let reaction_mode = matches!(self.emoji_target, Some(EmojiTarget::Reaction { .. }));
+        let has_own_reaction = match &self.emoji_target {
+            Some(EmojiTarget::Reaction { message_id, .. }) => self
+                .store
+                .messages
+                .iter()
+                .find(|message| &message.id == message_id)
+                .is_some_and(|message| message.reactions.iter().any(|reaction| reaction.from_me)),
+            _ => false,
+        };
+        v_flex()
+            .h(px(300.))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .child(
+                h_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .child(Input::new(&self.emoji_search).flex_1())
+                    .when(has_own_reaction, |row| {
+                        row.child(
+                            Button::new("remove-reaction")
+                                .label("Remove mine")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.remove_reaction();
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .child(Button::new("close-emoji").label("×").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.emoji_target = None;
+                            cx.notify();
+                        },
+                    ))),
+            )
+            .child(
+                h_flex()
+                    .px_3()
+                    .gap_1()
+                    .children(EmojiCategory::ALL.into_iter().enumerate().map(
+                        |(index, category)| {
+                            let button =
+                                Button::new(("emoji-category", index)).label(category.label());
+                            let button = if category == selected {
+                                button.primary()
+                            } else {
+                                button
+                            };
+                            button.on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_emoji_category(category);
+                                cx.notify();
+                            }))
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        uniform_list(
+                            "emoji-results",
+                            row_count,
+                            cx.processor(|this, rows: Range<usize>, _, cx| {
+                                rows.map(|row| {
+                                    h_flex().h(px(42.)).px_3().gap_1().children(
+                                        (0..EMOJI_COLUMNS).filter_map(|column| {
+                                            let index = row * EMOJI_COLUMNS + column;
+                                            let emoji = this.emoji_results.get(index)?;
+                                            let value = emoji.as_str().to_string();
+                                            Some(
+                                                Button::new(("emoji", index))
+                                                    .label(value.clone())
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.choose_emoji(&value, window, cx);
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            )
+                                        }),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                            }),
+                        )
+                        .h_full(),
+                    )
+                    .when(row_count == 0, |panel| {
+                        panel.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No emoji found"),
+                        )
+                    }),
+            )
+            .when(reaction_mode, |panel| {
+                panel.child(
+                    div()
+                        .px_3()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Choose one emoji to react"),
+                )
+            })
+    }
+
+    fn render_reaction_details(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(details) = self.reaction_details.as_ref() else {
+            return div();
+        };
+        let emoji = details.emoji.clone();
+        let count = details.reactions.len();
+        let list_height = px((count.clamp(1, 7) as f32) * 58.);
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .bg(rgba(0x00000088))
+            .child(
+                v_flex()
+                    .w(px(420.))
+                    .max_w_full()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .child(
+                        h_flex()
+                            .h(px(58.))
+                            .px_4()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                v_flex()
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(format!("{emoji} Reactions")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!(
+                                                "{count} {}",
+                                                if count == 1 { "person" } else { "people" }
+                                            )),
+                                    ),
+                            )
+                            .child(Button::new("close-reaction-details").label("×").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.reaction_details = None;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(
+                        uniform_list(
+                            "reaction-details-reactors",
+                            count,
+                            cx.processor(|this, range: Range<usize>, _, cx| {
+                                let reactions = this
+                                    .reaction_details
+                                    .as_ref()
+                                    .map(|details| details.reactions.clone())
+                                    .unwrap_or_default();
+                                let visible = range
+                                    .filter_map(|index| {
+                                        reactions
+                                            .get(index)
+                                            .cloned()
+                                            .map(|reaction| (index, reaction))
+                                    })
+                                    .collect::<Vec<_>>();
+                                for (_, reaction) in &visible {
+                                    if reaction.sender_avatar_path.is_empty()
+                                        && this
+                                            .store
+                                            .participant_avatar_path(&reaction.sender_id)
+                                            .is_none()
+                                    {
+                                        this.load_participant_avatar(reaction.sender_id.clone());
+                                    }
+                                }
+                                visible
+                                    .into_iter()
+                                    .map(|(index, reaction)| {
+                                        let name = reaction_sender_name(&reaction).to_string();
+                                        let detail = reaction_sender_detail(&reaction).to_string();
+                                        let cached_avatar = this
+                                            .store
+                                            .participant_avatar_path(&reaction.sender_id)
+                                            .unwrap_or_default();
+                                        let avatar_path = if reaction.sender_avatar_path.is_empty()
+                                        {
+                                            cached_avatar
+                                        } else {
+                                            reaction.sender_avatar_path.as_str()
+                                        };
+                                        let avatar =
+                                            Avatar::new().name(name.clone()).with_size(px(38.));
+                                        let avatar = if avatar_path.is_empty() {
+                                            avatar
+                                        } else {
+                                            avatar.src(PathBuf::from(avatar_path))
+                                        };
+                                        h_flex()
+                                            .id(("reaction-detail-row", index))
+                                            .h(px(58.))
+                                            .px_4()
+                                            .gap_3()
+                                            .items_center()
+                                            .child(avatar)
+                                            .child(
+                                                v_flex()
+                                                    .min_w_0()
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .font_weight(if reaction.from_me {
+                                                                gpui::FontWeight::SEMIBOLD
+                                                            } else {
+                                                                gpui::FontWeight::NORMAL
+                                                            })
+                                                            .child(name),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(detail),
+                                                    ),
+                                            )
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .h(list_height),
+                    ),
+            )
+    }
+
+    fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let scale_percent = (self.ui_scale * 100.0).round() as u32;
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .bg(rgba(0x00000088))
+            .child(
+                v_flex()
+                    .w(px(420.))
+                    .max_w_full()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .child(
+                        h_flex()
+                            .h(px(58.))
+                            .px_4()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Settings"),
+                            )
+                            .child(
+                                Button::new("close-settings")
+                                    .label("×")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .p_4()
+                            .gap_3()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child("UI scale"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(
+                                                "Increase text, controls, and interface spacing.",
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("decrease-ui-scale")
+                                            .label("−")
+                                            .disabled(self.ui_scale <= MIN_UI_SCALE)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.adjust_ui_scale(-UI_SCALE_STEP, window, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(84.))
+                                            .text_center()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(format!("{scale_percent}%")),
+                                    )
+                                    .child(
+                                        Button::new("increase-ui-scale")
+                                            .label("+")
+                                            .disabled(self.ui_scale >= MAX_UI_SCALE)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.adjust_ui_scale(UI_SCALE_STEP, window, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("reset-ui-scale")
+                                            .small()
+                                            .label("Reset")
+                                            .disabled(self.ui_scale == 1.0)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.set_ui_scale(1.0, window, cx);
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Saved automatically for future launches."),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_chat_switcher(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(switcher) = self.chat_switcher.as_ref() else {
+            return div();
+        };
+        let highlighted = switcher.highlighted;
+        let chats = switcher
+            .chat_ids
+            .iter()
+            .filter_map(|chat_id| self.store.chat(chat_id).cloned())
+            .collect::<Vec<_>>();
+        let selected_background = if cx.theme().is_dark() {
+            rgb(0x173f35)
+        } else {
+            rgb(0xd9fdd3)
+        };
+        let hover_background = if cx.theme().is_dark() {
+            rgb(0x202c33)
+        } else {
+            rgb(0xf0f2f5)
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .bg(rgba(0x00000088))
+            .child(
+                v_flex()
+                    .w(px(500. * self.ui_scale))
+                    .max_w_full()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .overflow_hidden()
+                    .child(
+                        h_flex()
+                            .h(px(52. * self.ui_scale))
+                            .px_4()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Recent chats"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{} of {}", highlighted + 1, chats.len())),
+                            ),
+                    )
+                    .children(chats.into_iter().enumerate().map(|(index, chat)| {
+                        let chat_id = chat.id.clone();
+                        let preview = if chat.last_message_preview.trim().is_empty() {
+                            if chat.phone_number.trim().is_empty() {
+                                "No messages yet".to_string()
+                            } else {
+                                chat.phone_number.clone()
+                            }
+                        } else {
+                            chat.last_message_preview.clone()
+                        };
+                        let avatar = Avatar::new()
+                            .name(chat.title.clone())
+                            .with_size(px(40. * self.ui_scale));
+                        let avatar = if chat.avatar_path.is_empty() {
+                            avatar
+                        } else {
+                            avatar.src(PathBuf::from(chat.avatar_path.clone()))
+                        };
+                        h_flex()
+                            .id(("recent-chat", index))
+                            .h(px(64. * self.ui_scale))
+                            .px_4()
+                            .gap_3()
+                            .items_center()
+                            .cursor_pointer()
+                            .when(index == highlighted, |row| row.bg(selected_background))
+                            .hover(move |style| style.bg(hover_background))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.commit_chat_switcher_to(chat_id.clone(), window, cx);
+                                cx.notify();
+                            }))
+                            .child(avatar)
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(chat.title),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(preview),
+                                    ),
+                            )
+                            .when(chat.archived, |row| {
+                                row.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Archived"),
+                                )
+                            })
+                    }))
+                    .child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Release Ctrl to switch · Esc to cancel"),
+                    ),
+            )
+    }
+
+    fn render_image_viewer(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(viewer) = self.image_viewer.as_ref() else {
+            return div();
+        };
+        let chat_id = viewer.chat_id.clone();
+        let message_id = viewer.message_id.clone();
+        let path = viewer.path.clone();
+        let caption = viewer.caption.trim().to_string();
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .flex_col()
+            .p_4()
+            .bg(rgba(0x050807f2))
+            .text_color(rgb(0xffffff))
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Photo"))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Button::new("reload-viewed-image").label("Reload").on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.retry_message_image(chat_id.clone(), message_id.clone());
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(Button::new("close-image-viewer").label("×").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.image_viewer = None;
+                                    cx.notify();
+                                }),
+                            )),
+                    ),
+            )
+            .child(
+                div().flex_1().min_h_0().min_w_0().p_4().child(
+                    img(PathBuf::from(path))
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .with_loading(|| {
+                            div()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child("Opening photo…")
+                                .into_any_element()
+                        })
+                        .with_fallback(|| {
+                            div()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child("This photo couldn't be decoded. Try Reload.")
+                                .into_any_element()
+                        }),
+                ),
+            )
+            .when(!caption.is_empty(), |viewer| {
+                viewer.child(
+                    div()
+                        .w_full()
+                        .max_h(px(96.))
+                        .overflow_hidden()
+                        .px_4()
+                        .py_2()
+                        .text_sm()
+                        .child(caption),
+                )
+            })
+    }
+
+    fn render_message(&self, index: usize, cx: &mut Context<Self>) -> gpui::Div {
+        let message = &self.store.messages[index];
+        let image_content = match message.content.as_ref() {
+            Some(proto::message::Content::Image(image)) => Some(image.clone()),
+            _ => None,
+        };
+        let sticker = image_content.as_ref().is_some_and(|image| image.sticker);
+        let text = if sticker {
+            String::new()
+        } else {
+            message_text(message).to_string()
+        };
+        let reaction_chips = reaction_counts(message);
+        let reply_target_id = message.reply_to_message_id.clone();
+        let reply_target = self.store.message(&reply_target_id).cloned();
+        let reply_count = self.store.reply_count(&message.id);
+        let first_reply_id = self
+            .store
+            .messages
+            .iter()
+            .find(|candidate| candidate.reply_to_message_id == message.id)
+            .map(|reply| reply.id.clone());
+        let chat_id = message.chat_id.clone();
+        let message_id = message.id.clone();
+        let reply_action_message_id = message_id.clone();
+        let message_image_chat_id = chat_id.clone();
+        let message_image_id = message_id.clone();
+        let image_failure = self
+            .image_failures
+            .get(&(chat_id.clone(), message_id.clone()))
+            .cloned();
+        let reaction_chat_id = chat_id.clone();
+        let reaction_message_id = message_id.clone();
+        let own_reaction_background: gpui::Hsla = if cx.theme().is_dark() {
+            rgb(0x164e3d).into()
+        } else {
+            rgb(0xd9fdd3).into()
+        };
+        let reaction_hover = if cx.theme().is_dark() {
+            rgb(0x245c4e)
+        } else {
+            rgb(0xc8f4c1)
+        };
+        let group_incoming = !message.from_me
+            && self
+                .store
+                .selected_chat()
+                .is_some_and(|chat| chat.kind() == proto::ChatKind::Group);
+        let status = if message.from_me {
+            format!(" · {}", message_status(message.status()))
+        } else {
+            String::new()
+        };
+        h_flex()
+            .w_full()
+            .items_start()
+            .gap_2()
+            .when(message.from_me, |row| row.justify_end())
+            .when(group_incoming, |row| {
+                let avatar = Avatar::new()
+                    .name(message.sender_name.clone())
+                    .with_size(px(30.));
+                let avatar_path = if message.sender_avatar_path.is_empty() {
+                    self.store
+                        .participant_avatar_path(&message.sender_id)
+                        .unwrap_or_default()
+                } else {
+                    message.sender_avatar_path.as_str()
+                };
+                row.child(if avatar_path.is_empty() {
+                    avatar
+                } else {
+                    avatar.src(PathBuf::from(avatar_path))
+                })
+            })
+            .child(
+                v_flex()
+                    .max_w(px(560.))
+                    .when(!sticker, |bubble| bubble.px_3().py_2())
+                    .rounded_lg()
+                    .gap_1()
+                    .bg(if sticker {
+                        gpui::transparent_black().into()
+                    } else if message.from_me {
+                        if cx.theme().is_dark() {
+                            rgb(0x173f35).into()
+                        } else {
+                            gpui::hsla(0.31, 0.87, 0.91, 1.0)
+                        }
+                    } else {
+                        cx.theme().background
+                    })
+                    .when(!reply_target_id.is_empty(), |bubble| {
+                        let target_id = reply_target_id.clone();
+                        let (sender, preview) = reply_target.as_ref().map_or_else(
+                            || {
+                                (
+                                    "Original message".to_string(),
+                                    "Message unavailable".to_string(),
+                                )
+                            },
+                            |target| {
+                                let sender = if target.from_me {
+                                    "You".to_string()
+                                } else if !target.sender_name.trim().is_empty() {
+                                    target.sender_name.trim().to_string()
+                                } else {
+                                    "Unknown contact".to_string()
+                                };
+                                (sender, message_preview(target))
+                            },
+                        );
+                        bubble.child(
+                            v_flex()
+                                .id(("quoted-message", index))
+                                .w_full()
+                                .min_w(px(180.))
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .border_l_2()
+                                .border_color(rgb(0x25d366))
+                                .bg(cx.theme().secondary)
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0x25d366))
+                                        .child(sender),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(preview),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.scroll_to_message(&target_id);
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .when_some(image_content, |bubble, image| {
+                        let (image_width, image_height) = image_render_size(&image);
+                        let image_path = image.local_path.clone();
+                        let image_is_cached =
+                            !image_path.is_empty() && PathBuf::from(&image_path).is_file();
+                        let cached_path_missing = !image_path.is_empty() && !image_is_cached;
+                        let retryable =
+                            image.downloadable && (image_failure.is_some() || cached_path_missing);
+                        let placeholder = if cached_path_missing {
+                            "Cached photo missing · Click to reload".to_string()
+                        } else if let Some(failure) = image_failure.clone() {
+                            failure
+                        } else if image.downloadable {
+                            "Loading photo…".to_string()
+                        } else {
+                            "Photo unavailable".to_string()
+                        };
+                        let viewer_chat_id = message_image_chat_id.clone();
+                        let viewer_message_id = message_image_id.clone();
+                        let viewer_path = image_path.clone();
+                        let viewer_caption = image.caption.clone();
+                        let retry_chat_id = message_image_chat_id.clone();
+                        let retry_message_id = message_image_id.clone();
+                        let loading_color = cx.theme().muted_foreground;
+                        let fallback_color = cx.theme().muted_foreground;
+                        bubble.child(
+                            div()
+                                .id(("message-image", index))
+                                .w(image_width)
+                                .h(image_height)
+                                .max_w_full()
+                                .overflow_hidden()
+                                .rounded_md()
+                                .when(!image.sticker, |container| {
+                                    container
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .bg(cx.theme().secondary)
+                                })
+                                .when(image_is_cached, |container| {
+                                    container.child(
+                                        img(PathBuf::from(image_path.clone()))
+                                            .size_full()
+                                            .object_fit(ObjectFit::Contain)
+                                            .with_loading(move || {
+                                                div()
+                                                    .size_full()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_sm()
+                                                    .text_color(loading_color)
+                                                    .child("Decoding photo…")
+                                                    .into_any_element()
+                                            })
+                                            .with_fallback(move || {
+                                                div()
+                                                    .size_full()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .px_3()
+                                                    .text_sm()
+                                                    .text_color(fallback_color)
+                                                    .child("Couldn't display photo · Open to retry")
+                                                    .into_any_element()
+                                            }),
+                                    )
+                                })
+                                .when(image_is_cached, |container| {
+                                    container.cursor_pointer().on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.open_image_viewer(
+                                                viewer_chat_id.clone(),
+                                                viewer_message_id.clone(),
+                                                viewer_path.clone(),
+                                                viewer_caption.clone(),
+                                            );
+                                            cx.notify();
+                                        },
+                                    ))
+                                })
+                                .when(!image_is_cached, |container| {
+                                    container.child(
+                                        div()
+                                            .size_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .px_3()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(placeholder),
+                                    )
+                                })
+                                .when(retryable, |container| {
+                                    container.cursor_pointer().on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.retry_message_image(
+                                                retry_chat_id.clone(),
+                                                retry_message_id.clone(),
+                                            );
+                                            cx.notify();
+                                        },
+                                    ))
+                                }),
+                        )
+                    })
+                    .when(!text.is_empty(), |bubble| bubble.child(div().child(text)))
+                    .when(!reaction_chips.is_empty(), |bubble| {
+                        bubble.child(
+                            h_flex()
+                                .gap_1()
+                                .children(reaction_chips.into_iter().enumerate().map(
+                                    |(chip_index, reaction)| {
+                                        let emoji = reaction.emoji.to_string();
+                                        let clicked_emoji = emoji.clone();
+                                        let clicked_chat_id = reaction_chat_id.clone();
+                                        let clicked_message_id = reaction_message_id.clone();
+                                        div()
+                                            .id(format!("reaction-chip-{index}-{chip_index}"))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_lg()
+                                            .border_1()
+                                            .border_color(if reaction.from_me {
+                                                rgb(0x25d366).into()
+                                            } else {
+                                                cx.theme().border
+                                            })
+                                            .bg(if reaction.from_me {
+                                                own_reaction_background
+                                            } else {
+                                                cx.theme().secondary
+                                            })
+                                            .hover(move |style| style.bg(reaction_hover))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .child(format!("{emoji} {}", reaction.count))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.open_reaction_details(
+                                                    clicked_chat_id.clone(),
+                                                    clicked_message_id.clone(),
+                                                    clicked_emoji.clone(),
+                                                );
+                                                cx.notify();
+                                            }))
+                                    },
+                                )),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{}{}{}{}",
+                                        message.sender_name,
+                                        if group_incoming
+                                            && !message.sender_phone_number.is_empty()
+                                            && message.sender_phone_number != message.sender_name
+                                        {
+                                            format!(" · {}", message.sender_phone_number)
+                                        } else {
+                                            String::new()
+                                        },
+                                        if message.edited { " · edited" } else { "" },
+                                        status
+                                    )),
+                            )
+                            .when(reply_count > 0, |footer| {
+                                let reply_id = first_reply_id.clone().unwrap_or_default();
+                                footer.child(
+                                    Button::new(("view-replies", index))
+                                        .small()
+                                        .label(if reply_count == 1 {
+                                            "1 reply".to_string()
+                                        } else {
+                                            format!("{reply_count} replies")
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.scroll_to_message(&reply_id);
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new(("reply-message", index))
+                                    .small()
+                                    .label("Reply")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.start_reply(reply_action_message_id.clone());
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(("react-message", index))
+                                    .small()
+                                    .label("React")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_reaction_picker(
+                                            chat_id.clone(),
+                                            message_id.clone(),
+                                        );
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
+    fn measure_message_heights(
+        &mut self,
+        wrap_width: Pixels,
+        font_size: Pixels,
+        window: &mut Window,
+    ) {
+        let width_bucket = (wrap_width / px(8.)).round() as i32;
+        if !self.store.message_sizes_need_measurement(width_bucket) {
+            return;
+        }
+        let line_height = window.line_height();
+        let mut sizes = Vec::with_capacity(self.store.messages.len());
+        for index in 0..self.store.messages.len() {
+            let height = if let Some(height) = {
+                let message = &self.store.messages[index];
+                self.store.cached_message_height(&message.id, width_bucket)
+            } {
+                height
+            } else {
+                let (id, text) = {
+                    let message = &self.store.messages[index];
+                    (message.id.clone(), message_text(message).to_string())
+                };
+                let text_height = if text.is_empty() {
+                    px(0.)
+                } else {
+                    let text: SharedString = text.into();
+                    let run = window.text_style().to_run(text.len());
+                    window
+                        .text_system()
+                        .shape_text(text, font_size, &[run], Some(wrap_width), None)
+                        .map(|lines| {
+                            lines.iter().fold(px(0.), |height, line| {
+                                height + line.size(line_height).height
+                            })
+                        })
+                        .unwrap_or(line_height)
+                };
+                let image_height = match self.store.messages[index].content.as_ref() {
+                    Some(proto::message::Content::Image(image)) => {
+                        image_render_size(image).1
+                            + if text_height > px(0.) { px(4.) } else { px(0.) }
+                    }
+                    _ => px(0.),
+                };
+                let reaction_height = if reaction_counts(&self.store.messages[index]).is_empty() {
+                    px(0.)
+                } else {
+                    px(30. * self.ui_scale)
+                };
+                let reply_height = if self.store.messages[index].reply_to_message_id.is_empty() {
+                    px(0.)
+                } else {
+                    px(54. * self.ui_scale)
+                };
+                let height = text_height
+                    + image_height
+                    + px(40. * self.ui_scale)
+                    + reaction_height
+                    + reply_height;
+                self.store.cache_message_height(id, width_bucket, height);
+                height
+            };
+            sizes.push(size(px(1.), height));
+        }
+        self.store.set_measured_message_sizes(width_bucket, sizes);
+    }
+}
+
+fn image_render_size(image: &proto::ImageContent) -> (Pixels, Pixels) {
+    let max_edge = if image.sticker { 220. } else { 320. };
+    if image.width == 0 || image.height == 0 {
+        return if image.sticker {
+            (px(max_edge), px(max_edge))
+        } else {
+            (px(300.), px(220.))
+        };
+    }
+    let source_width = image.width as f32;
+    let source_height = image.height as f32;
+    let scale = (max_edge / source_width).min(max_edge / source_height);
+    (px(source_width * scale), px(source_height * scale))
+}
+
+impl Render for RustMeow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match self.store.screen {
+            Screen::Starting => self.render_center(
+                "Starting Rust Meow",
+                "Connecting to the local WhatsApp backend",
+            ),
+            Screen::Pairing => self.render_pairing(cx),
+            Screen::Syncing => self.render_center(
+                "Syncing your chats",
+                format!(
+                    "{} chats · {} messages",
+                    self.store.sync_chats, self.store.sync_messages
+                ),
+            ),
+            Screen::Chats => self.render_chats(window, cx),
+            Screen::Fatal => self.render_center(
+                "Rust Meow needs attention",
+                self.store
+                    .fatal_error
+                    .clone()
+                    .unwrap_or_else(|| "Unknown backend error".into()),
+            ),
+        };
+        v_flex()
+            .size_full()
+            .bg(cx.theme().background)
+            .on_action(cx.listener(|this, _: &CycleRecentChat, _, cx| {
+                this.cycle_recent_chat(false);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CycleRecentChatReverse, _, cx| {
+                this.cycle_recent_chat(true);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_modifiers_changed(
+                cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    if this.chat_switcher.is_some() && !event.modifiers.control {
+                        this.commit_chat_switcher(window, cx);
+                        cx.notify();
+                    }
+                }),
+            )
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if this.chat_switcher.is_some() && event.keystroke.key == "escape" {
+                    this.cancel_chat_switcher();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(content)
+            .when_some(self.store.toast_error.clone(), |root, error| {
+                root.child(
+                    div()
+                        .absolute()
+                        .bottom_4()
+                        .right_4()
+                        .max_w(px(420.))
+                        .p_3()
+                        .rounded_lg()
+                        .bg(rgb(0x7f1d1d))
+                        .text_color(rgb(0xffffff))
+                        .child(error),
+                )
+            })
+            .when(self.reaction_details.is_some(), |root| {
+                root.child(self.render_reaction_details(cx))
+            })
+            .when(self.image_viewer.is_some(), |root| {
+                root.child(self.render_image_viewer(cx))
+            })
+            .when(self.settings_open, |root| {
+                root.child(self.render_settings(cx))
+            })
+            .when(self.chat_switcher.is_some(), |root| {
+                root.child(self.render_chat_switcher(cx))
+            })
+    }
+}
+
+fn connection_label(connection: proto::ConnectionState) -> &'static str {
+    match connection {
+        proto::ConnectionState::Connected => "online",
+        proto::ConnectionState::Reconnecting => "reconnecting…",
+        proto::ConnectionState::Offline => "offline",
+        proto::ConnectionState::Connecting => "connecting…",
+        _ => "local client",
+    }
+}
+
+fn message_status(status: proto::MessageStatus) -> &'static str {
+    match status {
+        proto::MessageStatus::Pending => "sending",
+        proto::MessageStatus::Sent => "sent",
+        proto::MessageStatus::Delivered => "delivered",
+        proto::MessageStatus::Read => "read",
+        proto::MessageStatus::Failed => "failed",
+        _ => "",
+    }
+}
+
+fn message_preview(message: &proto::Message) -> String {
+    let flattened = message_text(message)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if flattened.is_empty() {
+        return "Media message".to_string();
+    }
+    let mut characters = flattened.chars();
+    let preview = characters.by_ref().take(96).collect::<String>();
+    if characters.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
+}
+
+fn qr_canvas(code: QrCode) -> gpui::Div {
+    let width = code.width();
+    let modules = Rc::new(
+        code.into_colors()
+            .into_iter()
+            .map(|color| color == Color::Dark)
+            .collect::<Vec<_>>(),
+    );
+    div()
+        .size(px(240.))
+        .p_3()
+        .rounded_lg()
+        .bg(rgb(0xffffff))
+        .child(
+            canvas(
+                move |bounds, _, _| bounds,
+                move |bounds, _, window, _| {
+                    let cell = bounds.size.width / width as f32;
+                    for row in 0..width {
+                        for col in 0..width {
+                            if modules[row * width + col] {
+                                window.paint_quad(gpui::PaintQuad {
+                                    bounds: gpui::Bounds {
+                                        origin: bounds.origin
+                                            + point(cell * col as f32, cell * row as f32),
+                                        size: size(cell, cell),
+                                    },
+                                    corner_radii: gpui::Corners::default(),
+                                    background: rgb(0x111b21).into(),
+                                    border_widths: gpui::Edges::default(),
+                                    border_color: gpui::transparent_black(),
+                                    border_style: gpui::BorderStyle::default(),
+                                });
+                            }
+                        }
+                    }
+                },
+            )
+            .size_full(),
+        )
+}
+
+fn main() {
+    gpui_platform::application().with_assets(Assets).run(|cx| {
+        gpui_component::init(cx);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-tab", CycleRecentChat, None),
+            KeyBinding::new("ctrl-shift-tab", CycleRecentChatReverse, None),
+        ]);
+        Theme::change(ThemeMode::Dark, None, cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
+            window_min_size: Some(size(px(480.), px(560.))),
+            ..Default::default()
+        };
+        cx.spawn(async move |cx| {
+            cx.open_window(options, |window, cx| {
+                let app = cx.new(|cx| RustMeow::new(window, cx));
+                cx.new(|cx| Root::new(app, window, cx))
+            })
+            .expect("open Rust Meow window");
+        })
+        .detach();
+    });
+}
+
+#[cfg(test)]
+mod reaction_details_ui_tests {
+    use super::*;
+
+    #[test]
+    fn inspector_state_is_scoped_to_exact_message_and_emoji() {
+        let message = proto::Message {
+            id: "message".into(),
+            chat_id: "chat".into(),
+            reactions: vec![
+                proto::Reaction {
+                    emoji: "👍".into(),
+                    sender_id: "friend".into(),
+                    ..Default::default()
+                },
+                proto::Reaction {
+                    emoji: "❤️".into(),
+                    sender_id: "other".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let details = ReactionDetails::new("chat".into(), &message, "👍".into()).unwrap();
+        assert_eq!(details.chat_id, "chat");
+        assert_eq!(details.message_id, "message");
+        assert_eq!(details.emoji, "👍");
+        assert_eq!(details.reactions.len(), 1);
+        assert_eq!(details.reactions[0].sender_id, "friend");
+        assert!(ReactionDetails::new("chat".into(), &message, "😂".into()).is_none());
+    }
+
+    #[test]
+    fn stickers_are_sized_smaller_without_distorting_their_aspect_ratio() {
+        let sticker = proto::ImageContent {
+            width: 512,
+            height: 256,
+            sticker: true,
+            ..Default::default()
+        };
+        assert_eq!(image_render_size(&sticker), (px(220.), px(110.)));
+    }
+
+    #[test]
+    fn outgoing_text_validation_rejects_blank_and_oversized_messages() {
+        assert_eq!(
+            validate_text_message("   ").unwrap_err(),
+            "Type a message before sending"
+        );
+        assert!(validate_text_message(&"a".repeat(MAX_TEXT_BYTES)).is_ok());
+        assert!(validate_text_message(&"a".repeat(MAX_TEXT_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn outgoing_image_validation_checks_type_size_and_caption() {
+        let directory = tempfile::tempdir().unwrap();
+        let png = directory.path().join("photo.bin");
+        fs::write(&png, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).unwrap();
+        assert!(validate_image_message(&png, "caption").is_ok());
+
+        let unsupported = directory.path().join("not-image.bin");
+        fs::write(&unsupported, b"plain text").unwrap();
+        assert!(validate_image_message(&unsupported, "").is_err());
+        assert!(validate_image_message(&png, &"a".repeat(MAX_CAPTION_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn ui_scale_is_clamped_and_rounded_to_settings_steps() {
+        assert_eq!(normalized_ui_scale(0.5), MIN_UI_SCALE);
+        assert_eq!(normalized_ui_scale(1.26), 1.3);
+        assert_eq!(normalized_ui_scale(9.0), MAX_UI_SCALE);
+    }
+
+    #[test]
+    fn recent_chat_history_is_deduplicated_newest_first_and_bounded() {
+        let mut history = Vec::new();
+        for index in 0..12 {
+            record_recent_chat(&mut history, &format!("chat-{index}"));
+        }
+        assert_eq!(history.len(), MAX_RECENT_CHATS);
+        assert_eq!(history.first().map(String::as_str), Some("chat-11"));
+        assert_eq!(history.last().map(String::as_str), Some("chat-2"));
+
+        record_recent_chat(&mut history, "chat-5");
+        assert_eq!(history.first().map(String::as_str), Some("chat-5"));
+        assert_eq!(history.iter().filter(|id| *id == "chat-5").count(), 1);
+    }
+
+    #[test]
+    fn recent_chat_switcher_cycles_in_both_directions_and_wraps() {
+        let ids = vec!["active".into(), "previous".into(), "older".into()];
+        let mut forward = ChatSwitcher::new(ids.clone(), false).unwrap();
+        assert_eq!(forward.selected_chat_id(), Some("previous"));
+        forward.cycle(false);
+        assert_eq!(forward.selected_chat_id(), Some("older"));
+        forward.cycle(false);
+        assert_eq!(forward.selected_chat_id(), Some("active"));
+
+        let mut reverse = ChatSwitcher::new(ids, true).unwrap();
+        assert_eq!(reverse.selected_chat_id(), Some("older"));
+        reverse.cycle(true);
+        assert_eq!(reverse.selected_chat_id(), Some("previous"));
+        assert!(ChatSwitcher::new(vec!["only".into()], false).is_none());
+    }
+
+    #[test]
+    fn chat_id_merges_keep_history_and_active_draft() {
+        let mut history = vec!["new".into(), "old".into(), "other".into()];
+        remap_recent_chat_ids(&mut history, "old", "new");
+        assert_eq!(history, vec!["new", "other"]);
+
+        let mut drafts = HashMap::from([
+            (
+                "old".into(),
+                ChatDraft {
+                    text: "active text".into(),
+                    reply_to_message_id: Some("message".into()),
+                },
+            ),
+            (
+                "new".into(),
+                ChatDraft {
+                    text: "stale destination".into(),
+                    reply_to_message_id: None,
+                },
+            ),
+        ]);
+        remap_chat_draft(&mut drafts, "old", "new", true);
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts["new"].text, "active text");
+        assert_eq!(
+            drafts["new"].reply_to_message_id.as_deref(),
+            Some("message")
+        );
+    }
+}
