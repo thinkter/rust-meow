@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
+	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
 	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"go.mau.fi/whatsmeow"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -100,6 +102,11 @@ type ContactDetails struct {
 	ContactName  string
 	PushName     string
 	BusinessName string
+}
+
+type ContactSearchResult struct {
+	JID, ChatID, DisplayName, SecondaryName, PhoneNumber string
+	Score                                                int
 }
 
 type LogoutError struct {
@@ -355,6 +362,142 @@ func mergeContactInfo(first, second types.ContactInfo) types.ContactInfo {
 		first.RedactedPhone = second.RedactedPhone
 	}
 	return first
+}
+
+func (c *Client) SearchContacts(ctx context.Context, query string, limit int) ([]ContactSearchResult, error) {
+	contacts, err := c.wa.Store.Contacts.GetAllContacts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	addressMap, err := c.store.ConversationAddressMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	type aggregate struct {
+		jid        types.JID
+		identities []types.JID
+		info       types.ContactInfo
+	}
+	aggregates := make(map[string]*aggregate)
+	for jid, info := range contacts {
+		jid = jid.ToNonAD()
+		if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer {
+			continue
+		}
+		identities := c.identityJIDs(ctx, jid.String())
+		canonical := jid
+		for _, identity := range identities {
+			if identity.Server == types.DefaultUserServer {
+				canonical = identity
+				break
+			}
+		}
+		key := canonical.String()
+		entry := aggregates[key]
+		if entry == nil {
+			entry = &aggregate{jid: canonical}
+			aggregates[key] = entry
+		}
+		entry.info = mergeContactInfo(entry.info, info)
+		for _, identity := range identities {
+			if !slices.ContainsFunc(entry.identities, func(existing types.JID) bool { return existing.String() == identity.String() }) {
+				entry.identities = append(entry.identities, identity)
+			}
+		}
+	}
+	matcher := searchutil.New(query)
+	queryDigits := searchutil.Digits(query)
+	ownID := c.OwnID()
+	if parsedOwn, parseErr := types.ParseJID(ownID); parseErr == nil {
+		ownID = parsedOwn.ToNonAD().String()
+	}
+	results := make([]ContactSearchResult, 0, len(aggregates))
+	for _, entry := range aggregates {
+		if slices.ContainsFunc(entry.identities, func(identity types.JID) bool { return identity.ToNonAD().String() == ownID }) {
+			continue
+		}
+		info := entry.info
+		phone := info.RedactedPhone
+		for _, identity := range entry.identities {
+			if identity.Server == types.DefaultUserServer && identity.User != "" {
+				phone = "+" + identity.User
+				break
+			}
+		}
+		displayName := info.FullName
+		if displayName == "" {
+			displayName = info.FirstName
+		}
+		if displayName == "" {
+			displayName = info.BusinessName
+		}
+		if displayName == "" {
+			displayName = info.PushName
+		}
+		if displayName == "" {
+			displayName = phone
+		}
+		if displayName == "" {
+			displayName = entry.jid.User
+		}
+		secondary := info.BusinessName
+		if secondary == "" || secondary == displayName {
+			secondary = info.PushName
+		}
+		if secondary == displayName {
+			secondary = ""
+		}
+		score := searchutil.NoMatch
+		for _, field := range []struct {
+			value string
+			bonus int
+		}{{info.FullName, 300}, {info.FirstName, 280}, {info.BusinessName, 220}, {info.PushName, 180}} {
+			if match := matcher.Score(field.value); match != searchutil.NoMatch && match+field.bonus > score {
+				score = match + field.bonus
+			}
+		}
+		if queryDigits != "" {
+			if match := searchutil.New(queryDigits).Score(searchutil.Digits(phone)); match != searchutil.NoMatch && match+140 > score {
+				score = match + 140
+			}
+		}
+		if score == searchutil.NoMatch {
+			continue
+		}
+		chatID := ""
+		for _, identity := range entry.identities {
+			if mapped := addressMap[identity.String()]; mapped != "" {
+				chatID = mapped
+				break
+			}
+		}
+		results = append(results, ContactSearchResult{JID: entry.jid.String(), ChatID: chatID, DisplayName: displayName, SecondaryName: secondary, PhoneNumber: phone, Score: score})
+	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].DisplayName < results[j].DisplayName
+	})
+	if limit <= 0 || limit > 8 {
+		limit = 8
+	}
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+func (c *Client) OpenContact(ctx context.Context, rawJID string) (domain.Chat, error) {
+	jid, err := types.ParseJID(rawJID)
+	if err != nil || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
+		return domain.Chat{}, fmt.Errorf("invalid direct-contact JID")
+	}
+	chatID, _, err := c.resolveConversation(jid.ToNonAD().String())
+	if err != nil {
+		return domain.Chat{}, err
+	}
+	return c.store.Chat(ctx, chatID)
 }
 
 func (c *Client) Avatar(ctx context.Context, rawJID string) (string, error) {

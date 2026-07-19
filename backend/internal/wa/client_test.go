@@ -11,6 +11,7 @@ import (
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"go.mau.fi/whatsmeow"
+	waAdv "go.mau.fi/whatsmeow/proto/waAdv"
 	waCommon "go.mau.fi/whatsmeow/proto/waCommon"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
@@ -73,6 +74,53 @@ func TestDomainMessagePreservesImageDownloadDescriptor(t *testing.T) {
 	}
 	if got.Image.MIMEType != "image/jpeg" || got.Image.DirectPath != "/remote" || got.Image.Width != 640 || got.Image.Height != 480 || got.Image.FileSize != 99 {
 		t.Fatalf("image=%+v", got.Image)
+	}
+}
+
+func TestContactSearchIsFuzzyAndCreatesConversationOnlyWhenOpened(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	client, err := New(ctx, directory, productStore, func(Event) {}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	own, _ := types.ParseJID("15550000000:1@s.whatsapp.net")
+	client.wa.Store.ID = &own
+	client.wa.Store.Account = &waAdv.ADVSignedDeviceIdentity{
+		Details: []byte{1}, AccountSignatureKey: make([]byte, 32), AccountSignature: make([]byte, 64), DeviceSignature: make([]byte, 64),
+	}
+	if err = client.wa.Store.Save(ctx); err != nil {
+		t.Fatal(err)
+	}
+	alice, _ := types.ParseJID("15551234567@s.whatsapp.net")
+	if err = client.wa.Store.Contacts.PutContactName(ctx, alice, "Alice Smith", "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := productStore.ChatCount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := client.SearchContacts(ctx, "alcie", 8)
+	if err != nil || len(results) != 1 || results[0].DisplayName != "Alice" || results[0].ChatID != "" {
+		t.Fatalf("results=%+v err=%v", results, err)
+	}
+	afterSearch, err := productStore.ChatCount(ctx)
+	if err != nil || afterSearch != before {
+		t.Fatalf("search mutated chats: before=%d after=%d err=%v", before, afterSearch, err)
+	}
+	chat, err := client.OpenContact(ctx, results[0].JID)
+	if err != nil || chat.JID == "" || chat.AddressJID != alice.String() {
+		t.Fatalf("chat=%+v err=%v", chat, err)
+	}
+	afterOpen, err := productStore.ChatCount(ctx)
+	if err != nil || afterOpen != before+1 {
+		t.Fatalf("open did not create one chat: before=%d after=%d err=%v", before, afterOpen, err)
 	}
 }
 

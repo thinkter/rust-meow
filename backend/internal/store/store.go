@@ -538,6 +538,23 @@ WHERE a.chat_jid=? ORDER BY CASE WHEN a.jid=c.preferred_jid THEN 0 WHEN a.jid LI
 	return addresses, rows.Err()
 }
 
+func (s *Store) ConversationAddressMap(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT jid,chat_jid FROM chat_addresses`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	addresses := make(map[string]string)
+	for rows.Next() {
+		var address, chatID string
+		if err = rows.Scan(&address, &chatID); err != nil {
+			return nil, err
+		}
+		addresses[address] = chatID
+	}
+	return addresses, rows.Err()
+}
+
 // EnsureConversation binds all known WhatsApp addresses to one opaque local
 // chat ID. LID-backed conversations win when previously separate provisional
 // PN and LID conversations become linkable.
