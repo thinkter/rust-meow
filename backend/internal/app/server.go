@@ -79,12 +79,12 @@ func (s *Server) Run() error {
 		}
 		request := envelope.GetRequest()
 		if s.handshaken.Load() && envelope.GetProtocolVersion() == ProtocolVersion && (request.GetGetChatAvatar() != nil || request.GetGetParticipantAvatar() != nil || request.GetGetMessageImage() != nil || request.GetSendImage() != nil || request.GetSendSticker() != nil) {
-			select {
-			case s.mediaSlots <- struct{}{}:
-			case <-s.ctx.Done():
-				return nil
-			}
 			go func(envelope *bridgev1.Envelope) {
+				select {
+				case s.mediaSlots <- struct{}{}:
+				case <-s.ctx.Done():
+					return
+				}
 				defer func() { <-s.mediaSlots }()
 				response, _ := s.handle(envelope)
 				_ = s.codec.Write(&bridgev1.Envelope{ProtocolVersion: ProtocolVersion, RequestId: envelope.GetRequestId(), Body: &bridgev1.Envelope_Response{Response: response}})
@@ -112,7 +112,7 @@ func (s *Server) Emit(event wa.Event) {
 	}
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
-	body := &bridgev1.BackendEvent{Sequence: s.sequence.Add(1)}
+	body := &bridgev1.BackendEvent{}
 	switch event.Kind {
 	case "connection":
 		body.Event = &bridgev1.BackendEvent_ConnectionChanged{ConnectionChanged: &bridgev1.ConnectionChanged{State: connectionState(event.Detail), Detail: event.Detail}}
@@ -137,6 +137,7 @@ func (s *Server) Emit(event wa.Event) {
 	default:
 		return
 	}
+	body.Sequence = s.sequence.Add(1)
 	_ = s.codec.Write(&bridgev1.Envelope{ProtocolVersion: ProtocolVersion, Body: &bridgev1.Envelope_Event{Event: body}})
 }
 

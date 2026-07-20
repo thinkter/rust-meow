@@ -1,12 +1,122 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"testing"
+	"time"
 
 	bridgev1 "github.com/rust-meow/rust-meow/backend/gen/bridgev1"
+	"github.com/rust-meow/rust-meow/backend/internal/bridge"
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
+	"github.com/rust-meow/rust-meow/backend/internal/wa"
+	"google.golang.org/protobuf/proto"
 )
+
+func decodeEnvelopes(t *testing.T, data []byte) []*bridgev1.Envelope {
+	t.Helper()
+	var envelopes []*bridgev1.Envelope
+	for len(data) > 0 {
+		if len(data) < 4 {
+			t.Fatalf("truncated frame header: %d bytes", len(data))
+		}
+		size := int(binary.BigEndian.Uint32(data[:4]))
+		data = data[4:]
+		if size == 0 || size > len(data) {
+			t.Fatalf("invalid frame size %d with %d bytes remaining", size, len(data))
+		}
+		envelope := new(bridgev1.Envelope)
+		if err := proto.Unmarshal(data[:size], envelope); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		envelopes = append(envelopes, envelope)
+		data = data[size:]
+	}
+	return envelopes
+}
+
+func TestMediaCapacityDoesNotBlockNonMediaRequest(t *testing.T) {
+	var requests bytes.Buffer
+	requestCodec := bridge.NewCodec(nil, &requests)
+	for _, envelope := range []*bridgev1.Envelope{
+		{
+			ProtocolVersion: ProtocolVersion,
+			RequestId:       1,
+			Body: &bridgev1.Envelope_Request{Request: &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_GetChatAvatar{
+				GetChatAvatar: &bridgev1.GetChatAvatarRequest{ChatId: "blocked-media"},
+			}}},
+		},
+		{
+			ProtocolVersion: ProtocolVersion,
+			RequestId:       2,
+			Body: &bridgev1.Envelope_Request{Request: &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendText{
+				SendText: &bridgev1.SendTextRequest{},
+			}}},
+		},
+	} {
+		if err := requestCodec.Write(envelope); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var responses bytes.Buffer
+	s := New(ctx, cancel, bridge.NewCodec(&requests, &responses), nil)
+	s.handshaken.Store(true)
+	for range cap(s.mediaSlots) {
+		s.mediaSlots <- struct{}{}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("request loop remained blocked behind exhausted media capacity")
+	}
+
+	envelopes := decodeEnvelopes(t, responses.Bytes())
+	if len(envelopes) != 1 {
+		t.Fatalf("responses=%d, want 1 non-media response", len(envelopes))
+	}
+	if got := envelopes[0].GetRequestId(); got != 2 {
+		t.Fatalf("request_id=%d, want 2", got)
+	}
+	if got := envelopes[0].GetResponse().GetError().GetCode(); got != "invalid_argument" {
+		t.Fatalf("error code=%q, want invalid_argument", got)
+	}
+}
+
+func TestUnsupportedEventDoesNotConsumeSequence(t *testing.T) {
+	var output bytes.Buffer
+	s := &Server{ctx: context.Background(), codec: bridge.NewCodec(nil, &output)}
+	s.handshaken.Store(true)
+
+	s.Emit(wa.Event{Kind: "future_event"})
+	if got := s.sequence.Load(); got != 0 {
+		t.Fatalf("sequence after unsupported event=%d, want 0", got)
+	}
+	s.Emit(wa.Event{Kind: "connection", Detail: "connected"})
+
+	envelopes := decodeEnvelopes(t, output.Bytes())
+	if len(envelopes) != 1 {
+		t.Fatalf("events=%d, want 1", len(envelopes))
+	}
+	event := envelopes[0].GetEvent()
+	if got := event.GetSequence(); got != 1 {
+		t.Fatalf("sequence=%d, want 1", got)
+	}
+	if event.GetConnectionChanged() == nil {
+		t.Fatalf("event=%v, want connection_changed", event)
+	}
+}
 
 func TestHandshakeRequired(t *testing.T) {
 	s := &Server{ctx: context.Background()}
