@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, rc::Rc, time::Duration};
 
 use gpui::{Pixels, Size, px, size};
 
@@ -7,6 +7,9 @@ use crate::proto;
 pub const CHAT_PAGE_SIZE: u32 = 100;
 pub const MESSAGE_PAGE_SIZE: u32 = 50;
 pub const MAX_ACTIVE_MESSAGES: usize = 2_000;
+const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const READ_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const WRITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ChatView {
@@ -53,16 +56,17 @@ pub struct Store {
     pub fatal_error: Option<String>,
     pub toast_error: Option<String>,
     pub last_mark_read_id: Option<String>,
-    pub pending: HashMap<u64, PendingRequest>,
+    pending: HashMap<u64, PendingRpc>,
     chat_index: HashMap<String, usize>,
     message_index: HashMap<String, usize>,
     message_sizes: Rc<Vec<Size<Pixels>>>,
     measured_width_bucket: Option<i32>,
     message_height_cache: HashMap<i32, HashMap<String, Pixels>>,
     participant_avatar_paths: HashMap<String, String>,
+    loaded_later_chat_page: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PendingRequest {
     Hello,
     Auth,
@@ -131,15 +135,95 @@ pub enum PendingRequest {
     Logout,
 }
 
+#[derive(Clone, Debug)]
+struct PendingRpc {
+    request: PendingRequest,
+    expires_at: Duration,
+}
+
+impl PendingRequest {
+    fn timeout(&self) -> Duration {
+        match self {
+            Self::Hello | Self::Auth => CONTROL_REQUEST_TIMEOUT,
+            Self::Chats { .. }
+            | Self::Messages { .. }
+            | Self::Search { .. }
+            | Self::OpenContact
+            | Self::MessagesAround { .. }
+            | Self::Avatar { .. }
+            | Self::ParticipantAvatar { .. }
+            | Self::MessageImage { .. } => READ_REQUEST_TIMEOUT,
+            Self::Pairing
+            | Self::SendText { .. }
+            | Self::SendImage { .. }
+            | Self::SendSticker
+            | Self::SendReaction { .. }
+            | Self::RepairRecentReactions { .. }
+            | Self::MarkRead { .. }
+            | Self::Logout => WRITE_REQUEST_TIMEOUT,
+        }
+    }
+}
+
 impl Store {
     pub fn clear_account_state(&mut self) {
         *self = Self::default();
     }
 
     pub fn logout_pending(&self) -> bool {
-        self.pending
-            .values()
+        self.pending_requests()
             .any(|pending| matches!(pending, PendingRequest::Logout))
+    }
+
+    pub fn begin_request(&mut self, request_id: u64, request: PendingRequest, now: Duration) {
+        let expires_at = now.saturating_add(request.timeout());
+        self.pending.insert(
+            request_id,
+            PendingRpc {
+                request,
+                expires_at,
+            },
+        );
+    }
+
+    pub fn finish_request(&mut self, request_id: u64) -> Option<PendingRequest> {
+        self.pending
+            .remove(&request_id)
+            .map(|pending| pending.request)
+    }
+
+    pub fn pending_requests(&self) -> impl Iterator<Item = &PendingRequest> {
+        self.pending.values().map(|pending| &pending.request)
+    }
+
+    pub fn pending_media_count(&self) -> usize {
+        self.pending_requests()
+            .filter(|pending| {
+                matches!(
+                    pending,
+                    PendingRequest::Avatar { .. }
+                        | PendingRequest::ParticipantAvatar { .. }
+                        | PendingRequest::MessageImage { .. }
+                )
+            })
+            .count()
+    }
+
+    pub fn expire_requests(&mut self, now: Duration) -> Vec<(u64, PendingRequest)> {
+        let mut expired_ids = self
+            .pending
+            .iter()
+            .filter_map(|(request_id, pending)| (pending.expires_at <= now).then_some(*request_id))
+            .collect::<Vec<_>>();
+        expired_ids.sort_unstable();
+        expired_ids
+            .into_iter()
+            .filter_map(|request_id| {
+                self.pending
+                    .remove(&request_id)
+                    .map(|pending| (request_id, pending.request))
+            })
+            .collect()
     }
 
     pub fn selected_chat(&self) -> Option<&proto::Chat> {
@@ -459,20 +543,24 @@ impl Store {
         total_count: u64,
         next_cursor: String,
     ) {
-        let mut by_id: HashMap<String, proto::Chat> = if cursor.is_empty() {
-            HashMap::with_capacity(chats.len())
-        } else {
-            self.chats
-                .drain(..)
-                .map(|chat| (chat.id.clone(), chat))
-                .collect()
-        };
+        let mut by_id: HashMap<String, proto::Chat> = self
+            .chats
+            .drain(..)
+            .map(|chat| (chat.id.clone(), chat))
+            .collect();
         by_id.extend(chats.into_iter().map(|chat| (chat.id.clone(), chat)));
         self.chats = by_id.into_values().collect();
         self.chats.sort_by(compare_chats);
         self.reindex_chats();
         self.total_chats = total_count;
-        self.next_chat_cursor = next_cursor;
+        if cursor.is_empty() {
+            if !self.loaded_later_chat_page {
+                self.next_chat_cursor = next_cursor;
+            }
+        } else {
+            self.loaded_later_chat_page = true;
+            self.next_chat_cursor = next_cursor;
+        }
     }
 
     fn trim_after_live_append(&mut self) {
@@ -1005,6 +1093,79 @@ mod tests {
     }
 
     #[test]
+    fn first_page_refresh_preserves_loaded_pages_selection_order_and_cursor() {
+        let mut store = Store::default();
+        store.replace_chat_page(
+            "",
+            vec![
+                proto::Chat {
+                    id: "first".into(),
+                    title: "old title".into(),
+                    last_message_timestamp_ms: 400,
+                    ..Default::default()
+                },
+                proto::Chat {
+                    id: "second".into(),
+                    last_message_timestamp_ms: 300,
+                    ..Default::default()
+                },
+            ],
+            4,
+            "page-2".into(),
+        );
+        store.replace_chat_page(
+            "page-2",
+            vec![
+                proto::Chat {
+                    id: "third".into(),
+                    last_message_timestamp_ms: 200,
+                    ..Default::default()
+                },
+                proto::Chat {
+                    id: "fourth".into(),
+                    last_message_timestamp_ms: 100,
+                    ..Default::default()
+                },
+            ],
+            4,
+            "page-3".into(),
+        );
+        store.selected_chat_id = Some("third".into());
+
+        store.replace_chat_page(
+            "",
+            vec![
+                proto::Chat {
+                    id: "first".into(),
+                    title: "refreshed title".into(),
+                    last_message_timestamp_ms: 500,
+                    ..Default::default()
+                },
+                proto::Chat {
+                    id: "second".into(),
+                    last_message_timestamp_ms: 300,
+                    ..Default::default()
+                },
+            ],
+            4,
+            "page-2-regressed".into(),
+        );
+
+        assert_eq!(store.chats.len(), 4);
+        assert_eq!(
+            store
+                .chats
+                .iter()
+                .map(|chat| chat.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third", "fourth"]
+        );
+        assert_eq!(store.chat("first").unwrap().title, "refreshed title");
+        assert_eq!(store.selected_chat_id.as_deref(), Some("third"));
+        assert_eq!(store.next_chat_cursor, "page-3");
+    }
+
+    #[test]
     fn prepend_at_capacity_keeps_older_window_and_exposes_newer_navigation() {
         let mut store = Store {
             selected_chat_id: Some("chat".into()),
@@ -1103,10 +1264,58 @@ mod tests {
     #[test]
     fn logout_pending_is_explicit_until_the_rpc_result_arrives() {
         let mut store = Store::default();
-        store.pending.insert(42, PendingRequest::Logout);
+        store.begin_request(42, PendingRequest::Logout, Duration::ZERO);
         assert!(store.logout_pending());
-        store.pending.remove(&42);
+        store.finish_request(42);
         assert!(!store.logout_pending());
+    }
+
+    #[test]
+    fn pending_request_classes_expire_at_deterministic_deadlines() {
+        let mut store = Store::default();
+        store.begin_request(2, PendingRequest::Logout, Duration::ZERO);
+        store.begin_request(1, PendingRequest::Hello, Duration::ZERO);
+
+        assert_eq!(
+            store.expire_requests(CONTROL_REQUEST_TIMEOUT),
+            vec![(1, PendingRequest::Hello)]
+        );
+        assert!(store.logout_pending());
+        assert_eq!(
+            store.expire_requests(WRITE_REQUEST_TIMEOUT),
+            vec![(2, PendingRequest::Logout)]
+        );
+    }
+
+    #[test]
+    fn expired_media_requests_release_capacity_for_subsequent_progress() {
+        let mut store = Store::default();
+        for request_id in 1..=4 {
+            store.begin_request(
+                request_id,
+                PendingRequest::MessageImage {
+                    chat_id: "chat".into(),
+                    message_id: format!("message-{request_id}"),
+                },
+                Duration::from_secs(10),
+            );
+        }
+        assert_eq!(store.pending_media_count(), 4);
+        assert!(store.expire_requests(Duration::from_secs(39)).is_empty());
+
+        let expired = store.expire_requests(Duration::from_secs(40));
+        assert_eq!(expired.len(), 4);
+        assert_eq!(store.pending_media_count(), 0);
+
+        store.begin_request(
+            5,
+            PendingRequest::MessageImage {
+                chat_id: "chat".into(),
+                message_id: "next-message".into(),
+            },
+            Duration::from_secs(40),
+        );
+        assert_eq!(store.pending_media_count(), 1);
     }
 
     #[test]

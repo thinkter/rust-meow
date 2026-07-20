@@ -11,7 +11,7 @@ use std::{
     ops::Range,
     path::PathBuf,
     rc::Rc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gpui::prelude::FluentBuilder as _;
@@ -51,6 +51,7 @@ const PANEL: u32 = 0xf7faf9;
 const EMOJI_COLUMNS: usize = 9;
 const PARTICIPANT_AVATAR_REFRESH: Duration = Duration::from_secs(15 * 60);
 const REACTION_REPAIR_RETRY: Duration = Duration::from_secs(10 * 60 + 1);
+const RPC_TIMEOUT_SWEEP: Duration = Duration::from_secs(1);
 const MAX_TEXT_BYTES: usize = 65_536;
 const MAX_CAPTION_BYTES: usize = 4_096;
 const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -427,6 +428,7 @@ struct RustMeow {
     message_scroll: VirtualListScrollHandle,
     scroll_to_bottom_generation: Option<u64>,
     next_request_id: u64,
+    request_epoch: Instant,
     last_event_sequence: u64,
     pending_prepend_anchor: Option<(String, Point<Pixels>)>,
     newer_load_failed: bool,
@@ -516,6 +518,24 @@ impl RustMeow {
             }
         })
         .detach();
+        let timeout_view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            loop {
+                Timer::after(RPC_TIMEOUT_SWEEP).await;
+                if window
+                    .update(|window, cx| {
+                        timeout_view.update(cx, |this, cx| {
+                            this.expire_stalled_requests(window, cx);
+                            cx.notify();
+                        })
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
 
         let mut this = Self {
             bridge,
@@ -548,6 +568,7 @@ impl RustMeow {
             message_scroll: VirtualListScrollHandle::new(),
             scroll_to_bottom_generation: None,
             next_request_id: 1,
+            request_epoch: Instant::now(),
             last_event_sequence: 0,
             pending_prepend_anchor: None,
             newer_load_failed: false,
@@ -583,11 +604,111 @@ impl RustMeow {
     fn request(&mut self, request: rpc_request::Request, pending: PendingRequest) {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.store.pending.insert(id, pending);
+        self.store
+            .begin_request(id, pending, self.request_epoch.elapsed());
         if let Err(error) = self.bridge.send(id, request) {
-            self.store.pending.remove(&id);
+            self.store.finish_request(id);
             self.store.screen = Screen::Fatal;
             self.store.fatal_error = Some(error.to_string());
+        }
+    }
+
+    fn expire_stalled_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let expired = self.store.expire_requests(self.request_epoch.elapsed());
+        for (_, pending) in expired {
+            match pending {
+                PendingRequest::Hello | PendingRequest::Auth => {
+                    self.store.screen = Screen::Fatal;
+                    self.store.fatal_error = Some(
+                        "The local backend stopped responding during startup. Restart Rust Meow to reconnect."
+                            .into(),
+                    );
+                }
+                PendingRequest::Avatar { chat_id } => {
+                    self.avatar_attempted.remove(&chat_id);
+                }
+                PendingRequest::ParticipantAvatar { participant_id } => {
+                    self.participant_avatar_attempted.remove(&participant_id);
+                }
+                PendingRequest::MessageImage {
+                    chat_id,
+                    message_id,
+                } => {
+                    let sticker = self
+                        .store
+                        .message(&message_id)
+                        .and_then(|message| message.content.as_ref())
+                        .is_some_and(|content| {
+                            matches!(content, proto::message::Content::Image(image) if image.sticker)
+                        });
+                    self.image_failures.insert(
+                        (chat_id, message_id),
+                        if sticker {
+                            "Sticker download timed out · Click to retry".into()
+                        } else {
+                            "Photo download timed out · Click to retry".into()
+                        },
+                    );
+                }
+                PendingRequest::Search { generation, .. }
+                    if generation == self.search_generation =>
+                {
+                    self.search_error = Some("Search timed out. Try again.".into());
+                }
+                PendingRequest::SendText {
+                    chat_id,
+                    draft_text,
+                    reply_to_message_id,
+                }
+                | PendingRequest::SendImage {
+                    chat_id,
+                    draft_text,
+                    reply_to_message_id,
+                } => {
+                    self.restore_failed_draft(
+                        &chat_id,
+                        &draft_text,
+                        reply_to_message_id,
+                        window,
+                        cx,
+                    );
+                    self.store.toast_error =
+                        Some("Sending timed out. Your draft was restored; try again.".into());
+                }
+                PendingRequest::SendReaction {
+                    chat_id,
+                    message_id,
+                    client_reaction_id,
+                    ..
+                } => {
+                    self.clear_reaction_intent_if_current(
+                        &chat_id,
+                        &message_id,
+                        &client_reaction_id,
+                    );
+                    self.store.toast_error = Some("Reaction timed out. Try again.".into());
+                }
+                PendingRequest::MarkRead {
+                    chat_id,
+                    previous_unread,
+                } => {
+                    self.store.restore_unread(&chat_id, previous_unread);
+                    self.store.last_mark_read_id = None;
+                    self.store.toast_error = Some("Mark as read timed out. Try again.".into());
+                }
+                PendingRequest::Messages { prepend: true, .. } => {
+                    self.pending_prepend_anchor = None;
+                    self.store.toast_error = Some("Loading messages timed out. Try again.".into());
+                }
+                PendingRequest::Logout => {
+                    self.confirming_logout = false;
+                    self.store.toast_error = Some("Logout timed out. Try again.".into());
+                }
+                PendingRequest::Search { .. } => {}
+                _ => {
+                    self.store.toast_error = Some("Backend request timed out. Try again.".into());
+                }
+            }
         }
     }
 
@@ -766,7 +887,7 @@ impl RustMeow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pending) = self.store.pending.remove(&request_id) else {
+        let Some(pending) = self.store.finish_request(request_id) else {
             return;
         };
         let Some(result) = response.result else {
@@ -1372,7 +1493,7 @@ impl RustMeow {
     }
 
     fn load_chats(&mut self, cursor: String) {
-        if self.store.pending.values().any(|pending| {
+        if self.store.pending_requests().any(|pending| {
             matches!(pending, PendingRequest::Chats { cursor: pending_cursor } if pending_cursor == &cursor)
         }) {
             return;
@@ -1387,18 +1508,7 @@ impl RustMeow {
     }
 
     fn load_avatar(&mut self, chat_id: String) {
-        let pending_avatars = self
-            .store
-            .pending
-            .values()
-            .filter(|pending| {
-                matches!(
-                    pending,
-                    PendingRequest::Avatar { .. } | PendingRequest::ParticipantAvatar { .. }
-                )
-            })
-            .count();
-        if self.avatar_attempted.contains(&chat_id) || pending_avatars >= 4 {
+        if self.avatar_attempted.contains(&chat_id) || self.store.pending_media_count() >= 4 {
             return;
         }
         self.avatar_attempted.insert(chat_id.clone());
@@ -1411,20 +1521,9 @@ impl RustMeow {
     }
 
     fn load_participant_avatar(&mut self, participant_id: String) {
-        let pending = self
-            .store
-            .pending
-            .values()
-            .filter(|pending| {
-                matches!(
-                    pending,
-                    PendingRequest::Avatar { .. } | PendingRequest::ParticipantAvatar { .. }
-                )
-            })
-            .count();
         if participant_id.is_empty()
             || self.participant_avatar_attempted.contains(&participant_id)
-            || pending >= 4
+            || self.store.pending_media_count() >= 4
         {
             return;
         }
@@ -1440,20 +1539,7 @@ impl RustMeow {
 
     fn load_message_image(&mut self, chat_id: String, message_id: String) {
         let key = (chat_id.clone(), message_id.clone());
-        let pending_media = self
-            .store
-            .pending
-            .values()
-            .filter(|pending| {
-                matches!(
-                    pending,
-                    PendingRequest::Avatar { .. }
-                        | PendingRequest::ParticipantAvatar { .. }
-                        | PendingRequest::MessageImage { .. }
-                )
-            })
-            .count();
-        if self.image_download_attempted.contains(&key) || pending_media >= 4 {
+        if self.image_download_attempted.contains(&key) || self.store.pending_media_count() >= 4 {
             return;
         }
         self.image_download_attempted.insert(key);
@@ -1919,7 +2005,7 @@ impl RustMeow {
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
             return;
         };
-        if self.store.pending.values().any(|pending| {
+        if self.store.pending_requests().any(|pending| {
             matches!(pending, PendingRequest::Messages {
                 chat_id: pending_chat,
                 prepend: true,
@@ -1995,8 +2081,7 @@ impl RustMeow {
         if self.store.screen == Screen::Pairing
             && self
                 .store
-                .pending
-                .values()
+                .pending_requests()
                 .any(|pending| matches!(pending, PendingRequest::Pairing))
         {
             return;
@@ -2485,15 +2570,7 @@ impl RustMeow {
                                         this.load_chats(this.store.next_chat_cursor.clone());
                                     }
                                     if this.store.connection == proto::ConnectionState::Connected
-                                        && this
-                                            .store
-                                            .pending
-                                            .values()
-                                            .filter(|pending| {
-                                                matches!(pending, PendingRequest::Avatar { .. })
-                                            })
-                                            .count()
-                                            < 4
+                                        && this.store.pending_media_count() < 4
                                         && let Some(chat_id) = range.clone().find_map(|index| {
                                             visible_for_list.get(index).and_then(|chat_id| {
                                                 this.store.chat(chat_id).and_then(|chat| {
@@ -2632,7 +2709,7 @@ impl RustMeow {
     }
 
     fn render_search_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let pending = self.store.pending.values().any(|pending| {
+        let pending = self.store.pending_requests().any(|pending| {
             matches!(pending, PendingRequest::Search { generation, .. } if *generation == self.search_generation)
         });
         let total = self.search_results.len();
