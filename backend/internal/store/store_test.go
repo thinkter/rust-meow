@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -857,6 +858,100 @@ func TestMarkReadThroughPreservesNewerUnread(t *testing.T) {
 	}
 	if chat.UnreadCount != 1 {
 		t.Fatalf("unread=%d want 1", chat.UnreadCount)
+	}
+}
+
+func TestInitialMessageWindowAnchorsEarliestUnreadAndPagesForward(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i := 0; i < 6; i++ {
+		message := domain.Message{ID: fmt.Sprintf("m%d", i), ChatJID: "chat@g.us", SenderJID: "sender@s.whatsapp.net", Text: fmt.Sprintf("message %d", i), Timestamp: time.Unix(int64(i+1), 0)}
+		if err = s.ApplyMessage(ctx, message, i >= 3); err != nil {
+			t.Fatal(err)
+		}
+	}
+	window, err := s.InitialMessageWindow(ctx, "chat@g.us", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window.AnchorID != "m3" {
+		t.Fatalf("anchor=%q want m3", window.AnchorID)
+	}
+	if got := []string{window.Items[0].ID, window.Items[1].ID, window.Items[2].ID}; !slices.Equal(got, []string{"m2", "m3", "m4"}) {
+		t.Fatalf("window=%v", got)
+	}
+	if !window.HasOlder || !window.HasNewer {
+		t.Fatalf("pagination older=%t newer=%t", window.HasOlder, window.HasNewer)
+	}
+	newer, hasMore, err := s.MessagesAfter(ctx, "chat@g.us", window.Items[2].Timestamp.UnixMilli(), window.Items[2].ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(newer) != 1 || newer[0].ID != "m5" || hasMore {
+		t.Fatalf("newer=%+v has_more=%t", newer, hasMore)
+	}
+}
+
+func TestInitialMessageWindowWithoutUnreadUsesNewestPage(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i := 0; i < 60; i++ {
+		if err = s.ApplyMessage(ctx, domain.Message{ID: fmt.Sprintf("m%02d", i), ChatJID: "chat@g.us", Timestamp: time.Unix(int64(i+1), 0)}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	window, err := s.InitialMessageWindow(ctx, "chat@g.us", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window.AnchorID != "" || len(window.Items) != 50 || !window.HasOlder || window.HasNewer {
+		t.Fatalf("window=%+v", window)
+	}
+	if window.Items[0].ID != "m10" || window.Items[49].ID != "m59" {
+		t.Fatalf("range=%s..%s", window.Items[0].ID, window.Items[49].ID)
+	}
+}
+
+func TestCrossDeviceReadPositionPreservesMessagesAfterMarker(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i := 0; i < 3; i++ {
+		message := domain.Message{ID: fmt.Sprintf("m%d", i), ChatJID: "chat@g.us", SenderJID: "sender@s.whatsapp.net", Timestamp: time.Unix(int64(i+1), 0)}
+		if err = s.ApplyMessage(ctx, message, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = s.MarkReadThroughPosition(ctx, "chat@g.us", "m1", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := s.Chat(ctx, "chat@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.UnreadCount != 1 {
+		t.Fatalf("unread=%d want 1", chat.UnreadCount)
+	}
+	if err = s.MarkReadThroughPosition(ctx, "chat@g.us", "missing", time.Unix(3, 0)); err != nil {
+		t.Fatal(err)
+	}
+	chat, err = s.Chat(ctx, "chat@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.UnreadCount != 0 {
+		t.Fatalf("fallback unread=%d", chat.UnreadCount)
 	}
 }
 

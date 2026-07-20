@@ -12,7 +12,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -298,6 +298,33 @@ fn fake_loop(
                 rpc_response::Result::ListMessages(proto::ListMessagesResponse {
                     messages,
                     has_more: start > 0,
+                })
+            }
+            Some(rpc_request::Request::OpenMessageWindow(request)) => {
+                let anchor = 950_usize;
+                let start = anchor.saturating_sub(25);
+                let end = (anchor + 26).min(1_000);
+                rpc_response::Result::OpenMessageWindow(proto::OpenMessageWindowResponse {
+                    messages: (start..end)
+                        .map(|id| fake_message(&request.chat_id, id))
+                        .collect(),
+                    has_older: start > 0,
+                    has_newer: end < 1_000,
+                    first_unread_message_id: format!("message-{anchor}"),
+                })
+            }
+            Some(rpc_request::Request::ListMessagesAfter(request)) => {
+                let start = request
+                    .after_message_id
+                    .strip_prefix("message-")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .map_or(0, |id| id + 1);
+                let end = (start + request.limit as usize).min(1_000);
+                rpc_response::Result::ListMessagesAfter(proto::ListMessagesAfterResponse {
+                    messages: (start..end)
+                        .map(|id| fake_message(&request.chat_id, id))
+                        .collect(),
+                    has_more: end < 1_000,
                 })
             }
             Some(rpc_request::Request::SearchLocal(request)) => {

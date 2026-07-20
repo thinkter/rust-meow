@@ -38,6 +38,8 @@ message RpcRequest {
     OpenContactRequest open_contact = 17;
     ListMessagesAroundRequest list_messages_around = 18;
     SendStickerRequest send_sticker = 19;
+    OpenMessageWindowRequest open_message_window = 20;
+    ListMessagesAfterRequest list_messages_after = 21;
   }
 }
 
@@ -64,6 +66,8 @@ message RpcResponse {
     OpenContactResponse open_contact = 26;
     ListMessagesAroundResponse list_messages_around = 27;
     SendStickerResponse send_sticker = 28;
+    OpenMessageWindowResponse open_message_window = 29;
+    ListMessagesAfterResponse list_messages_after = 30;
   }
 }
 
@@ -146,6 +150,30 @@ message ListMessagesRequest {
 
 message ListMessagesResponse {
   // Messages are always returned oldest-to-newest for direct rendering.
+  repeated Message messages = 1;
+  bool has_more = 2;
+}
+
+message OpenMessageWindowRequest { string chat_id = 1; }
+
+message OpenMessageWindowResponse {
+  // A bounded, oldest-to-newest window around the first unread message. When
+  // first_unread_message_id is empty, this is the ordinary newest page.
+  repeated Message messages = 1;
+  bool has_older = 2;
+  bool has_newer = 3;
+  string first_unread_message_id = 4;
+}
+
+message ListMessagesAfterRequest {
+  string chat_id = 1;
+  // Exclusive ascending cursor. Both fields are required.
+  int64 after_timestamp_ms = 2;
+  string after_message_id = 3;
+  uint32 limit = 4;
+}
+
+message ListMessagesAfterResponse {
   repeated Message messages = 1;
   bool has_more = 2;
 }

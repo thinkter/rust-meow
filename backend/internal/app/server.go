@@ -25,7 +25,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 10
+const ProtocolVersion uint32 = 11
 const maxTextBytes = 65_536
 
 type Server struct {
@@ -238,6 +238,34 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			messages[i] = s.wireMessageWithIdentities(page.Items[i], identities)
 		}
 		return &bridgev1.RpcResponse_ListMessages{ListMessages: &bridgev1.ListMessagesResponse{Messages: messages, HasMore: page.NextCursor != ""}}, nil
+	case *bridgev1.RpcRequest_OpenMessageWindow:
+		if req.OpenMessageWindow.GetChatId() == "" {
+			return nil, fail("invalid_argument", "chat_id is required", false)
+		}
+		window, err := s.store.InitialMessageWindow(s.ctx, req.OpenMessageWindow.GetChatId(), 25)
+		if err != nil {
+			return nil, err
+		}
+		messages := make([]*bridgev1.Message, len(window.Items))
+		identities := make(map[string]wireIdentity)
+		for i := range window.Items {
+			messages[i] = s.wireMessageWithIdentities(window.Items[i], identities)
+		}
+		return &bridgev1.RpcResponse_OpenMessageWindow{OpenMessageWindow: &bridgev1.OpenMessageWindowResponse{Messages: messages, HasOlder: window.HasOlder, HasNewer: window.HasNewer, FirstUnreadMessageId: window.AnchorID}}, nil
+	case *bridgev1.RpcRequest_ListMessagesAfter:
+		if req.ListMessagesAfter.GetChatId() == "" || req.ListMessagesAfter.GetAfterTimestampMs() <= 0 || req.ListMessagesAfter.GetAfterMessageId() == "" {
+			return nil, fail("invalid_argument", "chat_id, after_timestamp_ms and after_message_id are required", false)
+		}
+		items, hasMore, err := s.store.MessagesAfter(s.ctx, req.ListMessagesAfter.GetChatId(), req.ListMessagesAfter.GetAfterTimestampMs(), req.ListMessagesAfter.GetAfterMessageId(), int(req.ListMessagesAfter.GetLimit()))
+		if err != nil {
+			return nil, err
+		}
+		messages := make([]*bridgev1.Message, len(items))
+		identities := make(map[string]wireIdentity)
+		for i := range items {
+			messages[i] = s.wireMessageWithIdentities(items[i], identities)
+		}
+		return &bridgev1.RpcResponse_ListMessagesAfter{ListMessagesAfter: &bridgev1.ListMessagesAfterResponse{Messages: messages, HasMore: hasMore}}, nil
 	case *bridgev1.RpcRequest_SearchLocal:
 		query := strings.TrimSpace(req.SearchLocal.GetQuery())
 		if !utf8.ValidString(query) || utf8.RuneCountInString(query) < 2 || len(query) > 256 {
@@ -498,6 +526,10 @@ func success(result any) *bridgev1.RpcResponse {
 	case *bridgev1.RpcResponse_OpenContact:
 		response.Result = value
 	case *bridgev1.RpcResponse_ListMessagesAround:
+		response.Result = value
+	case *bridgev1.RpcResponse_OpenMessageWindow:
+		response.Result = value
+	case *bridgev1.RpcResponse_ListMessagesAfter:
 		response.Result = value
 	case *bridgev1.RpcResponse_MarkRead:
 		response.Result = value

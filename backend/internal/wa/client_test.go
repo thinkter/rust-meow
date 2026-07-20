@@ -1,8 +1,10 @@
 package wa
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	waAdv "go.mau.fi/whatsmeow/proto/waAdv"
 	waCommon "go.mau.fi/whatsmeow/proto/waCommon"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -240,6 +243,29 @@ func TestImageDescriptorChangedRequiresFreshDownloadCoordinates(t *testing.T) {
 	}
 }
 
+func TestSafeImageConfigRejectsSmallPayloadWithOversizedDimensions(t *testing.T) {
+	// A GIF logical-screen descriptor is enough for DecodeConfig to report the
+	// dimensions, making this a compact decompression-bomb regression fixture.
+	oversized := []byte("GIF89a\xff\xff\xff\xff\x00\x00\x00")
+	if len(oversized) >= 32 {
+		t.Fatalf("fixture unexpectedly large: %d bytes", len(oversized))
+	}
+	if _, err := safeImageConfig(bytes.NewReader(oversized)); err == nil {
+		t.Fatal("oversized decoded dimensions were accepted")
+	}
+}
+
+func TestSafeImageConfigAcceptsBoundedDimensions(t *testing.T) {
+	bounded := []byte("GIF89a\x00\x02\x00\x02\x00\x00\x00")
+	config, err := safeImageConfig(bytes.NewReader(bounded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Width != 512 || config.Height != 512 {
+		t.Fatalf("dimensions=%dx%d", config.Width, config.Height)
+	}
+}
+
 func TestDomainMessageDecodesRichContent(t *testing.T) {
 	chat, _ := types.ParseJID("123@g.us")
 	sender, _ := types.ParseJID("456@s.whatsapp.net")
@@ -452,6 +478,112 @@ func TestArchiveEventUpdatesChatAndEmitsIt(t *testing.T) {
 	}
 	if !chat.Archived {
 		t.Fatal("sparse history cleared the archive state")
+	}
+}
+
+func TestCrossDeviceReadReceiptClearsOnlyReferencedUnreadMessages(t *testing.T) {
+	ctx := context.Background()
+	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	for i := 0; i < 2; i++ {
+		message := domain.Message{ID: fmt.Sprintf("m%d", i), ChatJID: "123@g.us", TransportJID: "123@g.us", SenderJID: "456@s.whatsapp.net", Timestamp: time.Unix(int64(i+1), 0)}
+		if err = productStore.ApplyMessage(ctx, message, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var emitted []Event
+	c := &Client{ctx: ctx, store: productStore, sink: func(event Event) { emitted = append(emitted, event) }, log: slog.Default()}
+	c.reduceReceipt(&events.Receipt{
+		MessageSource: types.MessageSource{Chat: types.NewJID("123", types.GroupServer), IsFromMe: true},
+		MessageIDs:    []types.MessageID{"m0"},
+		Type:          types.ReceiptTypeRead,
+	})
+	chat, err := productStore.Chat(ctx, "123@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.UnreadCount != 1 {
+		t.Fatalf("unread=%d want 1", chat.UnreadCount)
+	}
+	if len(emitted) != 1 || emitted[0].Kind != "chat" || emitted[0].Chat.UnreadCount != 1 {
+		t.Fatalf("emitted=%+v", emitted)
+	}
+}
+
+func TestMarkChatAsReadEventPreservesNewerUnreadMessages(t *testing.T) {
+	ctx := context.Background()
+	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	for i := 0; i < 3; i++ {
+		message := domain.Message{ID: fmt.Sprintf("m%d", i), ChatJID: "123@g.us", TransportJID: "123@g.us", SenderJID: "456@s.whatsapp.net", Timestamp: time.Unix(int64(i+1), 0)}
+		if err = productStore.ApplyMessage(ctx, message, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &Client{ctx: ctx, store: productStore, sink: func(Event) {}, log: slog.Default()}
+	c.reduceMarkChatAsRead(&events.MarkChatAsRead{
+		JID: types.NewJID("123", types.GroupServer),
+		Action: &waSyncAction.MarkChatAsReadAction{
+			Read: proto.Bool(true),
+			MessageRange: &waSyncAction.SyncActionMessageRange{
+				LastMessageTimestamp: proto.Int64(2),
+				Messages: []*waSyncAction.SyncActionMessage{{
+					Key:       &waCommon.MessageKey{ID: proto.String("m1")},
+					Timestamp: proto.Int64(2),
+				}},
+			},
+		},
+	})
+	chat, err := productStore.Chat(ctx, "123@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.UnreadCount != 1 {
+		t.Fatalf("unread=%d want 1", chat.UnreadCount)
+	}
+}
+
+func TestChatStateProjectionRetriesThenRunsOnlyOncePerProcess(t *testing.T) {
+	ctx := context.Background()
+	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	c := &Client{
+		ctx:         ctx,
+		store:       productStore,
+		log:         slog.Default(),
+		reducer:     make(chan func(), 4),
+		reducerDone: make(chan struct{}),
+	}
+	stop := startTestReducer(c)
+	defer stop()
+	attempts := 0
+	c.fetchAppStateFn = func(context.Context, appstate.WAPatchName, bool, bool) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("temporary projection failure")
+		}
+		return nil
+	}
+	c.reconcileChatState()
+	if c.projectionComplete {
+		t.Fatal("failed projection was marked complete")
+	}
+	c.reconcileChatState()
+	if !c.projectionComplete {
+		t.Fatal("successful projection was not marked complete")
+	}
+	c.reconcileChatState()
+	if attempts != 2 {
+		t.Fatalf("attempts=%d want 2", attempts)
 	}
 }
 

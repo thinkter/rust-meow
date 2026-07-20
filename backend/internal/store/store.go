@@ -1185,6 +1185,50 @@ func (s *Store) MessagesAround(ctx context.Context, chatJID, messageID string, s
 	return domain.MessageWindow{Items: items, HasOlder: hasOlder, HasNewer: hasNewer, AnchorID: anchor.ID}, nil
 }
 
+// InitialMessageWindow opens at the earliest unread message when one exists.
+// The surrounding context remains loaded so the desktop can scroll upward,
+// while AnchorID tells it which row belongs at the top of the viewport.
+func (s *Store) InitialMessageWindow(ctx context.Context, chatJID string, sideLimit int) (domain.MessageWindow, error) {
+	resolved, err := s.ResolveChat(ctx, chatJID)
+	if err != nil {
+		return domain.MessageWindow{}, err
+	}
+	var firstUnreadID string
+	err = s.db.QueryRowContext(ctx, `SELECT id FROM messages WHERE chat_jid=? AND kind<>'reaction' AND unread=1 ORDER BY timestamp,id LIMIT 1`, resolved).Scan(&firstUnreadID)
+	if err == nil {
+		return s.MessagesAround(ctx, resolved, firstUnreadID, sideLimit)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return domain.MessageWindow{}, err
+	}
+	page, err := s.MessagesBefore(ctx, resolved, 0, "", 50)
+	if err != nil {
+		return domain.MessageWindow{}, err
+	}
+	slices.Reverse(page.Items)
+	return domain.MessageWindow{Items: page.Items, HasOlder: page.NextCursor != ""}, nil
+}
+
+// MessagesAfter returns a forward, exclusive page ordered oldest-to-newest.
+func (s *Store) MessagesAfter(ctx context.Context, chatJID string, timestampMS int64, messageID string, limit int) ([]domain.Message, bool, error) {
+	resolved, err := s.ResolveChat(ctx, chatJID)
+	if err != nil {
+		return nil, false, err
+	}
+	if timestampMS <= 0 || messageID == "" {
+		return nil, false, fmt.Errorf("after timestamp and message ID are required")
+	}
+	limit = clampLimit(limit)
+	items, hasMore, err := s.messagesRelative(ctx, resolved, timestampMS, messageID, limit, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if err = s.attachReactions(ctx, resolved, items); err != nil {
+		return nil, false, err
+	}
+	return items, hasMore, nil
+}
+
 func (s *Store) messagesRelative(ctx context.Context, chatID string, timestamp int64, messageID string, limit int, older bool) ([]domain.Message, bool, error) {
 	operator, direction := ">", "ASC"
 	if older {
@@ -1744,6 +1788,51 @@ func (s *Store) MarkReadIDs(ctx context.Context, chatJID string, ids []string) e
 		if _, err = tx.ExecContext(ctx, `UPDATE messages SET unread=0 WHERE chat_jid=? AND id=?`, chatJID, id); err != nil {
 			return err
 		}
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE chats SET unread_count=(SELECT count(*) FROM messages WHERE chat_jid=? AND unread=1) WHERE jid=?`, chatJID, chatJID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// MarkReadThroughPosition applies a cross-device read marker. When the
+// referenced message is available locally its exact cursor wins; otherwise
+// WhatsApp's second-resolution range timestamp is used as a safe fallback.
+func (s *Store) MarkReadThroughPosition(ctx context.Context, chatJID, messageID string, rangeTimestamp time.Time) error {
+	resolved, resolveErr := s.ResolveChat(ctx, chatJID)
+	if resolveErr != nil {
+		return resolveErr
+	}
+	chatJID = resolved
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var result sql.Result
+	var ts int64
+	if messageID != "" {
+		err = tx.QueryRowContext(ctx, `SELECT timestamp FROM messages WHERE chat_jid=? AND id=?`, chatJID, messageID).Scan(&ts)
+	}
+	if messageID != "" && err == nil {
+		result, err = tx.ExecContext(ctx, `UPDATE messages SET unread=0 WHERE chat_jid=? AND unread=1 AND (timestamp<? OR (timestamp=? AND id<=?))`, chatJID, ts, ts, messageID)
+	} else {
+		if messageID != "" && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if rangeTimestamp.IsZero() {
+			return fmt.Errorf("read marker has no local message or timestamp")
+		}
+		// App-state message ranges use Unix seconds. The marker covers the
+		// complete stated second, but not messages received afterward.
+		upperExclusive := rangeTimestamp.UnixMilli() + time.Second.Milliseconds()
+		result, err = tx.ExecContext(ctx, `UPDATE messages SET unread=0 WHERE chat_jid=? AND unread=1 AND timestamp<?`, chatJID, upperExclusive)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = result.RowsAffected(); err != nil {
+		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE chats SET unread_count=(SELECT count(*) FROM messages WHERE chat_jid=? AND unread=1) WHERE jid=?`, chatJID, chatJID); err != nil {
 		return err

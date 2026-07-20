@@ -85,6 +85,14 @@ pub enum PendingRequest {
         message_id: String,
         generation: u64,
     },
+    OpenMessageWindow {
+        chat_id: String,
+        generation: u64,
+    },
+    MessagesAfter {
+        chat_id: String,
+        generation: u64,
+    },
     Avatar {
         chat_id: String,
     },
@@ -255,6 +263,34 @@ impl Store {
             self.messages.truncate(MAX_ACTIVE_MESSAGES);
             self.has_newer_messages = true;
         }
+        self.reindex_messages();
+        self.rebuild_message_sizes();
+    }
+
+    pub fn append_newer_messages(&mut self, incoming: Vec<proto::Message>, has_more: bool) {
+        let mut by_id: HashMap<String, proto::Message> = self
+            .messages
+            .drain(..)
+            .map(|message| (message.id.clone(), message))
+            .collect();
+        for mut message in incoming {
+            for heights in self.message_height_cache.values_mut() {
+                heights.remove(&message.id);
+            }
+            if let Some(existing) = by_id.get(&message.id) {
+                preserve_local_image_path(&mut message, existing);
+            }
+            by_id.insert(message.id.clone(), message);
+        }
+        self.messages = by_id.into_values().collect();
+        self.messages
+            .sort_by_key(|message| (message.timestamp_ms, message.id.clone()));
+        if self.messages.len() > MAX_ACTIVE_MESSAGES {
+            let excess = self.messages.len() - MAX_ACTIVE_MESSAGES;
+            self.messages.drain(..excess);
+            self.has_older_messages = true;
+        }
+        self.has_newer_messages = has_more || self.newer_activity;
         self.reindex_messages();
         self.rebuild_message_sizes();
     }
@@ -981,6 +1017,38 @@ mod tests {
         assert_eq!(store.messages.len(), MAX_ACTIVE_MESSAGES);
         assert_eq!(store.messages.first().unwrap().id, "0");
         assert_eq!(store.messages.last().unwrap().id, "1999");
+        assert!(store.has_newer_messages);
+    }
+
+    #[test]
+    fn forward_pages_append_in_order_without_duplicates() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(1), message(2)], true, true);
+        store.append_newer_messages(vec![message(2), message(3)], false);
+        assert_eq!(
+            store
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2", "3"]
+        );
+        assert!(!store.has_newer_messages);
+        assert!(store.has_older_messages);
+    }
+
+    #[test]
+    fn forward_page_keeps_activity_that_arrived_during_the_request() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window(vec![message(1)], false, true);
+        store.newer_activity = true;
+        store.append_newer_messages(vec![message(2)], false);
         assert!(store.has_newer_messages);
     }
 

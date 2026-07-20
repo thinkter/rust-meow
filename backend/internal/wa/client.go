@@ -29,6 +29,7 @@ import (
 	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
 	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -84,6 +85,9 @@ type Client struct {
 	avatarFetches      map[string]*avatarFetch
 	negativeAvatarMu   sync.Mutex
 	negativeAvatars    map[string]time.Time
+	appStateProjection sync.Mutex
+	projectionComplete bool
+	fetchAppStateFn    func(context.Context, appstate.WAPatchName, bool, bool) error
 }
 
 type avatarFetch struct {
@@ -147,7 +151,12 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 		return nil, err
 	}
 	w := whatsmeow.NewClient(device, nil)
+	// Archive and cross-device read state live in app-state snapshots. Without
+	// this, whatsmeow updates its own session cache during an initial sync but
+	// does not project those events into Rust Meow's product database.
+	w.EmitAppStateEventsOnFullSync = true
 	c := &Client{ctx: ctx, wa: w, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time)}
+	c.fetchAppStateFn = w.FetchAppState
 	c.logoutFn = w.Logout
 	c.clearAccountDataFn = productStore.ClearAccountData
 	c.accepting.Store(true)
@@ -867,6 +876,11 @@ func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID
 }
 
 const maxImageBytes = 32 * 1024 * 1024
+
+// Keep decoded images bounded as well as their compressed representation. At
+// four bytes per pixel this caps a single GPUI decode at roughly 64 MiB.
+const maxImagePixels int64 = 16_000_000
+const maxImageEdge = 8192
 const maxStaticStickerBytes = 100 * 1024
 const maxAnimatedStickerBytes = 500 * 1024
 const stickerEdge = 512
@@ -879,6 +893,27 @@ func supportedImageMIME(data []byte) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported image type %s", mimeType)
 	}
+}
+
+func safeImageConfig(reader io.Reader) (image.Config, error) {
+	config, _, err := image.DecodeConfig(reader)
+	if err != nil {
+		return image.Config{}, fmt.Errorf("decode image dimensions: %w", err)
+	}
+	width, height := int64(config.Width), int64(config.Height)
+	if width <= 0 || height <= 0 || width > maxImageEdge || height > maxImageEdge || width > maxImagePixels/height {
+		return image.Config{}, fmt.Errorf("image dimensions %dx%d exceed the safe limit", config.Width, config.Height)
+	}
+	return config, nil
+}
+
+func safeImageFile(path string) (image.Config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return image.Config{}, err
+	}
+	defer file.Close()
+	return safeImageConfig(file)
 }
 
 func stickerMetadata(data []byte) (width, height uint32, animated bool, err error) {
@@ -950,10 +985,19 @@ func (c *Client) CachedImagePath(chatID, messageID, mimeType string) string {
 	if err != nil || !stat.Mode().IsRegular() || stat.Size() <= 0 || stat.Size() > maxImageBytes {
 		return ""
 	}
+	if _, err = safeImageFile(path); err != nil {
+		// Never expose an invalid legacy cache entry to the UI. A later download
+		// can repopulate it from the message descriptor.
+		_ = os.Remove(path)
+		return ""
+	}
 	return path
 }
 
 func (c *Client) cacheImageBytes(chatID, messageID, mimeType string, data []byte) (string, error) {
+	if _, err := safeImageConfig(bytes.NewReader(data)); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(c.mediaDir, 0o700); err != nil {
 		return "", fmt.Errorf("create media cache: %w", err)
 	}
@@ -1019,12 +1063,9 @@ func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, ca
 	if err != nil {
 		return domain.Message{}, err
 	}
-	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	config, err := safeImageConfig(bytes.NewReader(data))
 	if err != nil {
-		return domain.Message{}, fmt.Errorf("decode image: %w", err)
-	}
-	if config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > 100_000_000 {
-		return domain.Message{}, fmt.Errorf("image dimensions are invalid or too large")
+		return domain.Message{}, err
 	}
 	width, height := uint32(config.Width), uint32(config.Height)
 	waID := string(c.wa.GenerateMessageID())
@@ -1231,6 +1272,9 @@ func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (s
 	stat, err := os.Stat(temporaryPath)
 	if err != nil || stat.Size() <= 0 || stat.Size() > maxImageBytes {
 		return "", fmt.Errorf("downloaded image has invalid size")
+	}
+	if _, err = safeImageFile(temporaryPath); err != nil {
+		return "", fmt.Errorf("downloaded image is unsafe: %w", err)
 	}
 	if err = os.Rename(temporaryPath, path); err != nil {
 		return "", err
@@ -1568,6 +1612,7 @@ func (c *Client) handleEvent(raw any) {
 	switch evt := raw.(type) {
 	case *events.Connected:
 		c.sink(Event{Kind: "connection", Detail: "connected"})
+		go c.reconcileChatState()
 	case *events.Disconnected:
 		c.sink(Event{Kind: "connection", Detail: "offline"})
 	case *events.LoggedOut:
@@ -1585,6 +1630,8 @@ func (c *Client) handleEvent(raw any) {
 		c.enqueue(func() { c.reduceHistory(evt) })
 	case *events.Archive:
 		c.enqueue(func() { c.reduceArchive(evt) })
+	case *events.MarkChatAsRead:
+		c.enqueue(func() { c.reduceMarkChatAsRead(evt) })
 	case *events.Contact:
 		c.invalidateContact(evt.JID)
 	case *events.PushName:
@@ -1599,6 +1646,26 @@ func (c *Client) handleEvent(raw any) {
 			c.negativeAvatarMu.Unlock()
 		}
 	}
+}
+
+func (c *Client) reconcileChatState() {
+	c.appStateProjection.Lock()
+	defer c.appStateProjection.Unlock()
+	if c.store == nil || c.fetchAppStateFn == nil {
+		return
+	}
+	if c.projectionComplete {
+		return
+	}
+	if err := c.fetchAppStateFn(c.ctx, appstate.WAPatchRegularLow, true, false); err != nil {
+		c.log.Error("reconcile WhatsApp chat state", "error", err)
+		return
+	}
+	if err := c.reducerBarrier(c.ctx); err != nil {
+		c.log.Error("wait for WhatsApp chat-state projection", "error", err)
+		return
+	}
+	c.projectionComplete = true
 }
 
 func (c *Client) clearContactCache() {
@@ -1962,6 +2029,18 @@ func (c *Client) reduceReceipt(evt *events.Receipt) {
 		c.log.Error("resolve receipt conversation", "chat_id", evt.Chat.String(), "error", err)
 		return
 	}
+	if evt.IsFromMe && (evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf) {
+		ids := make([]string, len(evt.MessageIDs))
+		for i := range evt.MessageIDs {
+			ids[i] = string(evt.MessageIDs[i])
+		}
+		if err = c.store.MarkReadIDs(c.ctx, chatID, ids); err != nil {
+			c.log.Error("persist cross-device read receipt", "chat_id", chatID, "error", err)
+			return
+		}
+		c.emitChat(chatID)
+		return
+	}
 	status := domain.StatusDelivered
 	if evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf {
 		status = domain.StatusRead
@@ -1970,6 +2049,35 @@ func (c *Client) reduceReceipt(evt *events.Receipt) {
 		_ = c.store.UpdateReceipt(c.ctx, chatID, string(id), status)
 		c.sink(Event{Kind: "receipt", ChatJID: chatID, MessageID: string(id), Status: status})
 	}
+}
+
+func (c *Client) reduceMarkChatAsRead(evt *events.MarkChatAsRead) {
+	if evt.Action == nil || !evt.Action.GetRead() {
+		return
+	}
+	chatID, _, err := c.resolveConversation(evt.JID.String())
+	if err != nil {
+		c.log.Error("resolve cross-device read marker", "chat_id", evt.JID.String(), "error", err)
+		return
+	}
+	messageRange := evt.Action.GetMessageRange()
+	var messageID string
+	var rangeTimestamp time.Time
+	if messageRange != nil {
+		if seconds := messageRange.GetLastMessageTimestamp(); seconds > 0 {
+			rangeTimestamp = time.Unix(seconds, 0)
+		}
+		for _, message := range messageRange.GetMessages() {
+			if message.GetKey().GetID() != "" {
+				messageID = message.GetKey().GetID()
+			}
+		}
+	}
+	if err = c.store.MarkReadThroughPosition(c.ctx, chatID, messageID, rangeTimestamp); err != nil {
+		c.log.Error("persist cross-device read marker", "chat_id", chatID, "message_id", messageID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
 }
 
 func (c *Client) reduceHistory(evt *events.HistorySync) {

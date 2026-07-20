@@ -409,6 +409,7 @@ struct RustMeow {
     search_scroll: VirtualListScrollHandle,
     search_target_message_id: Option<String>,
     pending_search_scroll_id: Option<String>,
+    pending_top_scroll_id: Option<String>,
     emoji_search: Entity<InputState>,
     emoji_query: String,
     emoji_category: EmojiCategory,
@@ -428,6 +429,7 @@ struct RustMeow {
     next_request_id: u64,
     last_event_sequence: u64,
     pending_prepend_anchor: Option<(String, Point<Pixels>)>,
+    newer_load_failed: bool,
     message_generation: u64,
     sync_complete_reloaded: bool,
     confirming_logout: bool,
@@ -528,6 +530,7 @@ impl RustMeow {
             search_scroll: VirtualListScrollHandle::new(),
             search_target_message_id: None,
             pending_search_scroll_id: None,
+            pending_top_scroll_id: None,
             emoji_search,
             emoji_query: String::new(),
             emoji_category: EmojiCategory::All,
@@ -547,6 +550,7 @@ impl RustMeow {
             next_request_id: 1,
             last_event_sequence: 0,
             pending_prepend_anchor: None,
+            newer_load_failed: false,
             message_generation: 0,
             sync_complete_reloaded: false,
             confirming_logout: false,
@@ -707,6 +711,8 @@ impl RustMeow {
                 self.reaction_details = None;
                 self.image_viewer = None;
                 self.scroll_to_bottom_generation = None;
+                self.pending_top_scroll_id = None;
+                self.newer_load_failed = false;
                 self.image_download_attempted.clear();
                 self.image_failures.clear();
                 self.search_target_message_id = Some(message_id.clone());
@@ -786,6 +792,9 @@ impl RustMeow {
                 self.load_selected_chat(chat_id.clone());
                 self.store.toast_error = Some(format!("{}: {}", error.code, error.message));
                 return;
+            }
+            if matches!(&pending, PendingRequest::MessagesAfter { .. }) {
+                self.newer_load_failed = true;
             }
             match &pending {
                 PendingRequest::SendText {
@@ -1050,6 +1059,35 @@ impl RustMeow {
                     });
                 })
                 .detach();
+            }
+            (
+                PendingRequest::OpenMessageWindow {
+                    chat_id,
+                    generation,
+                },
+                rpc_response::Result::OpenMessageWindow(page),
+            ) if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str())
+                && generation == self.message_generation =>
+            {
+                self.store
+                    .replace_message_window(page.messages, page.has_older, page.has_newer);
+                if page.first_unread_message_id.is_empty() {
+                    self.scroll_to_bottom_generation = Some(generation);
+                } else {
+                    self.pending_top_scroll_id = Some(page.first_unread_message_id);
+                }
+            }
+            (
+                PendingRequest::MessagesAfter {
+                    chat_id,
+                    generation,
+                },
+                rpc_response::Result::ListMessagesAfter(page),
+            ) if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str())
+                && generation == self.message_generation =>
+            {
+                self.store
+                    .append_newer_messages(page.messages, page.has_more);
             }
             (PendingRequest::Avatar { chat_id }, rpc_response::Result::GetChatAvatar(avatar))
                 if avatar.chat_id == chat_id =>
@@ -1861,18 +1899,16 @@ impl RustMeow {
         self.scroll_to_bottom_generation = None;
         self.search_target_message_id = None;
         self.pending_search_scroll_id = None;
+        self.pending_top_scroll_id = None;
+        self.newer_load_failed = false;
         self.image_download_attempted.clear();
         self.image_failures.clear();
         self.request(
-            rpc_request::Request::ListMessages(proto::ListMessagesRequest {
+            rpc_request::Request::OpenMessageWindow(proto::OpenMessageWindowRequest {
                 chat_id: chat_id.clone(),
-                before_timestamp_ms: 0,
-                before_message_id: String::new(),
-                limit: MESSAGE_PAGE_SIZE,
             }),
-            PendingRequest::Messages {
+            PendingRequest::OpenMessageWindow {
                 chat_id: chat_id.clone(),
-                prepend: false,
                 generation: self.message_generation,
             },
         );
@@ -1906,6 +1942,43 @@ impl RustMeow {
             PendingRequest::Messages {
                 chat_id,
                 prepend: true,
+                generation: self.message_generation,
+            },
+        );
+    }
+
+    fn load_newer_messages(&mut self) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        if self.newer_load_failed
+            || (!self.store.has_newer_messages && !self.store.newer_activity)
+            || self.store.pending.values().any(|pending| {
+                matches!(pending, PendingRequest::MessagesAfter {
+                    chat_id: pending_chat,
+                    generation,
+                } if pending_chat == &chat_id && *generation == self.message_generation)
+            })
+        {
+            return;
+        }
+        let Some(last) = self.store.messages.last() else {
+            return;
+        };
+        let after_timestamp_ms = last.timestamp_ms;
+        let after_message_id = last.id.clone();
+        // Any event arriving after this point sets newer_activity again, so a
+        // response can distinguish activity included in its query from a race.
+        self.store.newer_activity = false;
+        self.request(
+            rpc_request::Request::ListMessagesAfter(proto::ListMessagesAfterRequest {
+                chat_id: chat_id.clone(),
+                after_timestamp_ms,
+                after_message_id,
+                limit: MESSAGE_PAGE_SIZE,
+            }),
+            PendingRequest::MessagesAfter {
+                chat_id,
                 generation: self.message_generation,
             },
         );
@@ -2276,18 +2349,18 @@ impl RustMeow {
         };
         let local_status = if self.store.sync_active {
             format!(
-                "{} local · scanned {} chats · {} messages",
+                "{} chats · scanned {} chats · {} messages",
                 total, self.store.sync_chats, self.store.sync_messages
             )
         } else if chat_view == ChatView::Archived {
             format!(
-                "{}{} archived · {} chats local",
+                "{}{} archived · {} chats",
                 visible_count,
                 if has_more { "+" } else { "" },
                 total
             )
         } else {
-            format!("{} chats local", total)
+            format!("{} chats", total)
         };
         let selected_background = if dark { rgb(0x173a35) } else { rgb(0xe7f5ef) };
         let hover_background = if dark { rgb(0x152f2c) } else { rgb(0xeff5f2) };
@@ -2902,6 +2975,16 @@ impl RustMeow {
             self.message_scroll
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
+        if let Some(target_id) = self.pending_top_scroll_id.take()
+            && let Some(index) = self
+                .store
+                .messages
+                .iter()
+                .position(|message| message.id == target_id)
+        {
+            self.message_scroll
+                .scroll_to_item(index, ScrollStrategy::Top);
+        }
         let connected = self.store.connection == proto::ConnectionState::Connected;
         let has_older = self.store.has_older_messages;
         let has_newer = self.store.has_newer_messages || self.store.newer_activity;
@@ -3041,10 +3124,12 @@ impl RustMeow {
                                     this.load_participant_avatar(participant_id);
                                 }
                             }
-                            if window.is_window_active()
+                            if range.end == this.store.messages.len()
+                                && (this.store.has_newer_messages || this.store.newer_activity)
+                            {
+                                this.load_newer_messages();
+                            } else if window.is_window_active()
                                 && range.end == this.store.messages.len()
-                                && !this.store.has_newer_messages
-                                && !this.store.newer_activity
                             {
                                 this.mark_read();
                             }
