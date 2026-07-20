@@ -371,11 +371,11 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		if req.GetMessageImage.GetChatId() == "" || req.GetMessageImage.GetMessageId() == "" {
 			return nil, fail("invalid_argument", "chat_id and message_id are required", false)
 		}
-		path, err := s.wa.DownloadImage(s.ctx, req.GetMessageImage.GetChatId(), req.GetMessageImage.GetMessageId())
+		path, thumbnailPath, err := s.wa.DownloadImage(s.ctx, req.GetMessageImage.GetChatId(), req.GetMessageImage.GetMessageId())
 		if err != nil {
 			return nil, fail("image_unavailable", err.Error(), s.wa.IsConnected())
 		}
-		return &bridgev1.RpcResponse_GetMessageImage{GetMessageImage: &bridgev1.GetMessageImageResponse{ChatId: req.GetMessageImage.GetChatId(), MessageId: req.GetMessageImage.GetMessageId(), ImagePath: path}}, nil
+		return &bridgev1.RpcResponse_GetMessageImage{GetMessageImage: &bridgev1.GetMessageImageResponse{ChatId: req.GetMessageImage.GetChatId(), MessageId: req.GetMessageImage.GetMessageId(), ImagePath: path, ThumbnailPath: thumbnailPath}}, nil
 	case *bridgev1.RpcRequest_SendReaction:
 		if req.SendReaction.GetClientReactionId() == "" || req.SendReaction.GetChatId() == "" || req.SendReaction.GetMessageId() == "" {
 			return nil, fail("invalid_argument", "client_reaction_id, chat_id and message_id are required", false)
@@ -671,7 +671,7 @@ func (s *Server) wireMessageWithIdentities(m domain.Message, identities map[stri
 		// The cache is bounded and may have evicted the path persisted in SQLite.
 		// Only advertise files that still exist so the desktop asks us to fetch
 		// an evicted image again when its virtualized row becomes visible.
-		image.LocalPath = s.wa.CachedImagePath(m.ChatJID, m.ID, image.MimeType)
+		image.LocalPath, image.ThumbnailPath = s.wa.CachedImagePaths(m.ChatJID, m.ID, image.MimeType)
 	}
 	chat, err := types.ParseJID(m.TransportJID)
 	if err == nil && chat.Server == types.GroupServer {

@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -348,6 +351,90 @@ func TestSafeImageConfigAcceptsBoundedDimensions(t *testing.T) {
 	}
 	if config.Width != 512 || config.Height != 512 {
 		t.Fatalf("dimensions=%dx%d", config.Width, config.Height)
+	}
+}
+
+func TestImageCacheCreatesBoundedThumbnailPair(t *testing.T) {
+	// A 12 MP source mirrors the issue's high-RSS case: the original requires
+	// roughly 48 MiB decoded while the row asset is bounded below 1 MiB.
+	source := image.NewRGBA(image.Rect(0, 0, 4000, 3000))
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, source); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{mediaDir: t.TempDir()}
+	originalPath, thumbnailPath, err := c.cacheImageBytes("chat", "message", "image/png", encoded.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if originalPath == thumbnailPath {
+		t.Fatal("thumbnail reused the full-resolution cache path")
+	}
+	original, err := safeImageFile(originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumbnail, err := safeImageFile(thumbnailPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if original.Width != 4000 || original.Height != 3000 {
+		t.Fatalf("original=%dx%d", original.Width, original.Height)
+	}
+	if thumbnail.Width != 512 || thumbnail.Height != 384 {
+		t.Fatalf("thumbnail=%dx%d, want 512x384", thumbnail.Width, thumbnail.Height)
+	}
+
+	if err = os.Remove(thumbnailPath); err != nil {
+		t.Fatal(err)
+	}
+	if gotOriginal, gotThumbnail := c.CachedImagePaths("chat", "message", "image/png"); gotOriginal != "" || gotThumbnail != "" {
+		t.Fatalf("legacy original was exposed without a thumbnail=(%q, %q)", gotOriginal, gotThumbnail)
+	}
+	gotOriginal, gotThumbnail := c.cachedImagePaths("chat", "message", "image/png", true)
+	if gotOriginal != originalPath || gotThumbnail != thumbnailPath {
+		t.Fatalf("regenerated pair=(%q, %q)", gotOriginal, gotThumbnail)
+	}
+	if err = os.WriteFile(thumbnailPath, []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if gotOriginal, gotThumbnail = c.CachedImagePaths("chat", "message", "image/png"); gotOriginal != "" || gotThumbnail != "" {
+		t.Fatalf("corrupt pair remained visible=(%q, %q)", gotOriginal, gotThumbnail)
+	}
+	for _, path := range []string{originalPath, thumbnailPath} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("invalidated cache file %q still exists: %v", path, statErr)
+		}
+	}
+}
+
+func TestPruneMediaCacheRemovesOriginalAndThumbnailTogether(t *testing.T) {
+	dir := t.TempDir()
+	c := &Client{mediaDir: dir}
+	old := time.Now().Add(-time.Hour)
+	for _, name := range []string{"old.jpg", "old.thumb.png", "new.jpg", "new.thumb.png"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("1234"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Now()
+		if strings.HasPrefix(name, "old.") {
+			stamp = old
+		}
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.pruneMediaCache(8)
+	for _, name := range []string{"old.jpg", "old.thumb.png"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("pruned pair member %q remains: %v", name, err)
+		}
+	}
+	for _, name := range []string{"new.jpg", "new.thumb.png"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("new pair member %q was pruned: %v", name, err)
+		}
 	}
 }
 

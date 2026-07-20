@@ -258,7 +258,10 @@ message GetMessageImageRequest {
 message GetMessageImageResponse {
   string chat_id = 1;
   string message_id = 2;
+  // Full-resolution cache entry used only by the image viewer.
   string image_path = 3;
+  // Bounded cache entry used by virtualized conversation rows.
+  string thumbnail_path = 4;
 }
 
 message MarkReadRequest {
@@ -430,6 +433,8 @@ message ImageContent {
   bool downloadable = 7;
   bool sticker = 8;
   bool animated = 9;
+  // A bounded rendering asset; local_path remains the full-resolution original.
+  string thumbnail_path = 10;
 }
 
 message AttachmentContent {

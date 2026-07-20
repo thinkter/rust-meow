@@ -43,8 +43,9 @@ use uuid::Uuid;
 use bridge::{BackendClient, BridgeMessage, PROTOCOL_VERSION};
 use emoji_picker::{EmojiCategory, filtered as filter_emojis};
 use model::{
-    CHAT_PAGE_SIZE, ChatView, MESSAGE_PAGE_SIZE, PendingRequest, Screen, Store, message_text,
-    reaction_counts, reaction_sender_detail, reaction_sender_name, reactions_for_emoji,
+    CHAT_PAGE_SIZE, ChatView, MESSAGE_PAGE_SIZE, PendingRequest, Screen, Store, image_row_path,
+    image_viewer_path, message_text, reaction_counts, reaction_sender_detail, reaction_sender_name,
+    reactions_for_emoji,
 };
 use proto::{backend_event, envelope, rpc_request, rpc_response};
 
@@ -1272,8 +1273,12 @@ impl RustMeow {
                     self.image_failures.insert(key, label.into());
                 } else {
                     self.image_failures.remove(&key);
-                    self.store
-                        .set_message_image_path(&chat_id, &message_id, image.image_path);
+                    self.store.set_message_image_paths(
+                        &chat_id,
+                        &message_id,
+                        image.image_path,
+                        image.thumbnail_path,
+                    );
                 }
             }
             (
@@ -1533,7 +1538,7 @@ impl RustMeow {
         self.image_failures.remove(&key);
         self.image_download_attempted.remove(&key);
         self.store
-            .set_message_image_path(&chat_id, &message_id, String::new());
+            .set_message_image_paths(&chat_id, &message_id, String::new(), String::new());
         self.image_viewer = None;
         self.load_message_image(chat_id, message_id);
     }
@@ -3141,7 +3146,8 @@ impl RustMeow {
                                 .filter_map(|index| this.store.messages.get(index))
                                 .filter_map(|message| match message.content.as_ref() {
                                     Some(proto::message::Content::Image(image))
-                                        if image.local_path.is_empty() && image.downloadable =>
+                                        if image.thumbnail_path.is_empty()
+                                            && image.downloadable =>
                                     {
                                         Some((message.chat_id.clone(), message.id.clone()))
                                     }
@@ -4055,10 +4061,14 @@ impl RustMeow {
                     .when_some(image_content, |bubble, image| {
                         let media_name = if image.sticker { "sticker" } else { "photo" };
                         let (image_width, image_height) = image_render_size(&image);
-                        let image_path = image.local_path.clone();
-                        let image_is_cached =
-                            !image_path.is_empty() && PathBuf::from(&image_path).is_file();
-                        let cached_path_missing = !image_path.is_empty() && !image_is_cached;
+                        let image_path = image_row_path(&image).to_string();
+                        let viewer_path = image_viewer_path(&image).to_string();
+                        let image_is_cached = !image_path.is_empty()
+                            && !viewer_path.is_empty()
+                            && PathBuf::from(&image_path).is_file()
+                            && PathBuf::from(&viewer_path).is_file();
+                        let cached_path_missing =
+                            (!image_path.is_empty() || !viewer_path.is_empty()) && !image_is_cached;
                         let retryable =
                             image.downloadable && (image_failure.is_some() || cached_path_missing);
                         let placeholder = if cached_path_missing {
@@ -4074,7 +4084,6 @@ impl RustMeow {
                         };
                         let viewer_chat_id = message_image_chat_id.clone();
                         let viewer_message_id = message_image_id.clone();
-                        let viewer_path = image_path.clone();
                         let viewer_caption = image.caption.clone();
                         let viewer_sticker = image.sticker;
                         let retry_chat_id = message_image_chat_id.clone();

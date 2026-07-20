@@ -442,11 +442,12 @@ impl Store {
             .insert(participant_id, avatar_path);
     }
 
-    pub fn set_message_image_path(
+    pub fn set_message_image_paths(
         &mut self,
         chat_id: &str,
         message_id: &str,
         image_path: String,
+        thumbnail_path: String,
     ) -> bool {
         let Some(message) = self
             .message_index
@@ -459,10 +460,11 @@ impl Store {
         let Some(proto::message::Content::Image(image)) = message.content.as_mut() else {
             return false;
         };
-        if image.local_path == image_path {
+        if image.local_path == image_path && image.thumbnail_path == thumbnail_path {
             return false;
         }
         image.local_path = image_path;
+        image.thumbnail_path = thumbnail_path;
         true
     }
 
@@ -644,14 +646,26 @@ fn preserve_local_image_path(incoming: &mut proto::Message, existing: &proto::Me
     let Some(proto::message::Content::Image(incoming_image)) = incoming.content.as_mut() else {
         return;
     };
-    if !incoming_image.local_path.is_empty() {
-        return;
-    }
     if let Some(proto::message::Content::Image(existing_image)) = existing.content.as_ref() {
-        incoming_image
-            .local_path
-            .clone_from(&existing_image.local_path);
+        if incoming_image.local_path.is_empty() {
+            incoming_image
+                .local_path
+                .clone_from(&existing_image.local_path);
+        }
+        if incoming_image.thumbnail_path.is_empty() {
+            incoming_image
+                .thumbnail_path
+                .clone_from(&existing_image.thumbnail_path);
+        }
     }
+}
+
+pub fn image_row_path(image: &proto::ImageContent) -> &str {
+    image.thumbnail_path.as_str()
+}
+
+pub fn image_viewer_path(image: &proto::ImageContent) -> &str {
+    image.local_path.as_str()
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1062,12 +1076,20 @@ mod tests {
             ..Default::default()
         }));
         store.upsert_message(image_message.clone());
-        assert!(store.set_message_image_path("chat", "1", "/cache/photo.jpg".into()));
+        assert!(store.set_message_image_paths(
+            "chat",
+            "1",
+            "/cache/photo.jpg".into(),
+            "/cache/photo.thumb.png".into()
+        ));
         store.upsert_message(image_message);
         let Some(proto::message::Content::Image(image)) = store.messages[0].content.as_ref() else {
             panic!("image content missing");
         };
         assert_eq!(image.local_path, "/cache/photo.jpg");
+        assert_eq!(image.thumbnail_path, "/cache/photo.thumb.png");
+        assert_eq!(image_row_path(image), "/cache/photo.thumb.png");
+        assert_eq!(image_viewer_path(image), "/cache/photo.jpg");
         assert_eq!(message_text(&store.messages[0]), "");
     }
 

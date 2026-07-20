@@ -2947,10 +2947,13 @@ func (x *GetMessageImageRequest) GetMessageId() string {
 }
 
 type GetMessageImageResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChatId        string                 `protobuf:"bytes,1,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
-	MessageId     string                 `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
-	ImagePath     string                 `protobuf:"bytes,3,opt,name=image_path,json=imagePath,proto3" json:"image_path,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ChatId    string                 `protobuf:"bytes,1,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
+	MessageId string                 `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// Full-resolution cache entry used only by the image viewer.
+	ImagePath string `protobuf:"bytes,3,opt,name=image_path,json=imagePath,proto3" json:"image_path,omitempty"`
+	// Bounded cache entry used by virtualized conversation rows.
+	ThumbnailPath string `protobuf:"bytes,4,opt,name=thumbnail_path,json=thumbnailPath,proto3" json:"thumbnail_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3002,6 +3005,13 @@ func (x *GetMessageImageResponse) GetMessageId() string {
 func (x *GetMessageImageResponse) GetImagePath() string {
 	if x != nil {
 		return x.ImagePath
+	}
+	return ""
+}
+
+func (x *GetMessageImageResponse) GetThumbnailPath() string {
+	if x != nil {
+		return x.ThumbnailPath
 	}
 	return ""
 }
@@ -4389,13 +4399,15 @@ type ImageContent struct {
 	Caption  string                 `protobuf:"bytes,1,opt,name=caption,proto3" json:"caption,omitempty"`
 	MimeType string                 `protobuf:"bytes,2,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	// Empty until a historical image has been downloaded into the local cache.
-	LocalPath     string `protobuf:"bytes,3,opt,name=local_path,json=localPath,proto3" json:"local_path,omitempty"`
-	Width         uint32 `protobuf:"varint,4,opt,name=width,proto3" json:"width,omitempty"`
-	Height        uint32 `protobuf:"varint,5,opt,name=height,proto3" json:"height,omitempty"`
-	FileSize      uint64 `protobuf:"varint,6,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`
-	Downloadable  bool   `protobuf:"varint,7,opt,name=downloadable,proto3" json:"downloadable,omitempty"`
-	Sticker       bool   `protobuf:"varint,8,opt,name=sticker,proto3" json:"sticker,omitempty"`
-	Animated      bool   `protobuf:"varint,9,opt,name=animated,proto3" json:"animated,omitempty"`
+	LocalPath    string `protobuf:"bytes,3,opt,name=local_path,json=localPath,proto3" json:"local_path,omitempty"`
+	Width        uint32 `protobuf:"varint,4,opt,name=width,proto3" json:"width,omitempty"`
+	Height       uint32 `protobuf:"varint,5,opt,name=height,proto3" json:"height,omitempty"`
+	FileSize     uint64 `protobuf:"varint,6,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`
+	Downloadable bool   `protobuf:"varint,7,opt,name=downloadable,proto3" json:"downloadable,omitempty"`
+	Sticker      bool   `protobuf:"varint,8,opt,name=sticker,proto3" json:"sticker,omitempty"`
+	Animated     bool   `protobuf:"varint,9,opt,name=animated,proto3" json:"animated,omitempty"`
+	// A bounded rendering asset; local_path remains the full-resolution original.
+	ThumbnailPath string `protobuf:"bytes,10,opt,name=thumbnail_path,json=thumbnailPath,proto3" json:"thumbnail_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4491,6 +4503,13 @@ func (x *ImageContent) GetAnimated() bool {
 		return x.Animated
 	}
 	return false
+}
+
+func (x *ImageContent) GetThumbnailPath() string {
+	if x != nil {
+		return x.ThumbnailPath
+	}
+	return ""
 }
 
 type AttachmentContent struct {
@@ -5547,13 +5566,14 @@ const file_bridge_proto_rawDesc = "" +
 	"\x16GetMessageImageRequest\x12\x17\n" +
 	"\achat_id\x18\x01 \x01(\tR\x06chatId\x12\x1d\n" +
 	"\n" +
-	"message_id\x18\x02 \x01(\tR\tmessageId\"p\n" +
+	"message_id\x18\x02 \x01(\tR\tmessageId\"\x97\x01\n" +
 	"\x17GetMessageImageResponse\x12\x17\n" +
 	"\achat_id\x18\x01 \x01(\tR\x06chatId\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x02 \x01(\tR\tmessageId\x12\x1d\n" +
 	"\n" +
-	"image_path\x18\x03 \x01(\tR\timagePath\"X\n" +
+	"image_path\x18\x03 \x01(\tR\timagePath\x12%\n" +
+	"\x0ethumbnail_path\x18\x04 \x01(\tR\rthumbnailPath\"X\n" +
 	"\x0fMarkReadRequest\x12\x17\n" +
 	"\achat_id\x18\x01 \x01(\tR\x06chatId\x12,\n" +
 	"\x12through_message_id\x18\x02 \x01(\tR\x10throughMessageId\"\x12\n" +
@@ -5656,7 +5676,7 @@ const file_bridge_proto_rawDesc = "" +
 	"\vold_chat_id\x18\x01 \x01(\tR\toldChatId\x12\x1e\n" +
 	"\vnew_chat_id\x18\x02 \x01(\tR\tnewChatId\"!\n" +
 	"\vTextContent\x12\x12\n" +
-	"\x04text\x18\x01 \x01(\tR\x04text\"\x89\x02\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\"\xb0\x02\n" +
 	"\fImageContent\x12\x18\n" +
 	"\acaption\x18\x01 \x01(\tR\acaption\x12\x1b\n" +
 	"\tmime_type\x18\x02 \x01(\tR\bmimeType\x12\x1d\n" +
@@ -5667,7 +5687,9 @@ const file_bridge_proto_rawDesc = "" +
 	"\tfile_size\x18\x06 \x01(\x04R\bfileSize\x12\"\n" +
 	"\fdownloadable\x18\a \x01(\bR\fdownloadable\x12\x18\n" +
 	"\asticker\x18\b \x01(\bR\asticker\x12\x1a\n" +
-	"\banimated\x18\t \x01(\bR\banimated\"\xef\x02\n" +
+	"\banimated\x18\t \x01(\bR\banimated\x12%\n" +
+	"\x0ethumbnail_path\x18\n" +
+	" \x01(\tR\rthumbnailPath\"\xef\x02\n" +
 	"\x11AttachmentContent\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x18\n" +
 	"\acaption\x18\x02 \x01(\tR\acaption\x12\x1b\n" +

@@ -428,7 +428,8 @@ fn fake_loop(
                         content: Some(proto::message::Content::Image(proto::ImageContent {
                             caption: request.caption,
                             mime_type: String::new(),
-                            local_path: request.image_path,
+                            local_path: request.image_path.clone(),
+                            thumbnail_path: request.image_path,
                             downloadable: true,
                             ..Default::default()
                         })),
@@ -464,6 +465,7 @@ fn fake_loop(
                     chat_id: request.chat_id,
                     message_id: request.message_id,
                     image_path: String::new(),
+                    thumbnail_path: String::new(),
                 })
             }
             Some(rpc_request::Request::SendReaction(request)) => {

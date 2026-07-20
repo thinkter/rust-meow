@@ -11,7 +11,7 @@ import (
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
-	_ "image/png"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -35,6 +35,7 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 	"google.golang.org/protobuf/proto"
 	_ "modernc.org/sqlite"
@@ -1037,6 +1038,7 @@ const maxImageBytes = 32 * 1024 * 1024
 // four bytes per pixel this caps a single GPUI decode at roughly 64 MiB.
 const maxImagePixels int64 = 16_000_000
 const maxImageEdge = 8192
+const thumbnailMaxEdge = 512
 const maxStaticStickerBytes = 100 * 1024
 const maxAnimatedStickerBytes = 500 * 1024
 const stickerEdge = 512
@@ -1135,32 +1137,143 @@ func (c *Client) mediaPath(chatID, messageID, mimeType string) string {
 	return filepath.Join(c.mediaDir, name)
 }
 
-func (c *Client) CachedImagePath(chatID, messageID, mimeType string) string {
-	path := c.mediaPath(chatID, messageID, mimeType)
-	stat, err := os.Lstat(path)
-	if err != nil || !stat.Mode().IsRegular() || stat.Size() <= 0 || stat.Size() > maxImageBytes {
-		return ""
-	}
-	if _, err = safeImageFile(path); err != nil {
-		// Never expose an invalid legacy cache entry to the UI. A later download
-		// can repopulate it from the message descriptor.
-		_ = os.Remove(path)
-		return ""
-	}
-	return path
+func (c *Client) thumbnailPath(chatID, messageID string) string {
+	name := fmt.Sprintf("%x.thumb.png", sha256.Sum256([]byte(chatID+"\x00"+messageID)))
+	return filepath.Join(c.mediaDir, name)
 }
 
-func (c *Client) cacheImageBytes(chatID, messageID, mimeType string, data []byte) (string, error) {
+func validCachedImage(path string) bool {
+	stat, err := os.Lstat(path)
+	if err != nil || !stat.Mode().IsRegular() || stat.Size() <= 0 || stat.Size() > maxImageBytes {
+		return false
+	}
+	_, err = safeImageFile(path)
+	return err == nil
+}
+
+func thumbnailDimensions(width, height int) (int, int) {
+	if width <= 0 || height <= 0 {
+		return 0, 0
+	}
+	if width <= thumbnailMaxEdge && height <= thumbnailMaxEdge {
+		return width, height
+	}
+	if width >= height {
+		return thumbnailMaxEdge, max(1, height*thumbnailMaxEdge/width)
+	}
+	return max(1, width*thumbnailMaxEdge/height), thumbnailMaxEdge
+}
+
+func (c *Client) writeThumbnail(originalPath, thumbnailPath string) error {
+	config, err := safeImageFile(originalPath)
+	if err != nil {
+		return err
+	}
+	width, height := thumbnailDimensions(config.Width, config.Height)
+	if width == 0 || height == 0 {
+		return fmt.Errorf("thumbnail source has invalid dimensions")
+	}
+	temporary, err := os.CreateTemp(c.mediaDir, ".thumbnail-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err == nil && width == config.Width && height == config.Height {
+		// Already-bounded animated GIF/WebP assets must retain their animation;
+		// copying also avoids a needless decode when no resize is required.
+		var source *os.File
+		source, err = os.Open(originalPath)
+		if err == nil {
+			_, err = io.Copy(temporary, source)
+		}
+		if source != nil {
+			if sourceErr := source.Close(); err == nil {
+				err = sourceErr
+			}
+		}
+	} else if err == nil {
+		var source *os.File
+		source, err = os.Open(originalPath)
+		if err == nil {
+			var decoded image.Image
+			decoded, _, err = image.Decode(source)
+			if err == nil {
+				thumbnail := image.NewRGBA(image.Rect(0, 0, width, height))
+				xdraw.CatmullRom.Scale(thumbnail, thumbnail.Bounds(), decoded, decoded.Bounds(), xdraw.Over, nil)
+				err = png.Encode(temporary, thumbnail)
+			}
+		}
+		if source != nil {
+			if sourceErr := source.Close(); err == nil {
+				err = sourceErr
+			}
+		}
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return fmt.Errorf("write thumbnail: %w", err)
+	}
+	if err = os.Rename(temporaryPath, thumbnailPath); err != nil {
+		return fmt.Errorf("publish thumbnail: %w", err)
+	}
+	return nil
+}
+
+// cachedImagePaths returns an all-or-nothing cache pair. Legacy originals only
+// get upgraded from the asynchronous media path so listing messages never
+// performs image decodes on the main request loop.
+func (c *Client) cachedImagePaths(chatID, messageID, mimeType string, generateThumbnail bool) (string, string) {
+	originalPath := c.mediaPath(chatID, messageID, mimeType)
+	thumbnailPath := c.thumbnailPath(chatID, messageID)
+	if !validCachedImage(originalPath) {
+		_ = os.Remove(originalPath)
+		_ = os.Remove(thumbnailPath)
+		return "", ""
+	}
+	if _, err := os.Lstat(thumbnailPath); errors.Is(err, os.ErrNotExist) {
+		if !generateThumbnail {
+			return "", ""
+		}
+		if err = c.writeThumbnail(originalPath, thumbnailPath); err != nil {
+			_ = os.Remove(originalPath)
+			_ = os.Remove(thumbnailPath)
+			return "", ""
+		}
+		c.pruneMediaCache(512 * 1024 * 1024)
+	}
+	if !validCachedImage(thumbnailPath) {
+		_ = os.Remove(originalPath)
+		_ = os.Remove(thumbnailPath)
+		return "", ""
+	}
+	config, err := safeImageFile(thumbnailPath)
+	if err != nil || config.Width > thumbnailMaxEdge || config.Height > thumbnailMaxEdge {
+		_ = os.Remove(originalPath)
+		_ = os.Remove(thumbnailPath)
+		return "", ""
+	}
+	return originalPath, thumbnailPath
+}
+
+func (c *Client) CachedImagePaths(chatID, messageID, mimeType string) (string, string) {
+	return c.cachedImagePaths(chatID, messageID, mimeType, false)
+}
+
+func (c *Client) cacheImageBytes(chatID, messageID, mimeType string, data []byte) (string, string, error) {
 	if _, err := safeImageConfig(bytes.NewReader(data)); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := os.MkdirAll(c.mediaDir, 0o700); err != nil {
-		return "", fmt.Errorf("create media cache: %w", err)
+		return "", "", fmt.Errorf("create media cache: %w", err)
 	}
 	path := c.mediaPath(chatID, messageID, mimeType)
+	thumbnailPath := c.thumbnailPath(chatID, messageID)
 	temporary, err := os.CreateTemp(c.mediaDir, ".image-*.tmp")
 	if err != nil {
-		return "", fmt.Errorf("create image cache file: %w", err)
+		return "", "", fmt.Errorf("create image cache file: %w", err)
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
@@ -1171,13 +1284,18 @@ func (c *Client) cacheImageBytes(chatID, messageID, mimeType string, data []byte
 		err = closeErr
 	}
 	if err != nil {
-		return "", fmt.Errorf("write image cache: %w", err)
+		return "", "", fmt.Errorf("write image cache: %w", err)
 	}
 	if err = os.Rename(temporaryPath, path); err != nil {
-		return "", fmt.Errorf("publish image cache: %w", err)
+		return "", "", fmt.Errorf("publish image cache: %w", err)
+	}
+	if err = c.writeThumbnail(path, thumbnailPath); err != nil {
+		_ = os.Remove(path)
+		_ = os.Remove(thumbnailPath)
+		return "", "", err
 	}
 	c.pruneMediaCache(512 * 1024 * 1024)
-	return path, nil
+	return path, thumbnailPath, nil
 }
 
 func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, caption, replyToID string) (domain.Message, error) {
@@ -1225,7 +1343,7 @@ func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, ca
 	}
 	width, height := uint32(config.Width), uint32(config.Height)
 	waID := string(c.wa.GenerateMessageID())
-	localPath, err := c.cacheImageBytes(chatID, waID, mimeType, data)
+	localPath, thumbnailPath, err := c.cacheImageBytes(chatID, waID, mimeType, data)
 	if err != nil {
 		return domain.Message{}, err
 	}
@@ -1236,11 +1354,14 @@ func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, ca
 	}
 	waID, existed, err := c.store.ReserveOutgoingMessage(ctx, clientID, pending)
 	if err != nil {
+		_ = os.Remove(localPath)
+		_ = os.Remove(thumbnailPath)
 		return domain.Message{}, err
 	}
 	if existed {
 		if pending.ID != waID {
 			_ = os.Remove(localPath)
+			_ = os.Remove(thumbnailPath)
 		}
 		return c.store.Message(ctx, chatID, waID)
 	}
@@ -1304,7 +1425,7 @@ func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data 
 		return domain.Message{}, err
 	}
 	waID := string(c.wa.GenerateMessageID())
-	localPath, err := c.cacheImageBytes(chatID, waID, "image/webp", data)
+	localPath, thumbnailPath, err := c.cacheImageBytes(chatID, waID, "image/webp", data)
 	if err != nil {
 		return domain.Message{}, err
 	}
@@ -1316,11 +1437,13 @@ func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data 
 	waID, existed, err := c.store.ReserveOutgoingMessage(ctx, clientID, pending)
 	if err != nil {
 		_ = os.Remove(localPath)
+		_ = os.Remove(thumbnailPath)
 		return domain.Message{}, err
 	}
 	if existed {
 		if pending.ID != waID {
 			_ = os.Remove(localPath)
+			_ = os.Remove(thumbnailPath)
 		}
 		return c.store.Message(ctx, chatID, waID)
 	}
@@ -1358,44 +1481,44 @@ func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data 
 	return pending, err
 }
 
-func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (string, error) {
+func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (string, string, error) {
 	message, err := c.store.Message(ctx, chatID, messageID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	chatID = message.ChatJID
 	if message.Image == nil {
-		return "", fmt.Errorf("message is not an image")
+		return "", "", fmt.Errorf("message is not an image")
 	}
 	imageInfo := message.Image
 	if imageInfo.DirectPath == "" || len(imageInfo.MediaKey) == 0 {
 		imageInfo, err = c.recoverImageDescriptor(ctx, message, imageInfo)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 	path := c.mediaPath(chatID, messageID, imageInfo.MIMEType)
-	if cachedPath := c.CachedImagePath(chatID, messageID, imageInfo.MIMEType); cachedPath != "" {
+	if cachedPath, thumbnailPath := c.cachedImagePaths(chatID, messageID, imageInfo.MIMEType, true); cachedPath != "" {
 		if imageInfo.LocalPath != path {
 			_ = c.store.SetImageLocalPath(ctx, chatID, messageID, path)
 		}
-		return cachedPath, nil
+		return cachedPath, thumbnailPath, nil
 	}
 	if imageInfo.DirectPath == "" || len(imageInfo.MediaKey) == 0 {
-		return "", fmt.Errorf("image is not downloadable")
+		return "", "", fmt.Errorf("image is not downloadable")
 	}
 	if err = os.MkdirAll(c.mediaDir, 0o700); err != nil {
-		return "", err
+		return "", "", err
 	}
 	temporary, err := os.CreateTemp(c.mediaDir, ".download-*.tmp")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	if err = temporary.Chmod(0o600); err != nil {
 		temporary.Close()
-		return "", err
+		return "", "", err
 	}
 	downloadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	err = c.wa.DownloadToFile(downloadCtx, downloadableImage(message.Kind, imageInfo), temporary)
@@ -1423,23 +1546,29 @@ func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (s
 		err = closeErr
 	}
 	if err != nil {
-		return "", fmt.Errorf("download image: %w", err)
+		return "", "", fmt.Errorf("download image: %w", err)
 	}
 	stat, err := os.Stat(temporaryPath)
 	if err != nil || stat.Size() <= 0 || stat.Size() > maxImageBytes {
-		return "", fmt.Errorf("downloaded image has invalid size")
+		return "", "", fmt.Errorf("downloaded image has invalid size")
 	}
 	if _, err = safeImageFile(temporaryPath); err != nil {
-		return "", fmt.Errorf("downloaded image is unsafe: %w", err)
+		return "", "", fmt.Errorf("downloaded image is unsafe: %w", err)
 	}
 	if err = os.Rename(temporaryPath, path); err != nil {
-		return "", err
+		return "", "", err
+	}
+	thumbnailPath := c.thumbnailPath(chatID, messageID)
+	if err = c.writeThumbnail(path, thumbnailPath); err != nil {
+		_ = os.Remove(path)
+		_ = os.Remove(thumbnailPath)
+		return "", "", err
 	}
 	if err = c.store.SetImageLocalPath(ctx, chatID, messageID, path); err != nil {
-		return "", err
+		return "", "", err
 	}
 	c.pruneMediaCache(512 * 1024 * 1024)
-	return path, nil
+	return path, thumbnailPath, nil
 }
 
 func downloadableImage(kind string, image *domain.Image) whatsmeow.DownloadableMessage {
@@ -1512,29 +1641,45 @@ func (c *Client) pruneMediaCache(maxBytes int64) {
 	if err != nil {
 		return
 	}
-	type cachedFile struct {
-		path string
-		size int64
-		mod  time.Time
+	type cachedGroup struct {
+		paths []string
+		mod   time.Time
 	}
-	files := make([]cachedFile, 0, len(entries))
+	groupsByKey := make(map[string]*cachedGroup, len(entries))
 	var total int64
 	for _, entry := range entries {
 		info, infoErr := entry.Info()
 		if infoErr != nil || !info.Mode().IsRegular() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		files = append(files, cachedFile{filepath.Join(c.mediaDir, entry.Name()), info.Size(), info.ModTime()})
+		key := strings.SplitN(entry.Name(), ".", 2)[0]
+		group := groupsByKey[key]
+		if group == nil {
+			group = &cachedGroup{}
+			groupsByKey[key] = group
+		}
+		group.paths = append(group.paths, filepath.Join(c.mediaDir, entry.Name()))
+		if group.mod.IsZero() || info.ModTime().Before(group.mod) {
+			group.mod = info.ModTime()
+		}
 		total += info.Size()
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
-	for _, file := range files {
+	groups := make([]*cachedGroup, 0, len(groupsByKey))
+	for _, group := range groupsByKey {
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].mod.Before(groups[j].mod) })
+	for _, group := range groups {
 		if total <= maxBytes {
 			break
 		}
-		if os.Remove(file.path) == nil {
-			total -= file.size
+		removed := int64(0)
+		for _, path := range group.paths {
+			if info, statErr := os.Stat(path); statErr == nil && os.Remove(path) == nil {
+				removed += info.Size()
+			}
 		}
+		total -= removed
 	}
 }
 
