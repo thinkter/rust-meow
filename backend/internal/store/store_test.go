@@ -565,6 +565,78 @@ func TestEnsureConversationMergesPNAndLIDWithoutLosingTransport(t *testing.T) {
 	}
 }
 
+func TestEnsureConversationKeepsNewestSelfReactionPerMessage(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	pn := "919999890760@s.whatsapp.net"
+	lid := "207236550930675@lid"
+	pnChat, _, err := s.EnsureConversation(ctx, pn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lidChat, _, err := s.EnsureConversation(ctx, lid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []domain.Message{
+		{ID: "first", ChatJID: pnChat, TransportJID: pn, Timestamp: time.UnixMilli(1)},
+		{ID: "second", ChatJID: pnChat, TransportJID: pn, Timestamp: time.UnixMilli(2)},
+		{ID: "first", ChatJID: lidChat, TransportJID: lid, Timestamp: time.UnixMilli(1)},
+		{ID: "second", ChatJID: lidChat, TransportJID: lid, Timestamp: time.UnixMilli(2)},
+	} {
+		if err = s.ApplyMessage(ctx, message, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, reaction := range []domain.Reaction{
+		{ChatJID: pnChat, MessageID: "first", SenderJID: pn, Emoji: "old-first", Timestamp: time.UnixMilli(1000), FromMe: true},
+		{ChatJID: lidChat, MessageID: "first", SenderJID: lid, Emoji: "new-first", Timestamp: time.UnixMilli(3000), FromMe: true},
+		{ChatJID: pnChat, MessageID: "second", SenderJID: pn, Emoji: "new-second", Timestamp: time.UnixMilli(4000), FromMe: true},
+		{ChatJID: lidChat, MessageID: "second", SenderJID: lid, Emoji: "old-second", Timestamp: time.UnixMilli(2000), FromMe: true},
+	} {
+		if err = s.ApplyReaction(ctx, reaction); err != nil {
+			t.Fatal(err)
+		}
+	}
+	winner, _, err := s.EnsureConversation(ctx, lid, pn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT message_id,sender_jid,emoji,timestamp FROM reactions WHERE chat_jid=? AND from_me=1 ORDER BY message_id`, winner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type persistedReaction struct {
+		messageID string
+		senderJID string
+		emoji     string
+		timestamp int64
+	}
+	var got []persistedReaction
+	for rows.Next() {
+		var reaction persistedReaction
+		if err = rows.Scan(&reaction.messageID, &reaction.senderJID, &reaction.emoji, &reaction.timestamp); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, reaction)
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []persistedReaction{
+		{messageID: "first", senderJID: lid, emoji: "new-first", timestamp: 3000},
+		{messageID: "second", senderJID: pn, emoji: "new-second", timestamp: 4000},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("reactions=%+v want=%+v", got, want)
+	}
+}
+
 func TestConversationAddressesPrefersLIDAndRetainsPNFallback(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "addresses.db"))

@@ -704,7 +704,12 @@ ON CONFLICT(chat_jid,message_id,sender_jid) DO UPDATE SET emoji=excluded.emoji,t
 	if _, err := tx.ExecContext(ctx, `DELETE FROM reactions WHERE chat_jid=?`, loser); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM reactions WHERE chat_jid=? AND from_me=1 AND rowid NOT IN (SELECT rowid FROM reactions WHERE chat_jid=? AND from_me=1 ORDER BY timestamp DESC LIMIT 1)`, winner, winner); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM reactions AS stale
+WHERE stale.chat_jid=? AND stale.from_me=1 AND EXISTS (
+  SELECT 1 FROM reactions AS newer
+  WHERE newer.chat_jid=stale.chat_jid AND newer.message_id=stale.message_id AND newer.from_me=1
+    AND (newer.timestamp>stale.timestamp OR (newer.timestamp=stale.timestamp AND newer.rowid>stale.rowid))
+)`, winner); err != nil {
 		return err
 	}
 	for _, table := range []string{"outgoing_requests", "outgoing_reactions"} {
