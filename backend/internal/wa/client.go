@@ -81,6 +81,7 @@ type Client struct {
 	avatarDir          string
 	mediaDir           string
 	contactCache       sync.Map
+	avatarCache        sync.Map
 	avatarFetchMu      sync.Mutex
 	avatarFetches      map[string]*avatarFetch
 	negativeAvatarMu   sync.Mutex
@@ -102,11 +103,21 @@ type cachedContactDetails struct {
 	complete  bool
 }
 
+type cachedAvatarMetadata struct {
+	path      string
+	expiresAt time.Time
+}
+
 type ContactDetails struct {
 	PhoneNumber  string
 	ContactName  string
 	PushName     string
 	BusinessName string
+}
+
+type ChatPresentation struct {
+	Details    ContactDetails
+	AvatarPath string
 }
 
 type ContactSearchResult struct {
@@ -156,6 +167,7 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 	// does not project those events into Rust Meow's product database.
 	w.EmitAppStateEventsOnFullSync = true
 	c := &Client{ctx: ctx, wa: w, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time)}
+	c.loadCachedAvatars()
 	c.fetchAppStateFn = w.FetchAppState
 	c.logoutFn = w.Logout
 	c.clearAccountDataFn = productStore.ClearAccountData
@@ -248,28 +260,84 @@ func (c *Client) ContactDetailsForChat(ctx context.Context, chatID string) Conta
 }
 
 func (c *Client) ChatPresentation(ctx context.Context, chatID string) (ContactDetails, string) {
-	addresses, err := c.store.ConversationAddresses(ctx, chatID)
+	presentations, err := c.ChatPresentations(ctx, []string{chatID})
 	if err != nil {
 		return ContactDetails{}, ""
 	}
-	details := c.contactDetailsForAddresses(ctx, addresses...)
-	for _, jid := range c.identityJIDs(ctx, addresses...) {
-		if path := c.cachedAvatarForJID(jid); path != "" {
-			return details, path
-		}
+	presentation := presentations[chatID]
+	return presentation.Details, presentation.AvatarPath
+}
+
+// ChatPresentations resolves all presentation data for a chat page without
+// repeating product-store, contact-store, or filesystem work for every row.
+func (c *Client) ChatPresentations(ctx context.Context, chatIDs []string) (map[string]ChatPresentation, error) {
+	presentations := make(map[string]ChatPresentation, len(chatIDs))
+	addressesByChat, err := c.store.ConversationAddressesForChats(ctx, chatIDs)
+	if err != nil {
+		return nil, err
 	}
-	return details, ""
+	type pendingPresentation struct {
+		chatID    string
+		addresses []string
+		jids      []types.JID
+	}
+	pending := make([]pendingPresentation, 0, len(chatIDs))
+	pns := make([]types.JID, 0, len(chatIDs))
+	for _, chatID := range chatIDs {
+		addresses := addressesByChat[chatID]
+		jids := explicitIdentityJIDs(addresses...)
+		presentation := ChatPresentation{AvatarPath: c.cachedAvatarForJIDs(jids)}
+		if len(jids) == 0 || jids[0].Server == types.GroupServer {
+			presentations[chatID] = presentation
+			continue
+		}
+		if details, ok := c.cachedContactDetailsForAddresses(addresses); ok {
+			presentation.Details = details
+			presentations[chatID] = presentation
+			continue
+		}
+		for _, jid := range jids {
+			if jid.Server == types.DefaultUserServer {
+				pns = append(pns, jid)
+			}
+		}
+		presentations[chatID] = presentation
+		pending = append(pending, pendingPresentation{chatID: chatID, addresses: addresses, jids: jids})
+	}
+	if len(pending) == 0 || c.wa == nil || c.wa.Store == nil {
+		return presentations, nil
+	}
+	lidsByPN, _ := c.wa.Store.LIDs.GetManyLIDsForPNs(ctx, pns)
+	contacts, err := c.wa.Store.Contacts.GetAllContacts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load chat presentation contacts: %w", err)
+	}
+	for _, item := range pending {
+		seen := make(map[string]bool, len(item.jids)+1)
+		for _, jid := range item.jids {
+			seen[jid.String()] = true
+		}
+		for _, jid := range append([]types.JID(nil), item.jids...) {
+			if lid := lidsByPN[jid]; !lid.IsEmpty() && !seen[lid.String()] {
+				item.jids = append(item.jids, lid.ToNonAD())
+				seen[lid.String()] = true
+			}
+		}
+		details := contactDetailsFromMap(item.jids, contacts)
+		c.cacheContactDetails(item.addresses, item.jids, details)
+		presentation := presentations[item.chatID]
+		presentation.Details = details
+		if presentation.AvatarPath == "" {
+			presentation.AvatarPath = c.cachedAvatarForJIDs(item.jids)
+		}
+		presentations[item.chatID] = presentation
+	}
+	return presentations, nil
 }
 
 func (c *Client) contactDetailsForAddresses(ctx context.Context, rawJIDs ...string) ContactDetails {
-	for _, rawJID := range rawJIDs {
-		if cached, ok := c.contactCache.Load(rawJID); ok {
-			entry, valid := cached.(cachedContactDetails)
-			if valid && time.Now().Before(entry.expiresAt) && (entry.complete || len(rawJIDs) == 1) {
-				return entry.details
-			}
-			c.contactCache.Delete(rawJID)
-		}
+	if details, ok := c.cachedContactDetailsForAddresses(rawJIDs); ok {
+		return details
 	}
 	candidates := c.identityJIDs(ctx, rawJIDs...)
 	if len(candidates) == 0 || candidates[0].Server == types.GroupServer {
@@ -287,16 +355,25 @@ func (c *Client) contactDetailsForAddresses(ctx context.Context, rawJIDs ...stri
 	if phone == "" && info.RedactedPhone != "" {
 		phone = info.RedactedPhone
 	}
-	contactName := info.FullName
-	if contactName == "" {
-		contactName = info.FirstName
+	details := contactDetails(info, phone)
+	c.cacheContactDetails(rawJIDs, candidates, details)
+	return details
+}
+
+func (c *Client) cachedContactDetailsForAddresses(rawJIDs []string) (ContactDetails, bool) {
+	for _, rawJID := range rawJIDs {
+		if cached, ok := c.contactCache.Load(rawJID); ok {
+			entry, valid := cached.(cachedContactDetails)
+			if valid && time.Now().Before(entry.expiresAt) && (entry.complete || len(rawJIDs) == 1) {
+				return entry.details, true
+			}
+			c.contactCache.Delete(rawJID)
+		}
 	}
-	details := ContactDetails{
-		PhoneNumber:  phone,
-		ContactName:  contactName,
-		PushName:     info.PushName,
-		BusinessName: info.BusinessName,
-	}
+	return ContactDetails{}, false
+}
+
+func (c *Client) cacheContactDetails(rawJIDs []string, candidates []types.JID, details ContactDetails) {
 	// Identity mappings and push names are imported asynchronously. Only cache a
 	// complete identity for a long period; partial/negative entries must be
 	// retried soon so an early list request cannot poison the whole session.
@@ -312,12 +389,14 @@ func (c *Client) contactDetailsForAddresses(ctx context.Context, rawJIDs ...stri
 	for _, rawJID := range rawJIDs {
 		c.contactCache.Store(rawJID, entry)
 	}
-	return details
 }
 
 func (c *Client) identityJIDs(ctx context.Context, rawJIDs ...string) []types.JID {
-	candidates := make([]types.JID, 0, len(rawJIDs)+1)
+	candidates := explicitIdentityJIDs(rawJIDs...)
 	seen := make(map[string]bool, len(rawJIDs)+1)
+	for _, jid := range candidates {
+		seen[jid.String()] = true
+	}
 	add := func(jid types.JID) {
 		jid = jid.ToNonAD()
 		if jid.IsEmpty() || seen[jid.String()] {
@@ -325,13 +404,6 @@ func (c *Client) identityJIDs(ctx context.Context, rawJIDs ...string) []types.JI
 		}
 		seen[jid.String()] = true
 		candidates = append(candidates, jid)
-	}
-	for _, rawJID := range rawJIDs {
-		jid, err := types.ParseJID(rawJID)
-		if err != nil {
-			continue
-		}
-		add(jid)
 	}
 	// Conversation callers already supply both aliases. Avoid querying the
 	// whatsmeow mapping database once per alias (and again for cached avatars)
@@ -353,6 +425,47 @@ func (c *Client) identityJIDs(ctx context.Context, rawJIDs ...string) []types.JI
 		}
 	}
 	return candidates
+}
+
+func explicitIdentityJIDs(rawJIDs ...string) []types.JID {
+	candidates := make([]types.JID, 0, len(rawJIDs))
+	seen := make(map[string]bool, len(rawJIDs))
+	for _, rawJID := range rawJIDs {
+		jid, err := types.ParseJID(rawJID)
+		if err != nil {
+			continue
+		}
+		jid = jid.ToNonAD()
+		if jid.IsEmpty() || seen[jid.String()] {
+			continue
+		}
+		seen[jid.String()] = true
+		candidates = append(candidates, jid)
+	}
+	return candidates
+}
+
+func contactDetailsFromMap(candidates []types.JID, contacts map[types.JID]types.ContactInfo) ContactDetails {
+	var info types.ContactInfo
+	phone := ""
+	for _, jid := range candidates {
+		info = mergeContactInfo(info, contacts[jid])
+		if phone == "" && jid.Server == types.DefaultUserServer && jid.User != "" {
+			phone = "+" + jid.User
+		}
+	}
+	if phone == "" && info.RedactedPhone != "" {
+		phone = info.RedactedPhone
+	}
+	return contactDetails(info, phone)
+}
+
+func contactDetails(info types.ContactInfo, phone string) ContactDetails {
+	contactName := info.FullName
+	if contactName == "" {
+		contactName = info.FirstName
+	}
+	return ContactDetails{PhoneNumber: phone, ContactName: contactName, PushName: info.PushName, BusinessName: info.BusinessName}
 }
 
 func mergeContactInfo(first, second types.ContactInfo) types.ContactInfo {
@@ -662,6 +775,7 @@ func (c *Client) fetchAvatar(ctx context.Context, jid types.JID) (string, error)
 	if err = os.Rename(temporaryPath, path); err != nil {
 		return "", fmt.Errorf("publish profile picture cache: %w", err)
 	}
+	c.avatarCache.Store(path, cachedAvatarMetadata{path: path, expiresAt: time.Now().Add(24 * time.Hour)})
 	c.pruneAvatarCache(128 * 1024 * 1024)
 	return path, nil
 }
@@ -688,12 +802,53 @@ func (c *Client) CachedChatAvatar(chatID string) string {
 	return ""
 }
 
-func (c *Client) cachedAvatarForJID(jid types.JID) string {
-	path := c.avatarPath(jid.ToNonAD())
-	if stat, statErr := os.Lstat(path); statErr == nil && stat.Mode().IsRegular() && stat.Size() > 0 && time.Since(stat.ModTime()) < 24*time.Hour {
-		return path
+func (c *Client) cachedAvatarForJIDs(jids []types.JID) string {
+	for _, jid := range jids {
+		if path := c.cachedAvatarForJID(jid); path != "" {
+			return path
+		}
 	}
 	return ""
+}
+
+func (c *Client) cachedAvatarForJID(jid types.JID) string {
+	path := c.avatarPath(jid.ToNonAD())
+	cached, ok := c.avatarCache.Load(path)
+	if !ok {
+		return ""
+	}
+	metadata, ok := cached.(cachedAvatarMetadata)
+	if !ok || time.Now().After(metadata.expiresAt) {
+		c.avatarCache.Delete(path)
+		return ""
+	}
+	return metadata.path
+}
+
+func (c *Client) loadCachedAvatars() {
+	entries, err := os.ReadDir(c.avatarDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() || info.Size() <= 0 || filepath.Ext(entry.Name()) != ".jpg" {
+			continue
+		}
+		expiresAt := info.ModTime().Add(24 * time.Hour)
+		if time.Now().After(expiresAt) {
+			continue
+		}
+		path := filepath.Join(c.avatarDir, entry.Name())
+		c.avatarCache.Store(path, cachedAvatarMetadata{path: path, expiresAt: expiresAt})
+	}
+}
+
+func (c *Client) clearAvatarCache() {
+	c.avatarCache.Range(func(key, _ any) bool {
+		c.avatarCache.Delete(key)
+		return true
+	})
 }
 
 func validateAvatarURL(raw string) error {
@@ -733,6 +888,7 @@ func (c *Client) pruneAvatarCache(maxBytes int64) {
 			break
 		}
 		if os.Remove(file.path) == nil {
+			c.avatarCache.Delete(file.path)
 			total -= file.size
 		}
 	}
@@ -1579,6 +1735,7 @@ func (c *Client) Logout(ctx context.Context) error {
 	if avatarErr := os.RemoveAll(c.avatarDir); localErr == nil && avatarErr != nil {
 		localErr = avatarErr
 	}
+	c.clearAvatarCache()
 	if mediaErr := os.RemoveAll(c.mediaDir); localErr == nil && mediaErr != nil {
 		localErr = mediaErr
 	}
@@ -1640,7 +1797,9 @@ func (c *Client) handleEvent(raw any) {
 		c.invalidateContact(evt.JID)
 	case *events.Picture:
 		for _, jid := range c.identityJIDs(c.ctx, evt.JID.String()) {
-			_ = os.Remove(c.avatarPath(jid))
+			path := c.avatarPath(jid)
+			_ = os.Remove(path)
+			c.avatarCache.Delete(path)
 			c.negativeAvatarMu.Lock()
 			delete(c.negativeAvatars, jid.String())
 			c.negativeAvatarMu.Unlock()

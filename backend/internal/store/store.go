@@ -543,6 +543,47 @@ WHERE a.chat_jid=? ORDER BY CASE WHEN a.jid=c.preferred_jid THEN 0 WHEN a.jid LI
 	return addresses, rows.Err()
 }
 
+// ConversationAddressesForChats returns presentation addresses for a page of
+// opaque chat IDs with one query. Callers must pass canonical IDs obtained from
+// this store; unlike ConversationAddresses, this page-oriented method does not
+// resolve aliases one at a time.
+func (s *Store) ConversationAddressesForChats(ctx context.Context, chatIDs []string) (map[string][]string, error) {
+	addresses := make(map[string][]string, len(chatIDs))
+	unique := make([]string, 0, len(chatIDs))
+	for _, chatID := range chatIDs {
+		if chatID == "" {
+			continue
+		}
+		if _, exists := addresses[chatID]; exists {
+			continue
+		}
+		addresses[chatID] = nil
+		unique = append(unique, chatID)
+	}
+	if len(unique) == 0 {
+		return addresses, nil
+	}
+	args := make([]any, len(unique))
+	for i := range unique {
+		args[i] = unique[i]
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
+	rows, err := s.db.QueryContext(ctx, `SELECT a.chat_jid,a.jid FROM chat_addresses a JOIN chats c ON c.jid=a.chat_jid
+WHERE a.chat_jid IN (`+placeholders+`) ORDER BY a.chat_jid,CASE WHEN a.jid=c.preferred_jid THEN 0 WHEN a.jid LIKE '%@lid' THEN 1 ELSE 2 END,a.last_seen_at DESC,a.jid`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var chatID, address string
+		if err = rows.Scan(&chatID, &address); err != nil {
+			return nil, err
+		}
+		addresses[chatID] = append(addresses[chatID], address)
+	}
+	return addresses, rows.Err()
+}
+
 func (s *Store) ConversationAddressMap(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT jid,chat_jid FROM chat_addresses`)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -124,6 +125,90 @@ func TestContactSearchIsFuzzyAndCreatesConversationOnlyWhenOpened(t *testing.T) 
 	afterOpen, err := productStore.ChatCount(ctx)
 	if err != nil || afterOpen != before+1 {
 		t.Fatalf("open did not create one chat: before=%d after=%d err=%v", before, afterOpen, err)
+	}
+}
+
+func setupChatPresentationPage(tb testing.TB, count int) (context.Context, *Client, []string, func()) {
+	tb.Helper()
+	ctx := context.Background()
+	directory := tb.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	client, err := New(ctx, directory, productStore, func(Event) {}, slog.Default())
+	if err != nil {
+		productStore.Close()
+		tb.Fatal(err)
+	}
+	cleanup := func() {
+		client.Close()
+		productStore.Close()
+	}
+	own, _ := types.ParseJID("15550000000:1@s.whatsapp.net")
+	client.wa.Store.ID = &own
+	client.wa.Store.Account = &waAdv.ADVSignedDeviceIdentity{
+		Details: []byte{1}, AccountSignatureKey: make([]byte, 32), AccountSignature: make([]byte, 64), DeviceSignature: make([]byte, 64),
+	}
+	if err = client.wa.Store.Save(ctx); err != nil {
+		cleanup()
+		tb.Fatal(err)
+	}
+	chatIDs := make([]string, count)
+	for i := range chatIDs {
+		jid, _ := types.ParseJID(fmt.Sprintf("1555001%04d@s.whatsapp.net", i))
+		chatIDs[i], _, err = productStore.EnsureConversation(ctx, jid.String())
+		if err == nil {
+			err = client.wa.Store.Contacts.PutContactName(ctx, jid, fmt.Sprintf("Person %03d", i), fmt.Sprintf("Person %03d", i))
+		}
+		if err != nil {
+			cleanup()
+			tb.Fatal(err)
+		}
+	}
+	return ctx, client, chatIDs, cleanup
+}
+
+func TestChatPresentationsBatchesHundredChatPage(t *testing.T) {
+	ctx, client, chatIDs, cleanup := setupChatPresentationPage(t, 100)
+	defer cleanup()
+	firstJID, _ := types.ParseJID("15550010000@s.whatsapp.net")
+	if err := os.MkdirAll(client.avatarDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	avatarPath := client.avatarPath(firstJID)
+	if err := os.WriteFile(avatarPath, []byte("cached avatar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client.loadCachedAvatars()
+
+	presentations, err := client.ChatPresentations(ctx, chatIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(presentations) != len(chatIDs) {
+		t.Fatalf("presentations=%d want=%d", len(presentations), len(chatIDs))
+	}
+	for i, chatID := range chatIDs {
+		presentation := presentations[chatID]
+		if want := fmt.Sprintf("Person %03d", i); presentation.Details.ContactName != want {
+			t.Fatalf("chat %d contact=%q want=%q", i, presentation.Details.ContactName, want)
+		}
+		if i == 0 && presentation.AvatarPath != avatarPath {
+			t.Fatalf("cached avatar=%q want=%q", presentation.AvatarPath, avatarPath)
+		}
+	}
+}
+
+func BenchmarkChatPresentationsHundredChatPage(b *testing.B) {
+	ctx, client, chatIDs, cleanup := setupChatPresentationPage(b, 100)
+	b.Cleanup(cleanup)
+	b.ReportAllocs()
+	for b.Loop() {
+		client.clearContactCache()
+		if _, err := client.ChatPresentations(ctx, chatIDs); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

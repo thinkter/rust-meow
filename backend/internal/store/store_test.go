@@ -704,6 +704,37 @@ func TestConversationAddressesPrefersLIDAndRetainsPNFallback(t *testing.T) {
 	}
 }
 
+func TestConversationAddressesForChatsBatchesPage(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "addresses.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chatIDs := make([]string, 100)
+	for i := range chatIDs {
+		pn := fmt.Sprintf("1555000%04d@s.whatsapp.net", i)
+		lid := fmt.Sprintf("2002000%04d@lid", i)
+		chatIDs[i], _, err = s.EnsureConversation(ctx, pn, lid)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	addresses, err := s.ConversationAddressesForChats(ctx, chatIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addresses) != len(chatIDs) {
+		t.Fatalf("chats=%d want=%d", len(addresses), len(chatIDs))
+	}
+	for i, chatID := range chatIDs {
+		want := []string{fmt.Sprintf("2002000%04d@lid", i), fmt.Sprintf("1555000%04d@s.whatsapp.net", i)}
+		if !slices.Equal(addresses[chatID], want) {
+			t.Fatalf("chat %d addresses=%v want=%v", i, addresses[chatID], want)
+		}
+	}
+}
+
 func TestPhoneReassignmentDoesNotMergeDifferentLIDs(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))

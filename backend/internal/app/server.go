@@ -202,8 +202,19 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, err
 		}
 		chats := make([]*bridgev1.Chat, len(page.Items))
+		presentations := make(map[string]wa.ChatPresentation, len(page.Items))
+		if s.wa != nil {
+			chatIDs := make([]string, len(page.Items))
+			for i := range page.Items {
+				chatIDs[i] = page.Items[i].JID
+			}
+			presentations, err = s.wa.ChatPresentations(s.ctx, chatIDs)
+			if err != nil {
+				return nil, err
+			}
+		}
 		for i := range page.Items {
-			chats[i] = s.wireChat(page.Items[i])
+			chats[i] = wireChatWithPresentation(page.Items[i], presentations[page.Items[i].JID])
 		}
 		return &bridgev1.RpcResponse_ListChats{ListChats: &bridgev1.ListChatsResponse{Chats: chats, TotalCount: uint64(total), NextCursor: page.NextCursor}}, nil
 	case *bridgev1.RpcRequest_GetChatAvatar:
@@ -562,16 +573,21 @@ func wireChat(c domain.Chat) *bridgev1.Chat {
 }
 
 func (s *Server) wireChat(c domain.Chat) *bridgev1.Chat {
-	chat := wireChat(c)
 	if s.wa == nil {
-		return chat
+		return wireChat(c)
 	}
 	details, cachedAvatar := s.wa.ChatPresentation(s.ctx, c.JID)
+	return wireChatWithPresentation(c, wa.ChatPresentation{Details: details, AvatarPath: cachedAvatar})
+}
+
+func wireChatWithPresentation(c domain.Chat, presentation wa.ChatPresentation) *bridgev1.Chat {
+	chat := wireChat(c)
+	details := presentation.Details
 	chat.PhoneNumber = details.PhoneNumber
 	chat.ContactName = details.ContactName
 	chat.PushName = details.PushName
 	chat.BusinessName = details.BusinessName
-	chat.AvatarPath = cachedAvatar
+	chat.AvatarPath = presentation.AvatarPath
 	if chat.Kind == bridgev1.ChatKind_CHAT_KIND_DIRECT {
 		switch {
 		case details.ContactName != "":
