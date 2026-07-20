@@ -86,6 +86,12 @@ identities, log out with the previous build and exit it first. The new backend
 will rebuild an empty product cache, but intentionally refuses to discard a
 non-empty legacy cache automatically.
 
+The reaction-replay schema upgrade removes legacy pseudo-message rows. A
+one-time SQLite `VACUUM` afterward is optional and is not required for
+correctness or normal startup. Consider it only when an upgraded database stays
+substantially larger than expected; stop Rust Meow and back up the database
+first because `VACUUM` needs exclusive access and temporary disk space.
+
 ## Verify
 
 ```sh

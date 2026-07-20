@@ -21,6 +21,11 @@ import (
 
 type Store struct{ db *sql.DB }
 
+const (
+	reactionReplaySchemaVersion = 9
+	supportedSchemaVersion      = 10
+)
+
 type ChatMerge struct {
 	OldChatID string
 	NewChatID string
@@ -75,8 +80,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if hasVersionTable {
-		if err := db.QueryRowContext(ctx, `SELECT max(version) FROM schema_version`).Scan(&currentVersion); err == nil && currentVersion > 10 {
-			return fmt.Errorf("database schema version %d is newer than supported version 10", currentVersion)
+		if err := db.QueryRowContext(ctx, `SELECT max(version) FROM schema_version`).Scan(&currentVersion); err == nil && currentVersion > supportedSchemaVersion {
+			return fmt.Errorf("database schema version %d is newer than supported version %d", currentVersion, supportedSchemaVersion)
 		}
 	}
 	// v8 deliberately replaces raw-JID chat identity with opaque local
@@ -296,7 +301,7 @@ CREATE INDEX IF NOT EXISTS legacy_reaction_replays_request_idx ON legacy_reactio
 		return err
 	}
 	defer tx.Rollback()
-	if currentVersion < 9 {
+	if currentVersion < reactionReplaySchemaVersion {
 		// v6 preserves every legacy reaction event before the pseudo-message rows
 		// are deleted. These exact event IDs can be re-requested from the primary.
 		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO legacy_reaction_replays(chat_jid,transport_jid,event_message_id,sender_jid,timestamp,from_me)
@@ -359,11 +364,11 @@ last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=chats.ji
 unread_count=(SELECT count(*) FROM messages WHERE chat_jid=chats.jid AND unread=1)`); err != nil {
 			return fmt.Errorf("repair chat metadata after reaction cleanup: %w", err)
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=9`); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=?`, reactionReplaySchemaVersion); err != nil {
 			return fmt.Errorf("record schema v9: %w", err)
 		}
 	}
-	if currentVersion < 10 {
+	if currentVersion < supportedSchemaVersion {
 		const searchSchema = `
 CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(
   text, image_caption, media_file_name, contacts_json, location_name, location_address,
@@ -389,7 +394,7 @@ END;`
 		if _, err = tx.ExecContext(ctx, `INSERT INTO message_search(message_search) VALUES('rebuild')`); err != nil {
 			return fmt.Errorf("backfill message search index: %w", err)
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=10`); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=?`, supportedSchemaVersion); err != nil {
 			return fmt.Errorf("record schema v10: %w", err)
 		}
 	}

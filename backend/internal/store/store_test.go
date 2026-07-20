@@ -225,6 +225,53 @@ func TestV8CacheMigratesInPlaceToRichContentSchema(t *testing.T) {
 	}
 }
 
+func TestCurrentSchemaDoesNotRepeatReactionReplayMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "client.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatID, _, err := s.EnsureConversation(ctx, "123@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO messages(id,chat_jid,transport_jid,timestamp,kind,unread) VALUES('migration-sentinel',?,?,100,'reaction',1)`, chatID, "123@g.us"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `UPDATE chats SET last_message_id='summary-sentinel',last_message_text='unchanged',last_message_at=999,unread_count=42 WHERE jid=?`, chatID); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var version, messageCount, replayCount int
+	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE id='migration-sentinel' AND kind='reaction'`).Scan(&messageCount); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM legacy_reaction_replays WHERE event_message_id='migration-sentinel'`).Scan(&replayCount); err != nil {
+		t.Fatal(err)
+	}
+	var lastMessageID, lastMessageText string
+	var lastMessageAt int64
+	var unreadCount int
+	if err = s.db.QueryRowContext(ctx, `SELECT last_message_id,last_message_text,last_message_at,unread_count FROM chats WHERE jid=?`, chatID).Scan(&lastMessageID, &lastMessageText, &lastMessageAt, &unreadCount); err != nil {
+		t.Fatal(err)
+	}
+	if version != supportedSchemaVersion || messageCount != 1 || replayCount != 0 || lastMessageID != "summary-sentinel" || lastMessageText != "unchanged" || lastMessageAt != 999 || unreadCount != 42 {
+		t.Fatalf("version=%d messages=%d replays=%d summary=(%q,%q,%d,%d)", version, messageCount, replayCount, lastMessageID, lastMessageText, lastMessageAt, unreadCount)
+	}
+}
+
 func TestNonEmptyLegacyCacheRequiresExplicitReset(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "client.db")
