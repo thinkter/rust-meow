@@ -58,12 +58,23 @@ pub struct Store {
     pub last_mark_read_id: Option<String>,
     pending: HashMap<u64, PendingRpc>,
     chat_index: HashMap<String, usize>,
+    inbox_chat_ids: Rc<Vec<String>>,
+    archived_chat_ids: Rc<Vec<String>>,
     message_index: HashMap<String, usize>,
+    reply_metadata: HashMap<String, ReplyMetadata>,
     message_sizes: Rc<Vec<Size<Pixels>>>,
     measured_width_bucket: Option<i32>,
     message_height_cache: HashMap<i32, HashMap<String, Pixels>>,
     participant_avatar_paths: HashMap<String, String>,
     loaded_later_chat_page: bool,
+    #[cfg(test)]
+    full_message_reindexes: usize,
+}
+
+#[derive(Default)]
+struct ReplyMetadata {
+    count: usize,
+    first_reply_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,12 +250,11 @@ impl Store {
             .and_then(|index| self.chats.get(*index))
     }
 
-    pub fn chat_ids(&self, view: ChatView) -> Vec<String> {
-        self.chats
-            .iter()
-            .filter(|chat| view.includes(chat))
-            .map(|chat| chat.id.clone())
-            .collect()
+    pub fn chat_ids(&self, view: ChatView) -> Rc<Vec<String>> {
+        match view {
+            ChatView::Inbox => self.inbox_chat_ids.clone(),
+            ChatView::Archived => self.archived_chat_ids.clone(),
+        }
     }
 
     pub fn apply_sync_progress(&mut self, chats: u64, messages: u64, complete: bool) {
@@ -261,10 +271,15 @@ impl Store {
     }
 
     pub fn reply_count(&self, message_id: &str) -> usize {
-        self.messages
-            .iter()
-            .filter(|message| message.reply_to_message_id == message_id)
-            .count()
+        self.reply_metadata
+            .get(message_id)
+            .map_or(0, |metadata| metadata.count)
+    }
+
+    pub fn first_reply_id(&self, message_id: &str) -> Option<&str> {
+        self.reply_metadata
+            .get(message_id)
+            .map(|metadata| metadata.first_reply_id.as_str())
     }
 
     pub fn select_chat(&mut self, id: String) {
@@ -274,6 +289,7 @@ impl Store {
         self.has_newer_messages = false;
         self.newer_activity = false;
         self.message_index.clear();
+        self.reply_metadata.clear();
         self.message_sizes = Rc::new(Vec::new());
         self.measured_width_bucket = None;
         self.last_mark_read_id = None;
@@ -305,6 +321,7 @@ impl Store {
             self.chat_index
                 .insert(self.chats[item_index].id.clone(), item_index);
         }
+        self.rebuild_chat_ids();
     }
 
     pub fn upsert_message(&mut self, mut message: proto::Message) {
@@ -314,16 +331,24 @@ impl Store {
         for heights in self.message_height_cache.values_mut() {
             heights.remove(&message.id);
         }
-        if let Some(index) = self.message_index.get(&message.id).copied() {
+        let old_index = self.message_index.remove(&message.id);
+        if let Some(index) = old_index {
             preserve_local_image_path(&mut message, &self.messages[index]);
-            self.messages[index] = message;
-        } else {
-            self.messages.push(message);
+            self.messages.remove(index);
         }
-        self.messages
-            .sort_by_key(|message| (message.timestamp_ms, message.id.clone()));
-        self.trim_after_live_append();
-        self.reindex_messages();
+        let index = self
+            .messages
+            .binary_search_by(|existing| compare_messages(existing, &message))
+            .unwrap_or_else(|index| index);
+        self.messages.insert(index, message);
+        if self.trim_after_live_append() {
+            self.reindex_messages();
+        } else {
+            let start = old_index.map_or(index, |old| old.min(index));
+            let end = old_index.map_or(self.messages.len(), |old| old.max(index).saturating_add(1));
+            self.reindex_message_range(start, end);
+        }
+        self.rebuild_reply_metadata();
         self.rebuild_message_sizes();
     }
 
@@ -343,13 +368,13 @@ impl Store {
             by_id.insert(message.id.clone(), message);
         }
         self.messages = by_id.into_values().collect();
-        self.messages
-            .sort_by_key(|message| (message.timestamp_ms, message.id.clone()));
+        self.messages.sort_by(compare_messages);
         if self.messages.len() > MAX_ACTIVE_MESSAGES {
             self.messages.truncate(MAX_ACTIVE_MESSAGES);
             self.has_newer_messages = true;
         }
         self.reindex_messages();
+        self.rebuild_reply_metadata();
         self.rebuild_message_sizes();
     }
 
@@ -369,8 +394,7 @@ impl Store {
             by_id.insert(message.id.clone(), message);
         }
         self.messages = by_id.into_values().collect();
-        self.messages
-            .sort_by_key(|message| (message.timestamp_ms, message.id.clone()));
+        self.messages.sort_by(compare_messages);
         if self.messages.len() > MAX_ACTIVE_MESSAGES {
             let excess = self.messages.len() - MAX_ACTIVE_MESSAGES;
             self.messages.drain(..excess);
@@ -378,6 +402,7 @@ impl Store {
         }
         self.has_newer_messages = has_more || self.newer_activity;
         self.reindex_messages();
+        self.rebuild_reply_metadata();
         self.rebuild_message_sizes();
     }
 
@@ -387,9 +412,7 @@ impl Store {
         has_older: bool,
         has_newer: bool,
     ) {
-        messages.sort_by(|left, right| {
-            (left.timestamp_ms, left.id.as_str()).cmp(&(right.timestamp_ms, right.id.as_str()))
-        });
+        messages.sort_by(compare_messages);
         if messages.len() > MAX_ACTIVE_MESSAGES {
             messages.drain(..messages.len() - MAX_ACTIVE_MESSAGES);
         }
@@ -398,6 +421,7 @@ impl Store {
         self.has_newer_messages = has_newer;
         self.newer_activity = false;
         self.reindex_messages();
+        self.rebuild_reply_metadata();
         self.rebuild_message_sizes();
     }
 
@@ -494,9 +518,10 @@ impl Store {
             .retain(|existing| existing.sender_id != reaction.sender_id);
         if !removed && !reaction.emoji.is_empty() {
             message.reactions.push(reaction);
-            message
-                .reactions
-                .sort_by_key(|reaction| (reaction.timestamp_ms, reaction.sender_id.clone()));
+            message.reactions.sort_by(|left, right| {
+                (left.timestamp_ms, left.sender_id.as_str())
+                    .cmp(&(right.timestamp_ms, right.sender_id.as_str()))
+            });
         }
         for heights in self.message_height_cache.values_mut() {
             heights.remove(&message.id);
@@ -567,30 +592,72 @@ impl Store {
         }
     }
 
-    fn trim_after_live_append(&mut self) {
+    fn trim_after_live_append(&mut self) -> bool {
         if self.messages.len() > MAX_ACTIVE_MESSAGES {
             let excess = self.messages.len() - MAX_ACTIVE_MESSAGES;
             self.messages.drain(..excess);
             self.has_older_messages = true;
+            return true;
         }
+        false
     }
 
     fn reindex_chats(&mut self) {
-        self.chat_index = self
-            .chats
-            .iter()
-            .enumerate()
-            .map(|(index, chat)| (chat.id.clone(), index))
-            .collect();
+        self.chat_index.clear();
+        self.chat_index.reserve(self.chats.len());
+        for (index, chat) in self.chats.iter().enumerate() {
+            self.chat_index.insert(chat.id.clone(), index);
+        }
+        self.rebuild_chat_ids();
+    }
+
+    fn rebuild_chat_ids(&mut self) {
+        let mut inbox = Vec::with_capacity(self.chats.len());
+        let mut archived = Vec::new();
+        for chat in &self.chats {
+            if ChatView::Archived.includes(chat) {
+                archived.push(chat.id.clone());
+            } else {
+                inbox.push(chat.id.clone());
+            }
+        }
+        self.inbox_chat_ids = Rc::new(inbox);
+        self.archived_chat_ids = Rc::new(archived);
     }
 
     fn reindex_messages(&mut self) {
-        self.message_index = self
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(index, message)| (message.id.clone(), index))
-            .collect();
+        self.message_index.clear();
+        self.message_index.reserve(self.messages.len());
+        for (index, message) in self.messages.iter().enumerate() {
+            self.message_index.insert(message.id.clone(), index);
+        }
+        #[cfg(test)]
+        {
+            self.full_message_reindexes += 1;
+        }
+    }
+
+    fn reindex_message_range(&mut self, start: usize, end: usize) {
+        for index in start..end.min(self.messages.len()) {
+            self.message_index
+                .insert(self.messages[index].id.clone(), index);
+        }
+    }
+
+    fn rebuild_reply_metadata(&mut self) {
+        self.reply_metadata.clear();
+        for message in &self.messages {
+            if message.reply_to_message_id.is_empty() {
+                continue;
+            }
+            self.reply_metadata
+                .entry(message.reply_to_message_id.clone())
+                .and_modify(|metadata| metadata.count += 1)
+                .or_insert_with(|| ReplyMetadata {
+                    count: 1,
+                    first_reply_id: message.id.clone(),
+                });
+        }
     }
 
     fn rebuild_message_sizes(&mut self) {
@@ -770,6 +837,10 @@ fn compare_chats(left: &proto::Chat, right: &proto::Chat) -> std::cmp::Ordering 
         .then_with(|| left.id.cmp(&right.id))
 }
 
+fn compare_messages(left: &proto::Message, right: &proto::Message) -> std::cmp::Ordering {
+    (left.timestamp_ms, left.id.as_str()).cmp(&(right.timestamp_ms, right.id.as_str()))
+}
+
 fn estimate_message_height(message: &proto::Message) -> Pixels {
     let text = message_text(message);
     let lines = text
@@ -803,6 +874,67 @@ fn estimated_image_height(image: &proto::ImageContent) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+        hint::black_box,
+    };
+
+    struct CountingAllocator;
+
+    thread_local! {
+        static ALLOCATION_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCATION_COUNT.with(|count| {
+                if let Some(current) = count.get() {
+                    count.set(Some(current + 1));
+                }
+            });
+            // SAFETY: forwarding the allocation request unchanged to the system allocator.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` and `layout` came from the system allocator above.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            ALLOCATION_COUNT.with(|count| {
+                if let Some(current) = count.get() {
+                    count.set(Some(current + 1));
+                }
+            });
+            // SAFETY: forwarding the allocation request unchanged to the system allocator.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            ALLOCATION_COUNT.with(|count| {
+                if let Some(current) = count.get() {
+                    count.set(Some(current + 1));
+                }
+            });
+            // SAFETY: `ptr` and `layout` came from the system allocator above.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    fn count_allocations<T>(run: impl FnOnce() -> T) -> (T, usize) {
+        ALLOCATION_COUNT.with(|count| {
+            assert!(count.get().is_none());
+            count.set(Some(0));
+            let output = run();
+            let allocations = count.replace(None).unwrap_or_default();
+            (output, allocations)
+        })
+    }
 
     fn message(id: usize) -> proto::Message {
         proto::Message {
@@ -854,6 +986,12 @@ mod tests {
 
         assert_eq!(store.reply_count("1"), 2);
         assert_eq!(store.reply_count("2"), 0);
+        assert_eq!(store.first_reply_id("1"), Some("2"));
+        assert_eq!(store.first_reply_id("2"), None);
+
+        store.upsert_message(message(3));
+        assert_eq!(store.reply_count("1"), 1);
+        assert_eq!(store.first_reply_id("1"), Some("2"));
     }
 
     #[test]
@@ -871,8 +1009,68 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(store.chat_ids(ChatView::Inbox), vec!["inbox"]);
-        assert_eq!(store.chat_ids(ChatView::Archived), vec!["archived"]);
+        assert_eq!(store.chat_ids(ChatView::Inbox).as_slice(), ["inbox"]);
+        assert_eq!(store.chat_ids(ChatView::Archived).as_slice(), ["archived"]);
+    }
+
+    #[test]
+    fn cached_sidebar_ids_allocate_only_when_chats_mutate() {
+        let mut store = Store::default();
+        let chats = (0..1_000)
+            .map(|id| proto::Chat {
+                id: format!("chat-{id}"),
+                archived: id % 10 == 0,
+                last_message_timestamp_ms: id,
+                ..Default::default()
+            })
+            .collect();
+        store.replace_chat_page("", chats, 1_000, String::new());
+        let original = store.chat_ids(ChatView::Inbox);
+
+        let (_, cached_allocations) = count_allocations(|| {
+            for _ in 0..100 {
+                black_box(store.chat_ids(ChatView::Inbox));
+            }
+        });
+        let (_, uncached_allocations) = count_allocations(|| {
+            for _ in 0..100 {
+                let ids = store
+                    .chats
+                    .iter()
+                    .filter(|chat| ChatView::Inbox.includes(chat))
+                    .map(|chat| chat.id.clone())
+                    .collect::<Vec<_>>();
+                black_box(ids);
+            }
+        });
+
+        assert_eq!(cached_allocations, 0);
+        assert!(uncached_allocations > 100);
+        assert!(Rc::ptr_eq(&original, &store.chat_ids(ChatView::Inbox)));
+        store.upsert_chat(proto::Chat {
+            id: "new-chat".into(),
+            ..Default::default()
+        });
+        assert!(!Rc::ptr_eq(&original, &store.chat_ids(ChatView::Inbox)));
+    }
+
+    #[test]
+    fn live_upserts_repair_only_the_shifted_message_index_range() {
+        let mut store = Store {
+            selected_chat_id: Some("chat".into()),
+            ..Default::default()
+        };
+        store.replace_message_window((0..1_000).map(message).collect(), false, false);
+        let full_reindexes = store.full_message_reindexes;
+        let mut moved = message(500);
+        moved.timestamp_ms = 1_500;
+        store.upsert_message(moved);
+
+        assert_eq!(store.full_message_reindexes, full_reindexes);
+        for (index, message) in store.messages.iter().enumerate() {
+            assert_eq!(store.message_index[&message.id], index);
+        }
+        assert_eq!(store.messages.last().unwrap().id, "500");
     }
 
     #[test]

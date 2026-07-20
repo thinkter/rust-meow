@@ -2395,7 +2395,7 @@ impl RustMeow {
         let logout_pending = self.store.logout_pending();
         let dark = cx.theme().is_dark();
         let chat_view = self.chat_view;
-        let visible_chat_ids = Rc::new(self.store.chat_ids(chat_view));
+        let visible_chat_ids = self.store.chat_ids(chat_view);
         let search_active = self.search_query.trim().chars().count() >= 2;
         let visible_count = visible_chat_ids.len();
         let has_more = !self.store.next_chat_cursor.is_empty();
@@ -3926,12 +3926,7 @@ impl RustMeow {
         let reply_target_id = message.reply_to_message_id.clone();
         let reply_target = self.store.message(&reply_target_id).cloned();
         let reply_count = self.store.reply_count(&message.id);
-        let first_reply_id = self
-            .store
-            .messages
-            .iter()
-            .find(|candidate| candidate.reply_to_message_id == message.id)
-            .map(|reply| reply.id.clone());
+        let first_reply_id = self.store.first_reply_id(&message.id).map(str::to_owned);
         let chat_id = message.chat_id.clone();
         let message_id = message.id.clone();
         let search_target = self.search_target_message_id.as_deref() == Some(message.id.as_str());
