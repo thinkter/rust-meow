@@ -3,6 +3,7 @@ mod emoji_picker;
 mod model;
 mod paths;
 mod proto;
+mod rpc;
 mod settings;
 mod sticker;
 
@@ -13,7 +14,7 @@ use std::{
     ops::Range,
     path::PathBuf,
     rc::Rc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use gpui::prelude::FluentBuilder as _;
@@ -40,21 +41,22 @@ use qrcode::{Color, QrCode};
 use smol::Timer;
 use uuid::Uuid;
 
-use bridge::{BackendClient, BridgeMessage, PROTOCOL_VERSION};
 use emoji_picker::{EmojiCategory, filtered as filter_emojis};
 use model::{
-    CHAT_PAGE_SIZE, ChatView, MESSAGE_PAGE_SIZE, PendingRequest, Screen, Store, image_row_path,
-    image_viewer_path, message_text, reaction_counts, reaction_sender_detail, reaction_sender_name,
+    CHAT_PAGE_SIZE, ChatView, MESSAGE_PAGE_SIZE, Screen, Store, image_row_path, image_viewer_path,
+    message_text, reaction_counts, reaction_sender_detail, reaction_sender_name,
     reactions_for_emoji,
 };
-use proto::{backend_event, envelope, rpc_request, rpc_response};
+use proto::{backend_event, rpc_request, rpc_response};
+use rpc::{
+    BridgeMessage, PROTOCOL_VERSION, PendingRequest, REACTION_REPAIR_RETRY, RpcClient, RpcIncoming,
+    TIMEOUT_SWEEP_INTERVAL, avatar_retry, reaction_retry,
+};
 
 const DARK_GREEN: u32 = 0x075e54;
 const PANEL: u32 = 0xf7faf9;
 const EMOJI_COLUMNS: usize = 9;
 const PARTICIPANT_AVATAR_REFRESH: Duration = Duration::from_secs(15 * 60);
-const REACTION_REPAIR_RETRY: Duration = Duration::from_secs(10 * 60 + 1);
-const RPC_TIMEOUT_SWEEP: Duration = Duration::from_secs(1);
 const MAX_TEXT_BYTES: usize = 65_536;
 const MAX_CAPTION_BYTES: usize = 4_096;
 const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -372,7 +374,7 @@ impl ReactionDetails {
 }
 
 struct RustMeow {
-    bridge: BackendClient,
+    rpc: RpcClient,
     store: Store,
     composer: Entity<InputState>,
     search_input: Entity<InputState>,
@@ -401,8 +403,6 @@ struct RustMeow {
     chat_view: ChatView,
     message_scroll: VirtualListScrollHandle,
     scroll_to_bottom_generation: Option<u64>,
-    next_request_id: u64,
-    request_epoch: Instant,
     last_event_sequence: u64,
     pending_prepend_anchor: Option<(String, Point<Pixels>)>,
     newer_load_failed: bool,
@@ -426,11 +426,11 @@ impl RustMeow {
         apply_theme_scale(ui_scale, window, cx);
         let fake = std::env::args().any(|arg| arg == "--fake-backend")
             || std::env::var_os("RUST_MEOW_FAKE").is_some();
-        let (bridge, startup_error) = match BackendClient::start(fake) {
-            Ok(bridge) => (bridge, None),
-            Err(error) => (BackendClient::disconnected(), Some(error.to_string())),
+        let (rpc, startup_error) = match RpcClient::start(fake) {
+            Ok(rpc) => (rpc, None),
+            Err(error) => (RpcClient::disconnected(), Some(error.to_string())),
         };
-        let receiver = bridge.incoming.clone();
+        let receiver = rpc.incoming();
         let composer = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Type a message")
@@ -495,7 +495,7 @@ impl RustMeow {
         let timeout_view = cx.entity();
         cx.spawn_in(window, async move |_, window| {
             loop {
-                Timer::after(RPC_TIMEOUT_SWEEP).await;
+                Timer::after(TIMEOUT_SWEEP_INTERVAL).await;
                 if window
                     .update(|window, cx| {
                         timeout_view.update(cx, |this, cx| {
@@ -512,7 +512,7 @@ impl RustMeow {
         .detach();
 
         let mut this = Self {
-            bridge,
+            rpc,
             store: Store::default(),
             composer,
             search_input,
@@ -541,8 +541,6 @@ impl RustMeow {
             chat_view: ChatView::Inbox,
             message_scroll: VirtualListScrollHandle::new(),
             scroll_to_bottom_generation: None,
-            next_request_id: 1,
-            request_epoch: Instant::now(),
             last_event_sequence: 0,
             pending_prepend_anchor: None,
             newer_load_failed: false,
@@ -576,20 +574,14 @@ impl RustMeow {
     }
 
     fn request(&mut self, request: rpc_request::Request, pending: PendingRequest) {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.store
-            .begin_request(id, pending, self.request_epoch.elapsed());
-        if let Err(error) = self.bridge.send(id, request) {
-            self.store.finish_request(id);
+        if let Err(error) = self.rpc.send(request, pending) {
             self.store.screen = Screen::Fatal;
             self.store.fatal_error = Some(error.to_string());
         }
     }
 
     fn expire_stalled_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let expired = self.store.expire_requests(self.request_epoch.elapsed());
-        for (_, pending) in expired {
+        for (_, pending) in self.rpc.expire() {
             match pending {
                 PendingRequest::Hello | PendingRequest::Auth => {
                     self.store.screen = Screen::Fatal;
@@ -673,6 +665,11 @@ impl RustMeow {
                 PendingRequest::Messages { prepend: true, .. } => {
                     self.pending_prepend_anchor = None;
                     self.store.toast_error = Some("Loading messages timed out. Try again.".into());
+                }
+                PendingRequest::MessagesAfter { .. } => {
+                    self.newer_load_failed = true;
+                    self.store.toast_error =
+                        Some("Loading newer messages timed out. Try again.".into());
                 }
                 PendingRequest::Logout => {
                     self.confirming_logout = false;
@@ -833,37 +830,31 @@ impl RustMeow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let envelope = match message {
-            BridgeMessage::Envelope(envelope) => envelope,
-            BridgeMessage::Exited(error) => {
+        match self.rpc.handle_incoming(message) {
+            RpcIncoming::Response { pending, response } => {
+                self.handle_response(pending, response, window, cx)
+            }
+            RpcIncoming::Event(event) => self.handle_event(event),
+            RpcIncoming::Exited(error) => {
                 self.store.connection = proto::ConnectionState::Failed;
                 self.store.connection_detail = error;
                 self.store.toast_error =
                     Some("Backend stopped. Restart Rust Meow to reconnect.".into());
-                return;
             }
-        };
-        match envelope.body {
-            Some(envelope::Body::Response(response)) => {
-                self.handle_response(envelope.request_id, response, window, cx)
+            RpcIncoming::Invalid => {
+                self.store.toast_error = Some("Ignored an invalid backend envelope".into())
             }
-            Some(envelope::Body::Event(event)) if envelope.request_id == 0 => {
-                self.handle_event(event)
-            }
-            _ => self.store.toast_error = Some("Ignored an invalid backend envelope".into()),
+            RpcIncoming::Ignore => {}
         }
     }
 
     fn handle_response(
         &mut self,
-        request_id: u64,
+        pending: PendingRequest,
         response: proto::RpcResponse,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pending) = self.store.finish_request(request_id) else {
-            return;
-        };
         let Some(result) = response.result else {
             self.store.toast_error = Some("Backend returned an empty response".into());
             return;
@@ -928,16 +919,14 @@ impl RustMeow {
                 client_reaction_id,
                 attempt,
             } = &pending
-                && error.retryable
-                && *attempt < 3
+                && let Some(retry) = reaction_retry(error.retryable, *attempt)
             {
                 let chat_id = chat_id.clone();
                 let message_id = message_id.clone();
                 let emoji = emoji.clone();
                 let client_reaction_id = client_reaction_id.clone();
-                let next_attempt = *attempt + 1;
                 cx.spawn(async move |this, cx| {
-                    Timer::after(Duration::from_secs(u64::from(next_attempt))).await;
+                    Timer::after(retry.delay).await;
                     let _ = this.update(cx, |this, _| {
                         if !this.reaction_intent_is_current(
                             &chat_id,
@@ -951,7 +940,7 @@ impl RustMeow {
                             message_id,
                             emoji,
                             client_reaction_id,
-                            next_attempt,
+                            retry.attempt,
                         );
                     });
                 })
@@ -968,42 +957,44 @@ impl RustMeow {
                 self.clear_reaction_intent_if_current(chat_id, message_id, client_reaction_id);
             }
             if let PendingRequest::Avatar { chat_id } = &pending {
-                if error.retryable {
-                    let retries = self.avatar_retries.entry(chat_id.clone()).or_default();
-                    if *retries < 3 {
-                        *retries += 1;
-                        let retry_chat_id = chat_id.clone();
-                        let delay = Duration::from_secs(5 * u64::from(*retries));
-                        cx.spawn(async move |this, cx| {
-                            Timer::after(delay).await;
-                            let _ = this.update(cx, |this, cx| {
-                                this.avatar_attempted.remove(&retry_chat_id);
-                                cx.notify();
-                            });
-                        })
-                        .detach();
-                    }
+                let retries = self
+                    .avatar_retries
+                    .get(chat_id)
+                    .copied()
+                    .unwrap_or_default();
+                if let Some(retry) = avatar_retry(error.retryable, retries) {
+                    self.avatar_retries.insert(chat_id.clone(), retry.attempt);
+                    let retry_chat_id = chat_id.clone();
+                    cx.spawn(async move |this, cx| {
+                        Timer::after(retry.delay).await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.avatar_attempted.remove(&retry_chat_id);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
                 }
                 return;
             }
             if let PendingRequest::ParticipantAvatar { participant_id } = &pending {
-                if error.retryable {
-                    let retry_key = format!("participant:{participant_id}");
-                    let retries = self.avatar_retries.entry(retry_key.clone()).or_default();
-                    if *retries < 3 {
-                        *retries += 1;
-                        let retry_participant_id = participant_id.clone();
-                        let delay = Duration::from_secs(5 * u64::from(*retries));
-                        cx.spawn(async move |this, cx| {
-                            Timer::after(delay).await;
-                            let _ = this.update(cx, |this, cx| {
-                                this.participant_avatar_attempted
-                                    .remove(&retry_participant_id);
-                                cx.notify();
-                            });
-                        })
-                        .detach();
-                    }
+                let retry_key = format!("participant:{participant_id}");
+                let retries = self
+                    .avatar_retries
+                    .get(&retry_key)
+                    .copied()
+                    .unwrap_or_default();
+                if let Some(retry) = avatar_retry(error.retryable, retries) {
+                    self.avatar_retries.insert(retry_key, retry.attempt);
+                    let retry_participant_id = participant_id.clone();
+                    cx.spawn(async move |this, cx| {
+                        Timer::after(retry.delay).await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.participant_avatar_attempted
+                                .remove(&retry_participant_id);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
                 }
                 return;
             }
@@ -1340,7 +1331,7 @@ impl RustMeow {
                 self.store.connection = state;
                 self.store.connection_detail = connection.detail;
                 if state == proto::ConnectionState::LoggedOut {
-                    if self.store.logout_pending() {
+                    if self.rpc.logout_pending() {
                         self.store.connection_detail =
                             "Logged out; securely clearing local account data…".into();
                     } else {
@@ -1471,7 +1462,7 @@ impl RustMeow {
     }
 
     fn load_chats(&mut self, cursor: String) {
-        if self.store.pending_requests().any(|pending| {
+        if self.rpc.pending_requests().any(|pending| {
             matches!(pending, PendingRequest::Chats { cursor: pending_cursor } if pending_cursor == &cursor)
         }) {
             return;
@@ -1486,7 +1477,7 @@ impl RustMeow {
     }
 
     fn load_avatar(&mut self, chat_id: String) {
-        if self.avatar_attempted.contains(&chat_id) || self.store.pending_media_count() >= 4 {
+        if self.avatar_attempted.contains(&chat_id) || self.rpc.pending_media_count() >= 4 {
             return;
         }
         self.avatar_attempted.insert(chat_id.clone());
@@ -1501,7 +1492,7 @@ impl RustMeow {
     fn load_participant_avatar(&mut self, participant_id: String) {
         if participant_id.is_empty()
             || self.participant_avatar_attempted.contains(&participant_id)
-            || self.store.pending_media_count() >= 4
+            || self.rpc.pending_media_count() >= 4
         {
             return;
         }
@@ -1517,7 +1508,7 @@ impl RustMeow {
 
     fn load_message_image(&mut self, chat_id: String, message_id: String) {
         let key = (chat_id.clone(), message_id.clone());
-        if self.image_download_attempted.contains(&key) || self.store.pending_media_count() >= 4 {
+        if self.image_download_attempted.contains(&key) || self.rpc.pending_media_count() >= 4 {
             return;
         }
         self.image_download_attempted.insert(key);
@@ -1983,7 +1974,7 @@ impl RustMeow {
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
             return;
         };
-        if self.store.pending_requests().any(|pending| {
+        if self.rpc.pending_requests().any(|pending| {
             matches!(pending, PendingRequest::Messages {
                 chat_id: pending_chat,
                 prepend: true,
@@ -2017,7 +2008,7 @@ impl RustMeow {
         };
         if self.newer_load_failed
             || (!self.store.has_newer_messages && !self.store.newer_activity)
-            || self.store.pending_requests().any(|pending| {
+            || self.rpc.pending_requests().any(|pending| {
                 matches!(pending, PendingRequest::MessagesAfter {
                     chat_id: pending_chat,
                     generation,
@@ -2058,13 +2049,14 @@ impl RustMeow {
     fn begin_pairing(&mut self) {
         if self.store.screen == Screen::Pairing
             && self
-                .store
+                .rpc
                 .pending_requests()
                 .any(|pending| matches!(pending, PendingRequest::Pairing))
         {
             return;
         }
         self.store.clear_account_state();
+        self.rpc.clear_pending();
         self.store.screen = Screen::Pairing;
         self.store.connection = proto::ConnectionState::Pairing;
         self.message_generation = self.message_generation.wrapping_add(1);
@@ -2094,7 +2086,7 @@ impl RustMeow {
     }
 
     fn request_logout(&mut self) {
-        if self.store.logout_pending() {
+        if self.rpc.logout_pending() {
             return;
         }
         self.request(
@@ -2392,7 +2384,7 @@ impl RustMeow {
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let ui_scale = self.ui_scale;
         let total = self.store.total_chats;
-        let logout_pending = self.store.logout_pending();
+        let logout_pending = self.rpc.logout_pending();
         let dark = cx.theme().is_dark();
         let chat_view = self.chat_view;
         let visible_chat_ids = self.store.chat_ids(chat_view);
@@ -2548,7 +2540,7 @@ impl RustMeow {
                                         this.load_chats(this.store.next_chat_cursor.clone());
                                     }
                                     if this.store.connection == proto::ConnectionState::Connected
-                                        && this.store.pending_media_count() < 4
+                                        && this.rpc.pending_media_count() < 4
                                         && let Some(chat_id) = range.clone().find_map(|index| {
                                             visible_for_list.get(index).and_then(|chat_id| {
                                                 this.store.chat(chat_id).and_then(|chat| {
@@ -2687,7 +2679,7 @@ impl RustMeow {
     }
 
     fn render_search_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let pending = self.store.pending_requests().any(|pending| {
+        let pending = self.rpc.pending_requests().any(|pending| {
             matches!(pending, PendingRequest::Search { generation, .. } if *generation == self.search_generation)
         });
         let total = self.search_results.len();

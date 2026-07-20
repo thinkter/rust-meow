@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc, time::Duration};
+use std::{collections::HashMap, rc::Rc};
 
 use gpui::{Pixels, Size, px, size};
 
@@ -7,9 +7,6 @@ use crate::proto;
 pub const CHAT_PAGE_SIZE: u32 = 100;
 pub const MESSAGE_PAGE_SIZE: u32 = 50;
 pub const MAX_ACTIVE_MESSAGES: usize = 2_000;
-const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const READ_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const WRITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ChatView {
@@ -56,7 +53,6 @@ pub struct Store {
     pub fatal_error: Option<String>,
     pub toast_error: Option<String>,
     pub last_mark_read_id: Option<String>,
-    pending: HashMap<u64, PendingRpc>,
     chat_index: HashMap<String, usize>,
     inbox_chat_ids: Rc<Vec<String>>,
     archived_chat_ids: Rc<Vec<String>>,
@@ -76,167 +72,9 @@ struct ReplyMetadata {
     count: usize,
     first_reply_id: String,
 }
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PendingRequest {
-    Hello,
-    Auth,
-    Pairing,
-    Chats {
-        cursor: String,
-    },
-    Messages {
-        chat_id: String,
-        prepend: bool,
-        generation: u64,
-    },
-    Search {
-        query: String,
-        generation: u64,
-    },
-    OpenContact,
-    MessagesAround {
-        chat_id: String,
-        message_id: String,
-        generation: u64,
-    },
-    OpenMessageWindow {
-        chat_id: String,
-        generation: u64,
-    },
-    MessagesAfter {
-        chat_id: String,
-        generation: u64,
-    },
-    Avatar {
-        chat_id: String,
-    },
-    ParticipantAvatar {
-        participant_id: String,
-    },
-    SendText {
-        chat_id: String,
-        draft_text: String,
-        reply_to_message_id: Option<String>,
-    },
-    SendImage {
-        chat_id: String,
-        draft_text: String,
-        reply_to_message_id: Option<String>,
-    },
-    SendSticker,
-    MessageImage {
-        chat_id: String,
-        message_id: String,
-    },
-    SendReaction {
-        chat_id: String,
-        message_id: String,
-        emoji: String,
-        client_reaction_id: String,
-        attempt: u8,
-    },
-    RepairRecentReactions {
-        chat_id: String,
-    },
-    MarkRead {
-        chat_id: String,
-        previous_unread: u32,
-    },
-    Logout,
-}
-
-#[derive(Clone, Debug)]
-struct PendingRpc {
-    request: PendingRequest,
-    expires_at: Duration,
-}
-
-impl PendingRequest {
-    fn timeout(&self) -> Duration {
-        match self {
-            Self::Hello | Self::Auth => CONTROL_REQUEST_TIMEOUT,
-            Self::Chats { .. }
-            | Self::Messages { .. }
-            | Self::Search { .. }
-            | Self::OpenContact
-            | Self::MessagesAround { .. }
-            | Self::OpenMessageWindow { .. }
-            | Self::MessagesAfter { .. }
-            | Self::Avatar { .. }
-            | Self::ParticipantAvatar { .. }
-            | Self::MessageImage { .. } => READ_REQUEST_TIMEOUT,
-            Self::Pairing
-            | Self::SendText { .. }
-            | Self::SendImage { .. }
-            | Self::SendSticker
-            | Self::SendReaction { .. }
-            | Self::RepairRecentReactions { .. }
-            | Self::MarkRead { .. }
-            | Self::Logout => WRITE_REQUEST_TIMEOUT,
-        }
-    }
-}
-
 impl Store {
     pub fn clear_account_state(&mut self) {
         *self = Self::default();
-    }
-
-    pub fn logout_pending(&self) -> bool {
-        self.pending_requests()
-            .any(|pending| matches!(pending, PendingRequest::Logout))
-    }
-
-    pub fn begin_request(&mut self, request_id: u64, request: PendingRequest, now: Duration) {
-        let expires_at = now.saturating_add(request.timeout());
-        self.pending.insert(
-            request_id,
-            PendingRpc {
-                request,
-                expires_at,
-            },
-        );
-    }
-
-    pub fn finish_request(&mut self, request_id: u64) -> Option<PendingRequest> {
-        self.pending
-            .remove(&request_id)
-            .map(|pending| pending.request)
-    }
-
-    pub fn pending_requests(&self) -> impl Iterator<Item = &PendingRequest> {
-        self.pending.values().map(|pending| &pending.request)
-    }
-
-    pub fn pending_media_count(&self) -> usize {
-        self.pending_requests()
-            .filter(|pending| {
-                matches!(
-                    pending,
-                    PendingRequest::Avatar { .. }
-                        | PendingRequest::ParticipantAvatar { .. }
-                        | PendingRequest::MessageImage { .. }
-                )
-            })
-            .count()
-    }
-
-    pub fn expire_requests(&mut self, now: Duration) -> Vec<(u64, PendingRequest)> {
-        let mut expired_ids = self
-            .pending
-            .iter()
-            .filter_map(|(request_id, pending)| (pending.expires_at <= now).then_some(*request_id))
-            .collect::<Vec<_>>();
-        expired_ids.sort_unstable();
-        expired_ids
-            .into_iter()
-            .filter_map(|request_id| {
-                self.pending
-                    .remove(&request_id)
-                    .map(|pending| (request_id, pending.request))
-            })
-            .collect()
     }
 
     pub fn selected_chat(&self) -> Option<&proto::Chat> {
@@ -1481,63 +1319,6 @@ mod tests {
         for (index, chat) in store.chats.iter().enumerate() {
             assert_eq!(store.chat_index.get(&chat.id), Some(&index));
         }
-    }
-
-    #[test]
-    fn logout_pending_is_explicit_until_the_rpc_result_arrives() {
-        let mut store = Store::default();
-        store.begin_request(42, PendingRequest::Logout, Duration::ZERO);
-        assert!(store.logout_pending());
-        store.finish_request(42);
-        assert!(!store.logout_pending());
-    }
-
-    #[test]
-    fn pending_request_classes_expire_at_deterministic_deadlines() {
-        let mut store = Store::default();
-        store.begin_request(2, PendingRequest::Logout, Duration::ZERO);
-        store.begin_request(1, PendingRequest::Hello, Duration::ZERO);
-
-        assert_eq!(
-            store.expire_requests(CONTROL_REQUEST_TIMEOUT),
-            vec![(1, PendingRequest::Hello)]
-        );
-        assert!(store.logout_pending());
-        assert_eq!(
-            store.expire_requests(WRITE_REQUEST_TIMEOUT),
-            vec![(2, PendingRequest::Logout)]
-        );
-    }
-
-    #[test]
-    fn expired_media_requests_release_capacity_for_subsequent_progress() {
-        let mut store = Store::default();
-        for request_id in 1..=4 {
-            store.begin_request(
-                request_id,
-                PendingRequest::MessageImage {
-                    chat_id: "chat".into(),
-                    message_id: format!("message-{request_id}"),
-                },
-                Duration::from_secs(10),
-            );
-        }
-        assert_eq!(store.pending_media_count(), 4);
-        assert!(store.expire_requests(Duration::from_secs(39)).is_empty());
-
-        let expired = store.expire_requests(Duration::from_secs(40));
-        assert_eq!(expired.len(), 4);
-        assert_eq!(store.pending_media_count(), 0);
-
-        store.begin_request(
-            5,
-            PendingRequest::MessageImage {
-                chat_id: "chat".into(),
-                message_id: "next-message".into(),
-            },
-            Duration::from_secs(40),
-        );
-        assert_eq!(store.pending_media_count(), 1);
     }
 
     #[test]
