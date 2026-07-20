@@ -18,15 +18,13 @@ image = { version = "0.25.10", default-features = false, features = ["gif", "jpe
 prost = "0.14"
 qrcode = { version = "0.14", default-features = false }
 smol = "2"
+tempfile = "3.23"
 uuid = { version = "1.18", features = ["v4"] }
 webp = { version = "0.3.1", default-features = false }
 
 [build-dependencies]
 prost-build = "0.14"
 protoc-bin-vendored = "3.2"
-
-[dev-dependencies]
-tempfile = "3.23"
 
 [profile.dev]
 debug = "limited"

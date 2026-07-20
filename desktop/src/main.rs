@@ -1,7 +1,9 @@
 mod bridge;
 mod emoji_picker;
 mod model;
+mod paths;
 mod proto;
+mod settings;
 mod sticker;
 
 use std::{
@@ -112,44 +114,15 @@ fn normalized_ui_scale(scale: f32) -> f32 {
     ((scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE) * 10.0).round()) / 10.0
 }
 
-fn settings_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("RUST_MEOW_CONFIG_DIR") {
-        return PathBuf::from(path).join("settings");
-    }
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA").map(PathBuf::from);
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join("Library/Application Support"));
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|path| path.join(".config"))
-        });
-    base.unwrap_or_else(std::env::temp_dir)
-        .join("rust-meow")
-        .join("settings")
-}
-
 fn load_ui_scale() -> f32 {
-    fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|value| value.trim().parse::<f32>().ok())
+    settings::load_ui_scale()
         .filter(|value| value.is_finite())
         .map(normalized_ui_scale)
         .unwrap_or(1.0)
 }
 
 fn save_ui_scale(scale: f32) -> std::io::Result<()> {
-    let path = settings_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, format!("{scale:.1}\n"))
+    settings::save_ui_scale(scale)
 }
 
 fn apply_theme_scale(scale: f32, window: &mut Window, cx: &mut gpui::App) {
@@ -2039,7 +2012,7 @@ impl RustMeow {
         };
         if self.newer_load_failed
             || (!self.store.has_newer_messages && !self.store.newer_activity)
-            || self.store.pending.values().any(|pending| {
+            || self.store.pending_requests().any(|pending| {
                 matches!(pending, PendingRequest::MessagesAfter {
                     chat_id: pending_chat,
                     generation,

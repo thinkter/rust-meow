@@ -33,7 +33,7 @@ impl BackendClient {
             return Ok(Self::fake());
         }
         let executable = backend_executable()?;
-        let data_dir = data_dir();
+        let data_dir = crate::paths::data_dir();
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("create app data directory {}", data_dir.display()))?;
         let log_file = data_dir.join("backend.log");
@@ -203,25 +203,6 @@ fn backend_executable() -> Result<PathBuf> {
         "rust-meow-backend"
     };
     Ok(current.parent().unwrap_or(Path::new(".")).join(name))
-}
-
-fn data_dir() -> PathBuf {
-    if let Some(path) = env::var_os("RUST_MEOW_DATA_DIR") {
-        return path.into();
-    }
-    #[cfg(target_os = "windows")]
-    let base = env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    #[cfg(target_os = "macos")]
-    let base = env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join("Library/Application Support"));
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    let base = env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
-        env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|path| path.join(".local/share"))
-    });
-    base.unwrap_or_else(env::temp_dir).join("rust-meow")
 }
 
 fn fake_loop(

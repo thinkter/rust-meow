@@ -150,6 +150,8 @@ impl PendingRequest {
             | Self::Search { .. }
             | Self::OpenContact
             | Self::MessagesAround { .. }
+            | Self::OpenMessageWindow { .. }
+            | Self::MessagesAfter { .. }
             | Self::Avatar { .. }
             | Self::ParticipantAvatar { .. }
             | Self::MessageImage { .. } => READ_REQUEST_TIMEOUT,
