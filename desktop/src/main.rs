@@ -2,6 +2,7 @@ mod bridge;
 mod emoji_picker;
 mod model;
 mod proto;
+mod sticker;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -178,6 +179,7 @@ struct ImageViewer {
     message_id: String,
     path: String,
     caption: String,
+    sticker: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -434,6 +436,7 @@ struct RustMeow {
     participant_avatar_attempted: HashSet<String>,
     image_download_attempted: HashSet<(String, String)>,
     image_failures: HashMap<(String, String), String>,
+    sticker_preparing: bool,
     reaction_repair_attempted: HashSet<String>,
     latest_reaction_intents: HashMap<(String, String), String>,
     _subscriptions: Vec<Subscription>,
@@ -552,6 +555,7 @@ impl RustMeow {
             participant_avatar_attempted: HashSet::new(),
             image_download_attempted: HashSet::new(),
             image_failures: HashMap::new(),
+            sticker_preparing: false,
             reaction_repair_attempted: HashSet::new(),
             latest_reaction_intents: HashMap::new(),
             _subscriptions,
@@ -906,9 +910,20 @@ impl RustMeow {
             {
                 // Keep the attempt latched so virtualization does not create a
                 // retry storm. The row now exposes an explicit retry action.
+                let sticker = self
+                    .store
+                    .message(message_id)
+                    .and_then(|message| message.content.as_ref())
+                    .is_some_and(|content| {
+                        matches!(content, proto::message::Content::Image(image) if image.sticker)
+                    });
                 self.image_failures.insert(
                     (chat_id.clone(), message_id.clone()),
-                    if error.retryable {
+                    if sticker && error.retryable {
+                        "Couldn't load sticker · Click to retry".into()
+                    } else if sticker {
+                        "Sticker is no longer available".into()
+                    } else if error.retryable {
                         "Couldn't load photo · Click to retry".into()
                     } else {
                         "Photo is no longer available".into()
@@ -1091,6 +1106,16 @@ impl RustMeow {
                     self.scroll_to_bottom_generation = Some(self.message_generation);
                 }
             }
+            (PendingRequest::SendSticker, rpc_response::Result::SendSticker(sent)) => {
+                if let Some(message) = sent.message {
+                    let sent_to_selected_chat =
+                        self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str());
+                    self.store.upsert_message(message);
+                    if sent_to_selected_chat {
+                        self.scroll_to_bottom_generation = Some(self.message_generation);
+                    }
+                }
+            }
             (
                 PendingRequest::MessageImage {
                     chat_id,
@@ -1100,8 +1125,19 @@ impl RustMeow {
             ) if image.chat_id == chat_id && image.message_id == message_id => {
                 let key = (chat_id.clone(), message_id.clone());
                 if image.image_path.is_empty() {
-                    self.image_failures
-                        .insert(key, "Photo is no longer available".into());
+                    let sticker = self
+                        .store
+                        .message(&message_id)
+                        .and_then(|message| message.content.as_ref())
+                        .is_some_and(|content| {
+                            matches!(content, proto::message::Content::Image(image) if image.sticker)
+                        });
+                    let label = if sticker {
+                        "Sticker is no longer available"
+                    } else {
+                        "Photo is no longer available"
+                    };
+                    self.image_failures.insert(key, label.into());
                 } else {
                     self.image_failures.remove(&key);
                     self.store
@@ -1411,12 +1447,14 @@ impl RustMeow {
         message_id: String,
         path: String,
         caption: String,
+        sticker: bool,
     ) {
         self.image_viewer = Some(ImageViewer {
             chat_id,
             message_id,
             path,
             caption,
+            sticker,
         });
         self.emoji_target = None;
         self.reaction_details = None;
@@ -1987,6 +2025,53 @@ impl RustMeow {
         .detach();
     }
 
+    fn choose_sticker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        if self.store.connection != proto::ConnectionState::Connected || self.sticker_preparing {
+            return;
+        }
+        let reply_to_message_id = self.replying_to_message_id.clone();
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose an image to turn into a sticker".into()),
+        });
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let path = selected.await.ok()?.ok()??.into_iter().next()?;
+            window
+                .update(|_, cx| {
+                    view.update(cx, |this, cx| {
+                        this.sticker_preparing = true;
+                        this.store.toast_error = None;
+                        cx.notify();
+                    })
+                })
+                .ok()?;
+            let prepared = smol::unblock(move || sticker::prepare(&path)).await;
+            window
+                .update(|_, cx| {
+                    view.update(cx, |this, cx| {
+                        this.sticker_preparing = false;
+                        match prepared {
+                            Ok(prepared) => this.send_sticker(
+                                prepared,
+                                chat_id.clone(),
+                                reply_to_message_id.clone(),
+                            ),
+                            Err(error) => this.store.toast_error = Some(error),
+                        }
+                        cx.notify();
+                    })
+                })
+                .ok()
+        })
+        .detach();
+    }
+
     fn send_image(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chat_id) = self.store.selected_chat_id.clone() else {
             self.store.toast_error = Some("Choose a conversation before sending".into());
@@ -2021,6 +2106,39 @@ impl RustMeow {
                 reply_to_message_id,
             },
         );
+    }
+
+    fn send_sticker(
+        &mut self,
+        prepared: sticker::PreparedSticker,
+        chat_id: String,
+        reply_to_message_id: Option<String>,
+    ) {
+        if self.store.connection != proto::ConnectionState::Connected {
+            self.store.toast_error = Some("Reconnect to WhatsApp before sending".into());
+            return;
+        }
+        self.store.toast_error = None;
+        self.request(
+            rpc_request::Request::SendSticker(proto::SendStickerRequest {
+                client_message_id: Uuid::new_v4().to_string(),
+                chat_id: chat_id.clone(),
+                webp_data: prepared.webp_data,
+                reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
+            }),
+            PendingRequest::SendSticker,
+        );
+        if let Some(draft) = self.chat_drafts.get_mut(&chat_id) {
+            draft.reply_to_message_id = None;
+            if draft.is_empty() {
+                self.chat_drafts.remove(&chat_id);
+            }
+        }
+        if self.store.selected_chat_id.as_deref() == Some(chat_id.as_str())
+            && self.replying_to_message_id == reply_to_message_id
+        {
+            self.replying_to_message_id = None;
+        }
     }
 
     fn mark_read(&mut self) {
@@ -3031,6 +3149,19 @@ impl RustMeow {
                                         this.choose_image(window, cx)
                                     })),
                             )
+                            .child(
+                                Button::new("send-sticker")
+                                    .small()
+                                    .label(if self.sticker_preparing {
+                                        "Preparing…"
+                                    } else {
+                                        "Sticker"
+                                    })
+                                    .disabled(!connected || self.sticker_preparing)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.choose_sticker(window, cx)
+                                    })),
+                            )
                             .child(Input::new(&self.composer).disabled(!connected).flex_1())
                             .child(
                                 Button::new("send")
@@ -3552,6 +3683,17 @@ impl RustMeow {
         let message_id = viewer.message_id.clone();
         let path = viewer.path.clone();
         let caption = viewer.caption.trim().to_string();
+        let media_name = if viewer.sticker { "Sticker" } else { "Photo" };
+        let opening_label = if viewer.sticker {
+            "Opening sticker…"
+        } else {
+            "Opening photo…"
+        };
+        let fallback_label = if viewer.sticker {
+            "This sticker couldn't be decoded. Try Reload."
+        } else {
+            "This photo couldn't be decoded. Try Reload."
+        };
         div()
             .absolute()
             .inset_0()
@@ -3566,7 +3708,11 @@ impl RustMeow {
                     .w_full()
                     .items_center()
                     .justify_between()
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Photo"))
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(media_name),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
@@ -3589,22 +3735,22 @@ impl RustMeow {
                     img(PathBuf::from(path))
                         .size_full()
                         .object_fit(ObjectFit::Contain)
-                        .with_loading(|| {
+                        .with_loading(move || {
                             div()
                                 .size_full()
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child("Opening photo…")
+                                .child(opening_label)
                                 .into_any_element()
                         })
-                        .with_fallback(|| {
+                        .with_fallback(move || {
                             div()
                                 .size_full()
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child("This photo couldn't be decoded. Try Reload.")
+                                .child(fallback_label)
                                 .into_any_element()
                         }),
                 ),
@@ -3772,6 +3918,7 @@ impl RustMeow {
                         )
                     })
                     .when_some(image_content, |bubble, image| {
+                        let media_name = if image.sticker { "sticker" } else { "photo" };
                         let (image_width, image_height) = image_render_size(&image);
                         let image_path = image.local_path.clone();
                         let image_is_cached =
@@ -3780,11 +3927,13 @@ impl RustMeow {
                         let retryable =
                             image.downloadable && (image_failure.is_some() || cached_path_missing);
                         let placeholder = if cached_path_missing {
-                            "Cached photo missing · Click to reload".to_string()
+                            format!("Cached {media_name} missing · Click to reload")
                         } else if let Some(failure) = image_failure.clone() {
                             failure
                         } else if image.downloadable {
-                            "Loading photo…".to_string()
+                            format!("Loading {media_name}…")
+                        } else if image.sticker {
+                            "Sticker unavailable".to_string()
                         } else {
                             "Photo unavailable".to_string()
                         };
@@ -3792,10 +3941,14 @@ impl RustMeow {
                         let viewer_message_id = message_image_id.clone();
                         let viewer_path = image_path.clone();
                         let viewer_caption = image.caption.clone();
+                        let viewer_sticker = image.sticker;
                         let retry_chat_id = message_image_chat_id.clone();
                         let retry_message_id = message_image_id.clone();
                         let loading_color = cx.theme().muted_foreground;
                         let fallback_color = cx.theme().muted_foreground;
+                        let decoding_label = format!("Decoding {media_name}…");
+                        let decode_failure_label =
+                            format!("Couldn't display {media_name} · Open to retry");
                         bubble.child(
                             div()
                                 .id(("message-image", index))
@@ -3823,7 +3976,7 @@ impl RustMeow {
                                                     .justify_center()
                                                     .text_sm()
                                                     .text_color(loading_color)
-                                                    .child("Decoding photo…")
+                                                    .child(decoding_label.clone())
                                                     .into_any_element()
                                             })
                                             .with_fallback(move || {
@@ -3835,7 +3988,7 @@ impl RustMeow {
                                                     .px_3()
                                                     .text_sm()
                                                     .text_color(fallback_color)
-                                                    .child("Couldn't display photo · Open to retry")
+                                                    .child(decode_failure_label.clone())
                                                     .into_any_element()
                                             }),
                                     )
@@ -3848,6 +4001,7 @@ impl RustMeow {
                                                 viewer_message_id.clone(),
                                                 viewer_path.clone(),
                                                 viewer_caption.clone(),
+                                                viewer_sticker,
                                             );
                                             cx.notify();
                                         },

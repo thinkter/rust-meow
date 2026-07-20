@@ -37,6 +37,7 @@ message RpcRequest {
     SearchLocalRequest search_local = 16;
     OpenContactRequest open_contact = 17;
     ListMessagesAroundRequest list_messages_around = 18;
+    SendStickerRequest send_sticker = 19;
   }
 }
 
@@ -62,6 +63,7 @@ message RpcResponse {
     SearchLocalResponse search_local = 25;
     OpenContactResponse open_contact = 26;
     ListMessagesAroundResponse list_messages_around = 27;
+    SendStickerResponse send_sticker = 28;
   }
 }
 
@@ -474,3 +476,14 @@ message BackendProblem {
   string message = 2;
   bool fatal = 3;
 }
+
+message SendStickerRequest {
+  // Stable UUID with the same idempotency contract as other sends.
+  string client_message_id = 1;
+  string chat_id = 2;
+  // A complete WhatsApp-compatible WebP file prepared by the desktop.
+  bytes webp_data = 3;
+  string reply_to_message_id = 4;
+}
+
+message SendStickerResponse { Message message = 1; }

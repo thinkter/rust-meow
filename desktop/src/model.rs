@@ -101,6 +101,7 @@ pub enum PendingRequest {
         draft_text: String,
         reply_to_message_id: Option<String>,
     },
+    SendSticker,
     MessageImage {
         chat_id: String,
         message_id: String,

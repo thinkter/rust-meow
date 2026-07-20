@@ -12,7 +12,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -422,6 +422,28 @@ fn fake_loop(
                             mime_type: String::new(),
                             local_path: request.image_path,
                             downloadable: true,
+                            ..Default::default()
+                        })),
+                        reply_to_message_id: request.reply_to_message_id,
+                        ..Default::default()
+                    }),
+                })
+            }
+            Some(rpc_request::Request::SendSticker(request)) => {
+                rpc_response::Result::SendSticker(proto::SendStickerResponse {
+                    message: Some(proto::Message {
+                        id: request.client_message_id,
+                        chat_id: request.chat_id,
+                        sender_id: "me@s.whatsapp.net".into(),
+                        sender_name: "You".into(),
+                        from_me: true,
+                        timestamp_ms: 1_900_000_000_000,
+                        status: proto::MessageStatus::Sent as i32,
+                        content: Some(proto::message::Content::Image(proto::ImageContent {
+                            mime_type: "image/webp".into(),
+                            sticker: true,
+                            width: 512,
+                            height: 512,
                             ..Default::default()
                         })),
                         reply_to_message_id: request.reply_to_message_id,

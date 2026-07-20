@@ -25,7 +25,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 9
+const ProtocolVersion uint32 = 10
 const maxTextBytes = 65_536
 
 type Server struct {
@@ -78,7 +78,7 @@ func (s *Server) Run() error {
 			return err
 		}
 		request := envelope.GetRequest()
-		if s.handshaken.Load() && envelope.GetProtocolVersion() == ProtocolVersion && (request.GetGetChatAvatar() != nil || request.GetGetParticipantAvatar() != nil || request.GetGetMessageImage() != nil || request.GetSendImage() != nil) {
+		if s.handshaken.Load() && envelope.GetProtocolVersion() == ProtocolVersion && (request.GetGetChatAvatar() != nil || request.GetGetParticipantAvatar() != nil || request.GetGetMessageImage() != nil || request.GetSendImage() != nil || request.GetSendSticker() != nil) {
 			select {
 			case s.mediaSlots <- struct{}{}:
 			case <-s.ctx.Done():
@@ -309,6 +309,24 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, err
 		}
 		return &bridgev1.RpcResponse_SendImage{SendImage: &bridgev1.SendImageResponse{Message: s.wireMessage(message)}}, nil
+	case *bridgev1.RpcRequest_SendSticker:
+		if req.SendSticker.GetClientMessageId() == "" || req.SendSticker.GetChatId() == "" || len(req.SendSticker.GetWebpData()) == 0 {
+			return nil, fail("invalid_argument", "client_message_id, chat_id and webp_data are required", false)
+		}
+		if _, err := uuid.Parse(req.SendSticker.GetClientMessageId()); err != nil {
+			return nil, fail("invalid_argument", "client_message_id must be a UUID", false)
+		}
+		if err := s.validateReplyTarget(req.SendSticker.GetChatId(), req.SendSticker.GetReplyToMessageId()); err != nil {
+			return nil, err
+		}
+		if !s.wa.IsConnected() {
+			return nil, fail("not_connected", "WhatsApp is not connected", true)
+		}
+		message, err := s.wa.SendSticker(s.ctx, req.SendSticker.GetClientMessageId(), req.SendSticker.GetChatId(), req.SendSticker.GetWebpData(), req.SendSticker.GetReplyToMessageId())
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_SendSticker{SendSticker: &bridgev1.SendStickerResponse{Message: s.wireMessage(message)}}, nil
 	case *bridgev1.RpcRequest_GetMessageImage:
 		if req.GetMessageImage.GetChatId() == "" || req.GetMessageImage.GetMessageId() == "" {
 			return nil, fail("invalid_argument", "chat_id and message_id are required", false)
@@ -470,6 +488,8 @@ func success(result any) *bridgev1.RpcResponse {
 	case *bridgev1.RpcResponse_SendText:
 		response.Result = value
 	case *bridgev1.RpcResponse_SendImage:
+		response.Result = value
+	case *bridgev1.RpcResponse_SendSticker:
 		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageImage:
 		response.Result = value

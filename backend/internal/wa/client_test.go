@@ -193,6 +193,40 @@ func TestDomainMessageDecodesStickerAsLazyImage(t *testing.T) {
 	}
 }
 
+func TestStickerMetadataRejectsNonWebPAndWrongDimensions(t *testing.T) {
+	if _, _, _, err := stickerMetadata([]byte("not an image")); err == nil {
+		t.Fatal("non-WebP sticker was accepted")
+	}
+
+	// A valid 1x1 lossless WebP. It must decode successfully but still be
+	// rejected because outbound stickers are normalized to exactly 512x512.
+	onePixelWebP := []byte{
+		0x52, 0x49, 0x46, 0x46, 0x1a, 0x00, 0x00, 0x00,
+		0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c,
+		0x0d, 0x00, 0x00, 0x00, 0x2f, 0x00, 0x00, 0x00,
+		0x10, 0x07, 0x10, 0x11, 0x11, 0x88, 0x88, 0xfe,
+		0x07, 0x00,
+	}
+	if _, _, _, err := stickerMetadata(onePixelWebP); err == nil || err.Error() != "sticker must be 512×512" {
+		t.Fatalf("wrong-size WebP error=%v", err)
+	}
+}
+
+func TestWebPIsAnimatedHandlesFeatureFlagAndMalformedChunks(t *testing.T) {
+	animated := []byte("RIFF\x0a\x00\x00\x00WEBPVP8X\x01\x00\x00\x00\x02\x00")
+	if !webpIsAnimated(animated) {
+		t.Fatal("VP8X animation feature flag was ignored")
+	}
+	animated[20] = 0
+	if webpIsAnimated(animated) {
+		t.Fatal("static VP8X image reported as animated")
+	}
+	malformed := []byte("RIFF\xff\xff\xff\xffWEBPANIM\xff\xff\xff\xff")
+	if webpIsAnimated(malformed) {
+		t.Fatal("truncated animation chunk reported as valid")
+	}
+}
+
 func TestImageDescriptorChangedRequiresFreshDownloadCoordinates(t *testing.T) {
 	old := &domain.Image{DirectPath: "/old", MediaKey: []byte{1}, FileEncSHA256: []byte{2}}
 	if imageDescriptorChanged(old, &domain.Image{DirectPath: "/old", MediaKey: []byte{1}, FileEncSHA256: []byte{2}}) {

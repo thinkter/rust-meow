@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"image"
@@ -866,6 +867,9 @@ func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID
 }
 
 const maxImageBytes = 32 * 1024 * 1024
+const maxStaticStickerBytes = 100 * 1024
+const maxAnimatedStickerBytes = 500 * 1024
+const stickerEdge = 512
 
 func supportedImageMIME(data []byte) (string, error) {
 	mimeType := strings.Split(http.DetectContentType(data), ";")[0]
@@ -875,6 +879,49 @@ func supportedImageMIME(data []byte) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported image type %s", mimeType)
 	}
+}
+
+func stickerMetadata(data []byte) (width, height uint32, animated bool, err error) {
+	if len(data) == 0 || len(data) > maxAnimatedStickerBytes {
+		return 0, 0, false, fmt.Errorf("sticker must be between 1 byte and %d KiB", maxAnimatedStickerBytes/1024)
+	}
+	mimeType, mimeErr := supportedImageMIME(data)
+	if mimeErr != nil || mimeType != "image/webp" {
+		return 0, 0, false, fmt.Errorf("sticker must be a WebP image")
+	}
+	config, _, decodeErr := image.DecodeConfig(bytes.NewReader(data))
+	if decodeErr != nil {
+		return 0, 0, false, fmt.Errorf("decode sticker: %w", decodeErr)
+	}
+	if config.Width != stickerEdge || config.Height != stickerEdge {
+		return 0, 0, false, fmt.Errorf("sticker must be %d×%d", stickerEdge, stickerEdge)
+	}
+	animated = webpIsAnimated(data)
+	if !animated && len(data) > maxStaticStickerBytes {
+		return 0, 0, false, fmt.Errorf("static sticker must be %d KiB or smaller", maxStaticStickerBytes/1024)
+	}
+	return uint32(config.Width), uint32(config.Height), animated, nil
+}
+
+func webpIsAnimated(data []byte) bool {
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return false
+	}
+	for offset := 12; offset+8 <= len(data); {
+		kind := string(data[offset : offset+4])
+		size64 := uint64(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		payloadStart := offset + 8
+		if size64 > uint64(len(data)-payloadStart) {
+			return false
+		}
+		size := int(size64)
+		payloadEnd := payloadStart + size
+		if kind == "ANIM" || kind == "ANMF" || kind == "VP8X" && size > 0 && data[payloadStart]&0x02 != 0 {
+			return true
+		}
+		offset = payloadEnd + size%2
+	}
+	return false
 }
 
 func imageExtension(mimeType string) string {
@@ -1019,6 +1066,87 @@ func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, ca
 	}
 	sendCtx, cancelSend := context.WithTimeout(ctx, 30*time.Second)
 	response, err := c.wa.SendMessage(sendCtx, chat, &waE2E.Message{ImageMessage: imageMessage}, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
+	cancelSend()
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, err
+	}
+	pending.Timestamp = response.Timestamp
+	pending.Status = domain.StatusSent
+	err = c.store.ApplyMessage(ctx, pending, false)
+	c.emitChat(chatID)
+	return pending, err
+}
+
+func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data []byte, replyToID string) (domain.Message, error) {
+	width, height, animated, err := stickerMetadata(data)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	resolvedChat, _, err := c.resolveConversation(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chatID = resolvedChat
+	resolvedTransport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chat, err := types.ParseJID(resolvedTransport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	replyContext, err := c.replyContext(ctx, chatID, replyToID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	waID := string(c.wa.GenerateMessageID())
+	localPath, err := c.cacheImageBytes(chatID, waID, "image/webp", data)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	pending := domain.Message{
+		ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(), Text: "Sticker",
+		Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "sticker", ReplyToID: replyToID,
+		Image: &domain.Image{MIMEType: "image/webp", LocalPath: localPath, Width: width, Height: height, FileSize: uint64(len(data)), Animated: animated},
+	}
+	waID, existed, err := c.store.ReserveOutgoingMessage(ctx, clientID, pending)
+	if err != nil {
+		_ = os.Remove(localPath)
+		return domain.Message{}, err
+	}
+	if existed {
+		if pending.ID != waID {
+			_ = os.Remove(localPath)
+		}
+		return c.store.Message(ctx, chatID, waID)
+	}
+	uploadCtx, cancelUpload := context.WithTimeout(ctx, 90*time.Second)
+	upload, err := c.wa.Upload(uploadCtx, data, whatsmeow.MediaImage)
+	cancelUpload()
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("upload sticker: %w", err)
+	}
+	pending.Image.DirectPath = upload.DirectPath
+	pending.Image.MediaKey = upload.MediaKey
+	pending.Image.FileSHA256 = upload.FileSHA256
+	pending.Image.FileEncSHA256 = upload.FileEncSHA256
+	stickerMessage := &waE2E.StickerMessage{
+		Mimetype: proto.String("image/webp"), Width: proto.Uint32(width), Height: proto.Uint32(height), IsAnimated: proto.Bool(animated),
+		URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
+		FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, ContextInfo: replyContext,
+	}
+	sendCtx, cancelSend := context.WithTimeout(ctx, 30*time.Second)
+	response, err := c.wa.SendMessage(sendCtx, chat, &waE2E.Message{StickerMessage: stickerMessage}, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
 	cancelSend()
 	if err != nil {
 		pending.Status = domain.StatusFailed
