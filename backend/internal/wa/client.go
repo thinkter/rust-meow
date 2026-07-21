@@ -50,6 +50,9 @@ type Event struct {
 	Chat                              domain.Chat
 	ChatJID                           string
 	OldChatJID                        string
+	SenderJID                         string
+	Typing                            bool
+	Recording                         bool
 	MessageID                         string
 	Status                            domain.MessageStatus
 	QR                                string
@@ -1177,7 +1180,29 @@ func quotedMessage(message domain.Message) *waE2E.Message {
 	}
 }
 
-func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID string) (domain.Message, error) {
+// canonicalMentionJIDs drops malformed entries so one bad tag cannot make
+// WhatsApp reject the whole message.
+func canonicalMentionJIDs(rawJIDs []string) []string {
+	mentions := make([]string, 0, len(rawJIDs))
+	seen := make(map[string]bool, len(rawJIDs))
+	for _, raw := range rawJIDs {
+		jid, err := types.ParseJID(raw)
+		if err != nil || jid.User == "" {
+			continue
+		}
+		if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer {
+			continue
+		}
+		canonical := jid.ToNonAD().String()
+		if !seen[canonical] {
+			seen[canonical] = true
+			mentions = append(mentions, canonical)
+		}
+	}
+	return mentions
+}
+
+func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID string, mentionedJIDs []string) (domain.Message, error) {
 	transport, err := c.store.PreferredJID(ctx, chatID)
 	if err != nil {
 		return domain.Message{}, err
@@ -1211,9 +1236,16 @@ func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID
 	msg := pending
 	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	contextInfo := replyContext
+	if mentions := canonicalMentionJIDs(mentionedJIDs); len(mentions) > 0 {
+		if contextInfo == nil {
+			contextInfo = &waE2E.ContextInfo{}
+		}
+		contextInfo.MentionedJID = mentions
+	}
 	outgoing := &waE2E.Message{Conversation: proto.String(text)}
-	if replyContext != nil {
-		outgoing = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(text), ContextInfo: replyContext}}
+	if contextInfo != nil {
+		outgoing = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(text), ContextInfo: contextInfo}}
 	}
 	resp, err := c.wa.SendMessage(sendCtx, jid, outgoing, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
 	if err != nil {
@@ -2111,6 +2143,13 @@ func (c *Client) handleEvent(raw any) {
 	switch evt := raw.(type) {
 	case *events.Connected:
 		c.sink(Event{Kind: "connection", Detail: "connected"})
+		// WhatsApp only delivers chat-presence (typing) updates to clients
+		// that have marked themselves available.
+		go func() {
+			if err := c.wa.SendPresence(c.ctx, types.PresenceAvailable); err != nil {
+				c.log.Warn("send available presence", "error", err)
+			}
+		}()
 		go c.reconcileChatState()
 	case *events.Disconnected:
 		c.sink(Event{Kind: "connection", Detail: "offline"})
@@ -2120,6 +2159,8 @@ func (c *Client) handleEvent(raw any) {
 		c.sink(Event{Kind: "problem", Detail: "session replaced by another client"})
 	case *events.Message:
 		c.enqueue(func() { c.reduceMessage(evt, true) })
+	case *events.ChatPresence:
+		c.enqueue(func() { c.reduceChatPresence(evt) })
 	case *events.Receipt:
 		c.enqueue(func() { c.reduceReceipt(evt) })
 	case *events.HistorySync:
@@ -2860,6 +2901,42 @@ func messageDocument(message *waE2E.Message) *waE2E.DocumentMessage {
 		return wrapped.GetMessage().GetDocumentMessage()
 	}
 	return nil
+}
+
+// reduceChatPresence forwards typing/recording state changes. Nothing is
+// persisted: indicators are transient and expire on the desktop side.
+func (c *Client) reduceChatPresence(evt *events.ChatPresence) {
+	if evt.IsFromMe {
+		return
+	}
+	chatID, _, err := c.resolveConversation(evt.Chat.String())
+	if err != nil {
+		return
+	}
+	c.sink(Event{
+		Kind:      "typing",
+		ChatJID:   chatID,
+		SenderJID: evt.Sender.ToNonAD().String(),
+		Typing:    evt.State == types.ChatPresenceComposing,
+		Recording: evt.Media == types.ChatPresenceMediaAudio,
+	})
+}
+
+// SetTyping broadcasts the local user's composing state for a chat.
+func (c *Client) SetTyping(ctx context.Context, chatID string, typing bool) error {
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	jid, err := types.ParseJID(transport)
+	if err != nil {
+		return err
+	}
+	state := types.ChatPresencePaused
+	if typing {
+		state = types.ChatPresenceComposing
+	}
+	return c.wa.SendChatPresence(ctx, jid, state, types.ChatPresenceMediaText)
 }
 
 func (c *Client) emitChat(chatID string) {

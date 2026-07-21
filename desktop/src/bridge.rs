@@ -558,6 +558,9 @@ fn fake_loop(
             Some(rpc_request::Request::MarkRead(_)) => {
                 rpc_response::Result::MarkRead(proto::MarkReadResponse {})
             }
+            Some(rpc_request::Request::SetTyping(_)) => {
+                rpc_response::Result::SetTyping(proto::SetTypingResponse {})
+            }
             Some(rpc_request::Request::Logout(_)) => {
                 rpc_response::Result::Logout(proto::LogoutResponse {})
             }

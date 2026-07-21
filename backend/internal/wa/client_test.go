@@ -527,6 +527,21 @@ func TestDomainMessageExtractsEditedContent(t *testing.T) {
 	}
 }
 
+func TestCanonicalMentionJIDsKeepsOnlyUserAddresses(t *testing.T) {
+	got := canonicalMentionJIDs([]string{
+		"15551234567@s.whatsapp.net",
+		"15551234567:2@s.whatsapp.net", // device variant collapses into the first
+		"203635027103105@lid",
+		"123-456@g.us", // groups cannot be mentioned
+		"not a jid",
+		"",
+	})
+	want := []string{"15551234567@s.whatsapp.net", "203635027103105@lid"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("mentions=%v want=%v", got, want)
+	}
+}
+
 func TestPassiveMessageFiltersSignalOnlyPayloads(t *testing.T) {
 	passive := []*waE2E.Message{
 		{PollUpdateMessage: &waE2E.PollUpdateMessage{}},

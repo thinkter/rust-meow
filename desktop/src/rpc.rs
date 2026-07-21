@@ -59,10 +59,16 @@ pub enum PendingRequest {
     ChatInfo {
         chat_id: String,
     },
+    MentionDirectory {
+        chat_id: String,
+    },
+    SetTyping,
     SendText {
         chat_id: String,
         draft_text: String,
         reply_to_message_id: Option<String>,
+        /// (display name, JID) pairs backing `@Name` tokens in `draft_text`.
+        mentions: Vec<(String, String)>,
     },
     SendImage {
         chat_id: String,
@@ -105,8 +111,10 @@ impl PendingRequest {
             | Self::Avatar { .. }
             | Self::ParticipantAvatar { .. }
             | Self::ChatInfo { .. }
+            | Self::MentionDirectory { .. }
             | Self::MessageImage { .. } => READ_REQUEST_TIMEOUT,
             Self::Pairing
+            | Self::SetTyping
             | Self::SendText { .. }
             | Self::SendImage { .. }
             | Self::SendSticker

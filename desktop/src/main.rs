@@ -14,7 +14,7 @@ use std::{
     ops::Range,
     path::PathBuf,
     rc::Rc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gpui::prelude::FluentBuilder as _;
@@ -69,6 +69,71 @@ const BASE_MONO_FONT_SIZE: f32 = 13.0;
 const MAX_RECENT_CHATS: usize = 10;
 
 actions!(rust_meow, [CycleRecentChat, CycleRecentChatReverse]);
+
+/// Returns the byte offset of the `@` opening an in-progress mention token
+/// that ends at `cursor`. The `@` must start the text or follow whitespace,
+/// and the partial query may not contain whitespace or another `@`.
+fn mention_token_start(text: &str, cursor: usize) -> Option<usize> {
+    if !text.is_char_boundary(cursor) {
+        return None;
+    }
+    let before = &text[..cursor];
+    for (offset, character) in before.char_indices().rev() {
+        if character == '@' {
+            let preceded_ok = before[..offset]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace);
+            return preceded_ok.then_some(offset);
+        }
+        if character.is_whitespace() {
+            return None;
+        }
+    }
+    None
+}
+
+fn mention_display_name(participant: &proto::ChatParticipant) -> String {
+    if !participant.display_name.is_empty() {
+        participant.display_name.clone()
+    } else if !participant.phone_number.is_empty() {
+        participant.phone_number.clone()
+    } else {
+        participant
+            .participant_id
+            .split('@')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+}
+
+/// Rewrites `@Name` tokens to the `@<jid-user>` wire form WhatsApp clients
+/// expect, returning the rewritten text and the JIDs it still references.
+/// Mentions whose token the user deleted are dropped.
+fn encode_mentions(text: &str, mentions: &[MentionEntry]) -> (String, Vec<String>) {
+    let mut wire = text.to_string();
+    let mut jids = Vec::new();
+    let mut ordered: Vec<&MentionEntry> = mentions.iter().collect();
+    // Longest names first so "@Ann" can never clobber part of "@Anna Lee".
+    ordered.sort_by_key(|entry| std::cmp::Reverse(entry.display_name.len()));
+    for entry in ordered {
+        if entry.display_name.is_empty() {
+            continue;
+        }
+        let Some(user) = entry.jid.split('@').next().filter(|user| !user.is_empty()) else {
+            continue;
+        };
+        let token = format!("@{}", entry.display_name);
+        if wire.contains(&token) {
+            wire = wire.replace(&token, &format!("@{user}"));
+            if !jids.contains(&entry.jid) {
+                jids.push(entry.jid.clone());
+            }
+        }
+    }
+    (wire, jids)
+}
 
 fn validate_text_message(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
@@ -164,7 +229,27 @@ struct ImageViewer {
 struct ChatDraft {
     text: String,
     reply_to_message_id: Option<String>,
+    /// Participants tagged via the @ picker. Each entry backs an `@Name`
+    /// token in `text`; tokens the user has since deleted are dropped at send.
+    mentions: Vec<MentionEntry>,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MentionEntry {
+    display_name: String,
+    jid: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MentionPicker {
+    chat_id: String,
+    /// Byte offset of the `@` that opened the picker in the composer text.
+    token_start: usize,
+    query: String,
+    highlighted: usize,
+}
+
+const MAX_MENTION_ROWS: usize = 8;
 
 impl ChatDraft {
     fn is_empty(&self) -> bool {
@@ -184,6 +269,19 @@ struct ChatInfoState {
     error: Option<String>,
     info: Option<proto::GetChatInfoResponse>,
 }
+
+/// Transient "peer is typing" state for one chat. Indicators also expire
+/// locally because the terminal "paused" update from WhatsApp can be lost.
+struct TypingIndicator {
+    sender_name: String,
+    recording: bool,
+    expires_at: Instant,
+}
+
+const TYPING_INDICATOR_TTL: Duration = Duration::from_secs(10);
+/// How often the composer re-broadcasts "still typing" while text keeps
+/// changing. WhatsApp peers expire remote composing state after ~10 seconds.
+const TYPING_RESIGNAL: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug, Default)]
 struct SearchResults {
@@ -414,6 +512,11 @@ struct RustMeow {
     recent_chat_ids: Vec<String>,
     chat_switcher: Option<ChatSwitcher>,
     chat_info: Option<ChatInfoState>,
+    mention_picker: Option<MentionPicker>,
+    mention_directories: HashMap<String, Vec<proto::ChatParticipant>>,
+    mention_directory_pending: HashSet<String>,
+    typing_indicators: HashMap<String, TypingIndicator>,
+    typing_signal: Option<(String, Instant)>,
     focus_handle: FocusHandle,
     settings_open: bool,
     ui_scale: f32,
@@ -470,7 +573,11 @@ impl RustMeow {
                 move |this, _, event, window, cx| {
                     if matches!(event, InputEvent::Change) {
                         let text = composer.read(cx).value().to_string();
+                        let composing = !text.trim().is_empty();
                         this.update_active_draft_text(text);
+                        this.refresh_mention_picker(cx);
+                        this.signal_typing(composing);
+                        cx.notify();
                     }
                     if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                         this.send_text(window, cx);
@@ -559,6 +666,11 @@ impl RustMeow {
             recent_chat_ids: Vec::new(),
             chat_switcher: None,
             chat_info: None,
+            mention_picker: None,
+            mention_directories: HashMap::new(),
+            mention_directory_pending: HashSet::new(),
+            typing_indicators: HashMap::new(),
+            typing_signal: None,
             focus_handle,
             settings_open: false,
             ui_scale,
@@ -605,6 +717,11 @@ impl RustMeow {
     }
 
     fn expire_stalled_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Piggyback on the 1s sweep: typing indicators expire locally because
+        // the peer's terminal "paused" update can be lost.
+        let now = Instant::now();
+        self.typing_indicators
+            .retain(|_, indicator| indicator.expires_at > now);
         for (_, pending) in self.rpc.expire() {
             match pending {
                 PendingRequest::Hello | PendingRequest::Auth => {
@@ -627,6 +744,9 @@ impl RustMeow {
                         state.loading = false;
                         state.error = Some("Loading chat info timed out. Try again.".into());
                     }
+                }
+                PendingRequest::MentionDirectory { chat_id } => {
+                    self.mention_directory_pending.remove(&chat_id);
                 }
                 PendingRequest::MessageImage {
                     chat_id,
@@ -657,8 +777,20 @@ impl RustMeow {
                     chat_id,
                     draft_text,
                     reply_to_message_id,
+                    mentions,
+                } => {
+                    self.restore_failed_draft(
+                        &chat_id,
+                        &draft_text,
+                        reply_to_message_id,
+                        &mentions,
+                        window,
+                        cx,
+                    );
+                    self.store.toast_error =
+                        Some("Sending timed out. Your draft was restored; try again.".into());
                 }
-                | PendingRequest::SendImage {
+                PendingRequest::SendImage {
                     chat_id,
                     draft_text,
                     reply_to_message_id,
@@ -667,6 +799,7 @@ impl RustMeow {
                         &chat_id,
                         &draft_text,
                         reply_to_message_id,
+                        &[],
                         window,
                         cx,
                     );
@@ -708,6 +841,8 @@ impl RustMeow {
                     self.store.toast_error = Some("Logout timed out. Try again.".into());
                 }
                 PendingRequest::Search { .. } => {}
+                // Best-effort presence broadcast; peers expire it on their own.
+                PendingRequest::SetTyping => {}
                 _ => {
                     self.store.toast_error = Some("Backend request timed out. Try again.".into());
                 }
@@ -922,8 +1057,16 @@ impl RustMeow {
                     chat_id,
                     draft_text,
                     reply_to_message_id,
-                }
-                | PendingRequest::SendImage {
+                    mentions,
+                } => self.restore_failed_draft(
+                    chat_id,
+                    draft_text,
+                    reply_to_message_id.clone(),
+                    mentions,
+                    window,
+                    cx,
+                ),
+                PendingRequest::SendImage {
                     chat_id,
                     draft_text,
                     reply_to_message_id,
@@ -931,6 +1074,7 @@ impl RustMeow {
                     chat_id,
                     draft_text,
                     reply_to_message_id.clone(),
+                    &[],
                     window,
                     cx,
                 ),
@@ -991,6 +1135,9 @@ impl RustMeow {
             {
                 self.clear_reaction_intent_if_current(chat_id, message_id, client_reaction_id);
             }
+            if matches!(&pending, PendingRequest::SetTyping) {
+                return;
+            }
             if let PendingRequest::ChatInfo { chat_id } = &pending {
                 if let Some(state) = self.chat_info.as_mut()
                     && state.chat_id == *chat_id
@@ -998,6 +1145,10 @@ impl RustMeow {
                     state.loading = false;
                     state.error = Some(error.message);
                 }
+                return;
+            }
+            if let PendingRequest::MentionDirectory { chat_id } = &pending {
+                self.mention_directory_pending.remove(chat_id);
                 return;
             }
             if let PendingRequest::Avatar { chat_id } = &pending {
@@ -1274,10 +1425,13 @@ impl RustMeow {
                     self.scroll_to_bottom_generation = Some(self.message_generation);
                 }
             }
+            (PendingRequest::SetTyping, rpc_response::Result::SetTyping(_)) => {}
             (PendingRequest::ChatInfo { chat_id }, rpc_response::Result::GetChatInfo(info)) => {
                 if let Some(chat) = info.chat.clone() {
                     self.store.upsert_chat(chat);
                 }
+                self.mention_directories
+                    .insert(chat_id.clone(), info.participants.clone());
                 if let Some(state) = self.chat_info.as_mut()
                     && state.chat_id == chat_id
                 {
@@ -1285,6 +1439,16 @@ impl RustMeow {
                     state.error = None;
                     state.info = Some(info);
                 }
+            }
+            (
+                PendingRequest::MentionDirectory { chat_id },
+                rpc_response::Result::GetChatInfo(info),
+            ) => {
+                self.mention_directory_pending.remove(&chat_id);
+                if let Some(chat) = info.chat.clone() {
+                    self.store.upsert_chat(chat);
+                }
+                self.mention_directories.insert(chat_id, info.participants);
             }
             (PendingRequest::SendSticker, rpc_response::Result::SendSticker(sent)) => {
                 if let Some(message) = sent.message {
@@ -1480,6 +1644,11 @@ impl RustMeow {
             }
             Some(backend_event::Event::MessageUpserted(upsert)) => {
                 if let Some(message) = upsert.message {
+                    // The typed-out message arrived; drop the indicator now
+                    // rather than waiting for the paused update or the TTL.
+                    if !message.from_me {
+                        self.typing_indicators.remove(&message.chat_id);
+                    }
                     if self.store.has_newer_messages
                         && self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str())
                     {
@@ -1488,6 +1657,20 @@ impl RustMeow {
                         self.store.upsert_message(message);
                         self.refresh_reaction_details();
                     }
+                }
+            }
+            Some(backend_event::Event::TypingChanged(update)) => {
+                if update.typing {
+                    self.typing_indicators.insert(
+                        update.chat_id,
+                        TypingIndicator {
+                            sender_name: update.sender_name,
+                            recording: update.recording,
+                            expires_at: Instant::now() + TYPING_INDICATOR_TTL,
+                        },
+                    );
+                } else {
+                    self.typing_indicators.remove(&update.chat_id);
                 }
             }
             Some(backend_event::Event::ReceiptUpdated(receipt)) => {
@@ -1689,17 +1872,158 @@ impl RustMeow {
         self.replying_to_message_id = None;
     }
 
+    /// Re-evaluates the composer text around the cursor and opens or closes
+    /// the @ mention picker accordingly. Only group chats can tag members.
+    fn refresh_mention_picker(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            self.mention_picker = None;
+            return;
+        };
+        let is_group = self
+            .store
+            .chat(&chat_id)
+            .is_some_and(|chat| chat.kind() == proto::ChatKind::Group);
+        if !is_group {
+            self.mention_picker = None;
+            return;
+        }
+        let state = self.composer.read(cx);
+        let text = state.value().to_string();
+        let cursor = state.cursor().min(text.len());
+        let Some(token_start) = mention_token_start(&text, cursor) else {
+            self.mention_picker = None;
+            return;
+        };
+        let query = text[token_start + 1..cursor].to_string();
+        let highlighted = match &self.mention_picker {
+            Some(picker) if picker.chat_id == chat_id && picker.token_start == token_start => {
+                picker.highlighted
+            }
+            _ => 0,
+        };
+        self.mention_picker = Some(MentionPicker {
+            chat_id: chat_id.clone(),
+            token_start,
+            query,
+            highlighted,
+        });
+        self.ensure_mention_directory(chat_id);
+    }
+
+    fn ensure_mention_directory(&mut self, chat_id: String) {
+        if self.mention_directories.contains_key(&chat_id)
+            || self.mention_directory_pending.contains(&chat_id)
+            || self.store.connection != proto::ConnectionState::Connected
+        {
+            return;
+        }
+        self.mention_directory_pending.insert(chat_id.clone());
+        self.request(
+            rpc_request::Request::GetChatInfo(proto::GetChatInfoRequest {
+                chat_id: chat_id.clone(),
+            }),
+            PendingRequest::MentionDirectory { chat_id },
+        );
+    }
+
+    fn mention_matches(&self) -> Vec<proto::ChatParticipant> {
+        let Some(picker) = &self.mention_picker else {
+            return Vec::new();
+        };
+        let Some(participants) = self.mention_directories.get(&picker.chat_id) else {
+            return Vec::new();
+        };
+        let query = picker.query.to_lowercase();
+        let digits = query.trim_start_matches('+');
+        participants
+            .iter()
+            .filter(|participant| !participant.is_me)
+            .filter(|participant| {
+                query.is_empty()
+                    || participant.display_name.to_lowercase().contains(&query)
+                    || (!digits.is_empty()
+                        && participant
+                            .phone_number
+                            .trim_start_matches('+')
+                            .contains(digits))
+            })
+            .take(MAX_MENTION_ROWS)
+            .cloned()
+            .collect()
+    }
+
+    fn mention_popup_visible(&self) -> bool {
+        let Some(picker) = &self.mention_picker else {
+            return false;
+        };
+        if self.store.selected_chat_id.as_deref() != Some(picker.chat_id.as_str()) {
+            return false;
+        }
+        self.mention_directory_pending.contains(&picker.chat_id)
+            || !self.mention_matches().is_empty()
+    }
+
+    /// Replaces the in-progress `@query` token with `@Name ` and records the
+    /// participant so send_text can attach the real WhatsApp mention.
+    fn apply_mention(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.mention_picker.clone() else {
+            return;
+        };
+        let Some(participant) = self.mention_matches().get(index).cloned() else {
+            return;
+        };
+        let name = mention_display_name(&participant);
+        let state = self.composer.read(cx);
+        let text = state.value().to_string();
+        let cursor = state.cursor().min(text.len());
+        self.mention_picker = None;
+        // The cursor may have moved since the picker opened (e.g. arrow keys
+        // don't emit Change). Only rewrite when the same token is still there.
+        if mention_token_start(&text, cursor) != Some(picker.token_start) {
+            return;
+        }
+        let new_text = format!(
+            "{}@{} {}",
+            &text[..picker.token_start],
+            name,
+            text[cursor..].trim_start()
+        );
+        let draft = self.chat_drafts.entry(picker.chat_id.clone()).or_default();
+        if !draft
+            .mentions
+            .iter()
+            .any(|entry| entry.jid == participant.participant_id)
+        {
+            draft.mentions.push(MentionEntry {
+                display_name: name,
+                jid: participant.participant_id.clone(),
+            });
+        }
+        self.composer.update(cx, |input, cx| {
+            input.set_value(new_text, window, cx);
+            input.focus(window, cx);
+        });
+    }
+
     fn restore_failed_draft(
         &mut self,
         chat_id: &str,
         draft_text: &str,
         reply_to_message_id: Option<String>,
+        mentions: &[(String, String)],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let failed_draft = ChatDraft {
             text: draft_text.to_owned(),
             reply_to_message_id,
+            mentions: mentions
+                .iter()
+                .map(|(display_name, jid)| MentionEntry {
+                    display_name: display_name.clone(),
+                    jid: jid.clone(),
+                })
+                .collect(),
         };
         let should_restore = self
             .chat_drafts
@@ -1961,6 +2285,61 @@ impl RustMeow {
         candidates
     }
 
+    /// The "typing…" line for a chat, or None when nobody is typing there.
+    /// `group` picks the phrasing that names the member.
+    fn typing_label(&self, chat_id: &str, group: bool) -> Option<String> {
+        let indicator = self.typing_indicators.get(chat_id)?;
+        if indicator.expires_at <= Instant::now() {
+            return None;
+        }
+        let action = if indicator.recording {
+            "recording audio…"
+        } else {
+            "typing…"
+        };
+        if !group {
+            return Some(action.to_string());
+        }
+        let name = if indicator.sender_name.trim().is_empty() {
+            "Someone"
+        } else {
+            indicator.sender_name.trim()
+        };
+        Some(format!("{name} is {action}"))
+    }
+
+    /// Broadcasts the local composing state, re-signalling at most once per
+    /// TYPING_RESIGNAL window while the draft keeps changing.
+    fn signal_typing(&mut self, composing: bool) {
+        if self.store.connection != proto::ConnectionState::Connected {
+            return;
+        }
+        let Some(chat_id) = self.store.selected_chat_id.clone() else {
+            return;
+        };
+        match (&self.typing_signal, composing) {
+            (Some((signaled, at)), true)
+                if *signaled == chat_id && at.elapsed() < TYPING_RESIGNAL =>
+            {
+                return;
+            }
+            (None, false) => return,
+            (Some((signaled, _)), false) if *signaled != chat_id => {
+                self.typing_signal = None;
+                return;
+            }
+            _ => {}
+        }
+        self.typing_signal = composing.then(|| (chat_id.clone(), Instant::now()));
+        self.request(
+            rpc_request::Request::SetTyping(proto::SetTypingRequest {
+                chat_id,
+                typing: composing,
+            }),
+            PendingRequest::SetTyping,
+        );
+    }
+
     fn open_chat_info(&mut self, chat_id: String) {
         self.settings_open = false;
         self.emoji_target = None;
@@ -2081,12 +2460,24 @@ impl RustMeow {
     }
 
     fn load_selected_chat(&mut self, chat_id: String) {
+        if let Some((signaled_chat_id, _)) = self.typing_signal.take()
+            && signaled_chat_id != chat_id
+        {
+            self.request(
+                rpc_request::Request::SetTyping(proto::SetTypingRequest {
+                    chat_id: signaled_chat_id,
+                    typing: false,
+                }),
+                PendingRequest::SetTyping,
+            );
+        }
         self.message_generation = self.message_generation.wrapping_add(1);
         self.store.select_chat(chat_id.clone());
         self.emoji_target = None;
         self.reaction_details = None;
         self.image_viewer = None;
         self.chat_info = None;
+        self.mention_picker = None;
         self.scroll_to_bottom_generation = None;
         self.search_target_message_id = None;
         self.pending_search_scroll_id = None;
@@ -2249,6 +2640,15 @@ impl RustMeow {
         }
         self.store.toast_error = None;
         let reply_to_message_id = self.replying_to_message_id.clone();
+        let draft_mentions = self
+            .chat_drafts
+            .get(&chat_id)
+            .map(|draft| draft.mentions.clone())
+            .unwrap_or_default();
+        let (wire_text, mentioned_jids) = encode_mentions(&text, &draft_mentions);
+        self.mention_picker = None;
+        // Delivering the message clears the composing indicator for peers.
+        self.typing_signal = None;
         self.clear_active_draft();
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -2257,13 +2657,18 @@ impl RustMeow {
             rpc_request::Request::SendText(proto::SendTextRequest {
                 client_message_id: client_message_id.clone(),
                 chat_id,
-                text,
+                text: wire_text,
                 reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
+                mentioned_jids,
             }),
             PendingRequest::SendText {
                 chat_id: self.store.selected_chat_id.clone().unwrap_or_default(),
                 draft_text,
                 reply_to_message_id,
+                mentions: draft_mentions
+                    .iter()
+                    .map(|entry| (entry.display_name.clone(), entry.jid.clone()))
+                    .collect(),
             },
         );
     }
@@ -2720,7 +3125,23 @@ impl RustMeow {
                                             } else {
                                                 avatar.src(PathBuf::from(chat.avatar_path.clone()))
                                             };
-                                            let preview = if chat.phone_number.is_empty() {
+                                            let preview = if let Some(indicator) =
+                                                this.typing_indicators.get(&chat.id)
+                                            {
+                                                let action = if indicator.recording {
+                                                    "recording audio…"
+                                                } else {
+                                                    "typing…"
+                                                };
+                                                if indicator.sender_name.is_empty() {
+                                                    action.to_string()
+                                                } else {
+                                                    format!(
+                                                        "{} is {action}",
+                                                        indicator.sender_name
+                                                    )
+                                                }
+                                            } else if chat.phone_number.is_empty() {
                                                 chat.last_message_preview.clone()
                                             } else if chat.last_message_preview.is_empty() {
                                                 chat.phone_number.clone()
@@ -3193,7 +3614,9 @@ impl RustMeow {
             identity_parts.push(chat.push_name.clone());
         }
         identity_parts.push(connection_detail);
-        let identity_line = identity_parts.join(" · ");
+        let typing_line = self.typing_label(&chat.id, chat.kind() == proto::ChatKind::Group);
+        let header_typing = typing_line.is_some();
+        let identity_line = typing_line.unwrap_or_else(|| identity_parts.join(" · "));
         let reply_context = self.replying_to_message_id.as_deref().map(|message_id| {
             self.store.message(message_id).map_or_else(
                 || {
@@ -3273,7 +3696,15 @@ impl RustMeow {
                                         div()
                                             .truncate()
                                             .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
+                                            .text_color(if header_typing {
+                                                if dark {
+                                                    gpui::Hsla::from(rgb(0x25d366))
+                                                } else {
+                                                    gpui::Hsla::from(rgb(DARK_GREEN))
+                                                }
+                                            } else {
+                                                cx.theme().muted_foreground
+                                            })
                                             .child(identity_line),
                                     ),
                             ),
@@ -3373,6 +3804,9 @@ impl RustMeow {
             .when(self.emoji_target.is_some(), |column| {
                 column.child(self.render_emoji_picker(cx))
             })
+            .when(self.mention_popup_visible(), |column| {
+                column.child(self.render_mention_picker(cx))
+            })
             .child(
                 v_flex()
                     .border_t_1()
@@ -3460,6 +3894,65 @@ impl RustMeow {
                             ),
                     ),
             )
+    }
+
+    fn render_mention_picker(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let matches = self.mention_matches();
+        let highlighted = self
+            .mention_picker
+            .as_ref()
+            .map_or(0, |picker| picker.highlighted);
+        let selected_background = cx.theme().secondary;
+        let dark = cx.theme().mode.is_dark();
+        let hover_background = if dark { rgb(0x2a3942) } else { rgb(0xf0f2f5) };
+        v_flex()
+            .mx_3()
+            .mt_2()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .when(matches.is_empty(), |column| {
+                column.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading group members…"),
+                )
+            })
+            .children(matches.into_iter().enumerate().map(|(index, participant)| {
+                let name = mention_display_name(&participant);
+                let phone = participant.phone_number.clone();
+                h_flex()
+                    .id(("mention-row", index))
+                    .px_3()
+                    .py_2()
+                    .gap_3()
+                    .items_center()
+                    .cursor_pointer()
+                    .when(index == highlighted, |row| row.bg(selected_background))
+                    .hover(move |style| style.bg(hover_background))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.apply_mention(index, window, cx);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
+                    .when(!phone.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(phone),
+                        )
+                    })
+            }))
     }
 
     fn render_emoji_picker(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -3831,9 +4324,9 @@ impl RustMeow {
             )
     }
 
-    fn render_chat_info(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_chat_info(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let Some(state) = self.chat_info.as_ref() else {
-            return div();
+            return div().id("chat-info-backdrop");
         };
         let chat_id = state.chat_id.clone();
         let loading = state.loading;
@@ -4150,16 +4643,27 @@ impl RustMeow {
         }
 
         div()
+            .id("chat-info-backdrop")
             .absolute()
             .inset_0()
+            // Without occlusion, clicks fall through to the conversation
+            // header below, whose click target immediately reopens the pane.
+            .occlude()
             .bg(rgba(0x00000066))
             .flex()
             .justify_end()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.chat_info = None;
+                cx.notify();
+            }))
             .child(
                 v_flex()
                     .w(px(400.))
                     .max_w_full()
                     .h_full()
+                    // Occlude the backdrop so clicks inside the pane don't hit
+                    // its close-on-click handler.
+                    .occlude()
                     .bg(cx.theme().background)
                     .border_l_1()
                     .border_color(border)
@@ -4938,6 +5442,40 @@ impl Render for RustMeow {
                     cx.notify();
                     return;
                 }
+                if composer_focused && this.mention_popup_visible() {
+                    let matches_len = this.mention_matches().len();
+                    let key = event.keystroke.key.as_str();
+                    let handled = match key {
+                        "down" | "up" if matches_len > 0 => {
+                            if let Some(picker) = this.mention_picker.as_mut() {
+                                picker.highlighted = if key == "down" {
+                                    (picker.highlighted + 1) % matches_len
+                                } else {
+                                    (picker.highlighted + matches_len - 1) % matches_len
+                                };
+                            }
+                            true
+                        }
+                        "enter" | "tab" if matches_len > 0 => {
+                            let index = this
+                                .mention_picker
+                                .as_ref()
+                                .map_or(0, |picker| picker.highlighted.min(matches_len - 1));
+                            this.apply_mention(index, window, cx);
+                            true
+                        }
+                        "escape" => {
+                            this.mention_picker = None;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if handled {
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                }
                 if search_focused && this.search_query.trim().chars().count() >= 2 {
                     match event.keystroke.key.as_str() {
                         "down" => this.move_search_selection(false),
@@ -5358,6 +5896,43 @@ mod reaction_details_ui_tests {
     }
 
     #[test]
+    fn mention_token_start_detects_in_progress_tags() {
+        assert_eq!(mention_token_start("@", 1), Some(0));
+        assert_eq!(mention_token_start("hi @al", 6), Some(3));
+        assert_eq!(mention_token_start("hi @al ", 7), None); // token closed by space
+        assert_eq!(mention_token_start("email@host", 10), None); // mid-word @
+        assert_eq!(mention_token_start("no tag here", 11), None);
+        assert_eq!(mention_token_start("héllo @ñam", "héllo @ñam".len()), Some(7));
+    }
+
+    #[test]
+    fn encode_mentions_rewrites_tokens_and_drops_deleted_tags() {
+        let mentions = vec![
+            MentionEntry {
+                display_name: "Ann".into(),
+                jid: "15550001111@s.whatsapp.net".into(),
+            },
+            MentionEntry {
+                display_name: "Anna Lee".into(),
+                jid: "203635027103105@lid".into(),
+            },
+            MentionEntry {
+                display_name: "Deleted".into(),
+                jid: "15552223333@s.whatsapp.net".into(),
+            },
+        ];
+        let (wire, jids) = encode_mentions("hey @Anna Lee and @Ann!", &mentions);
+        assert_eq!(wire, "hey @203635027103105 and @15550001111!");
+        assert_eq!(
+            jids,
+            vec![
+                "203635027103105@lid".to_string(),
+                "15550001111@s.whatsapp.net".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn chat_id_merges_keep_history_and_active_draft() {
         let mut history = vec!["new".into(), "old".into(), "other".into()];
         remap_recent_chat_ids(&mut history, "old", "new");
@@ -5369,6 +5944,7 @@ mod reaction_details_ui_tests {
                 ChatDraft {
                     text: "active text".into(),
                     reply_to_message_id: Some("message".into()),
+                    mentions: Vec::new(),
                 },
             ),
             (
@@ -5376,6 +5952,7 @@ mod reaction_details_ui_tests {
                 ChatDraft {
                     text: "stale destination".into(),
                     reply_to_message_id: None,
+                    mentions: Vec::new(),
                 },
             ),
         ]);

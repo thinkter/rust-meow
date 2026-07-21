@@ -41,6 +41,7 @@ message RpcRequest {
     OpenMessageWindowRequest open_message_window = 20;
     ListMessagesAfterRequest list_messages_after = 21;
     GetChatInfoRequest get_chat_info = 22;
+    SetTypingRequest set_typing = 23;
   }
 }
 
@@ -70,6 +71,7 @@ message RpcResponse {
     OpenMessageWindowResponse open_message_window = 29;
     ListMessagesAfterResponse list_messages_after = 30;
     GetChatInfoResponse get_chat_info = 31;
+    SetTypingResponse set_typing = 32;
   }
 }
 
@@ -89,6 +91,7 @@ message BackendEvent {
     ReactionUpdated reaction_updated = 17;
     RecentReactionsRepaired recent_reactions_repaired = 18;
     ChatMerged chat_merged = 19;
+    TypingChanged typing_changed = 20;
   }
 }
 
@@ -234,6 +237,10 @@ message SendTextRequest {
   // Empty for a normal message. Otherwise this message is sent as a native
   // WhatsApp reply to the referenced message in the same chat.
   string reply_to_message_id = 4;
+  // Full JIDs of participants tagged in `text`. Each tagged participant is
+  // referenced in the text as `@<jid-user>`; WhatsApp clients render that
+  // token as the contact's name and notify the mentioned member.
+  repeated string mentioned_jids = 5;
 }
 
 message SendTextResponse {
@@ -339,6 +346,27 @@ message GetChatInfoResponse {
   uint32 disappearing_timer_seconds = 12;
   bool is_community = 13;
   bool join_approval_required = 14;
+}
+
+message SetTypingRequest {
+  string chat_id = 1;
+  // True while the user is composing; false clears the indicator for peers.
+  bool typing = 2;
+}
+message SetTypingResponse {}
+
+// A peer started or stopped typing in a chat. Indicators are transient: the
+// desktop must also expire them locally (~10s) because the terminal "paused"
+// update can be lost.
+message TypingChanged {
+  string chat_id = 1;
+  string sender_id = 2;
+  // Resolved display name of the typing member. Empty in direct chats where
+  // the chat title already names the peer.
+  string sender_name = 3;
+  bool typing = 4;
+  // True when the peer is recording a voice message rather than typing.
+  bool recording = 5;
 }
 
 message GetParticipantAvatarRequest { string participant_id = 1; }

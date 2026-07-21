@@ -132,6 +132,18 @@ func (s *Server) Emit(event wa.Event) {
 		body.Event = &bridgev1.BackendEvent_ChatUpserted{ChatUpserted: &bridgev1.ChatUpserted{Chat: s.wireChat(event.Chat)}}
 	case "chat_merge":
 		body.Event = &bridgev1.BackendEvent_ChatMerged{ChatMerged: &bridgev1.ChatMerged{OldChatId: event.OldChatJID, NewChatId: event.ChatJID}}
+	case "typing":
+		var senderName string
+		if s.wa != nil && event.SenderJID != "" {
+			details := s.wa.ContactDetails(s.ctx, event.SenderJID)
+			for _, candidate := range []string{details.ContactName, details.PushName, details.BusinessName, details.PhoneNumber} {
+				if candidate != "" {
+					senderName = candidate
+					break
+				}
+			}
+		}
+		body.Event = &bridgev1.BackendEvent_TypingChanged{TypingChanged: &bridgev1.TypingChanged{ChatId: event.ChatJID, SenderId: event.SenderJID, SenderName: senderName, Typing: event.Typing, Recording: event.Recording}}
 	case "receipt":
 		body.Event = &bridgev1.BackendEvent_ReceiptUpdated{ReceiptUpdated: &bridgev1.ReceiptUpdated{ChatId: event.ChatJID, MessageId: event.MessageID, Status: wireStatus(event.Status)}}
 	case "problem":
@@ -217,7 +229,7 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		}
 		for i := range page.Items {
 			item := page.Items[i]
-			chats[i] = wireChatWithPresentation(item, presentations[item.JID])
+			chats[i] = s.resolveChatMentions(wireChatWithPresentation(item, presentations[item.JID]))
 			if s.wa != nil && item.Name == "" {
 				if jid, jidErr := types.ParseJID(item.AddressJID); jidErr == nil && jid.Server == types.GroupServer {
 					s.wa.BackfillGroupName(item.JID, item.AddressJID)
@@ -301,6 +313,14 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, fail("invalid_argument", err.Error(), false)
 		}
 		return &bridgev1.RpcResponse_OpenContact{OpenContact: &bridgev1.OpenContactResponse{Chat: s.wireChat(chat)}}, nil
+	case *bridgev1.RpcRequest_SetTyping:
+		if req.SetTyping.GetChatId() == "" {
+			return nil, fail("invalid_argument", "chat_id is required", false)
+		}
+		if err := s.wa.SetTyping(s.ctx, req.SetTyping.GetChatId(), req.SetTyping.GetTyping()); err != nil {
+			return nil, fail("typing_unavailable", err.Error(), true)
+		}
+		return &bridgev1.RpcResponse_SetTyping{SetTyping: &bridgev1.SetTypingResponse{}}, nil
 	case *bridgev1.RpcRequest_GetChatInfo:
 		if req.GetChatInfo.GetChatId() == "" {
 			return nil, fail("invalid_argument", "chat_id is required", false)
@@ -376,7 +396,7 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		if !s.wa.IsConnected() {
 			return nil, fail("not_connected", "WhatsApp is not connected", true)
 		}
-		message, err := s.wa.SendText(s.ctx, req.SendText.GetClientMessageId(), req.SendText.GetChatId(), req.SendText.GetText(), req.SendText.GetReplyToMessageId())
+		message, err := s.wa.SendText(s.ctx, req.SendText.GetClientMessageId(), req.SendText.GetChatId(), req.SendText.GetText(), req.SendText.GetReplyToMessageId(), req.SendText.GetMentionedJids())
 		if err != nil {
 			return nil, err
 		}
@@ -598,6 +618,8 @@ func success(result any) *bridgev1.RpcResponse {
 		response.Result = value
 	case *bridgev1.RpcResponse_GetChatInfo:
 		response.Result = value
+	case *bridgev1.RpcResponse_SetTyping:
+		response.Result = value
 	case *bridgev1.RpcResponse_MarkRead:
 		response.Result = value
 	case *bridgev1.RpcResponse_Logout:
@@ -637,7 +659,14 @@ func (s *Server) wireChat(c domain.Chat) *bridgev1.Chat {
 		}
 	}
 	details, cachedAvatar := s.wa.ChatPresentation(s.ctx, c.JID)
-	return wireChatWithPresentation(c, wa.ChatPresentation{Details: details, AvatarPath: cachedAvatar})
+	return s.resolveChatMentions(wireChatWithPresentation(c, wa.ChatPresentation{Details: details, AvatarPath: cachedAvatar}))
+}
+
+// resolveChatMentions rewrites raw @user tokens in the last-message preview to
+// contact names, mirroring what wireMessageWithIdentities does for bodies.
+func (s *Server) resolveChatMentions(chat *bridgev1.Chat) *bridgev1.Chat {
+	chat.LastMessagePreview = replaceMentionIDs(chat.LastMessagePreview, func(user string) string { return s.mentionDisplayName(user) })
+	return chat
 }
 
 func wireChatWithPresentation(c domain.Chat, presentation wa.ChatPresentation) *bridgev1.Chat {
