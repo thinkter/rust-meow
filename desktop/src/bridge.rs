@@ -12,7 +12,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -395,6 +395,70 @@ fn fake_loop(
                 rpc_response::Result::GetParticipantAvatar(proto::GetParticipantAvatarResponse {
                     participant_id: request.participant_id,
                     avatar_path: String::new(),
+                })
+            }
+            Some(rpc_request::Request::GetChatInfo(request)) => {
+                let id = request
+                    .chat_id
+                    .strip_prefix("chat-")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let chat = fake_chat(id);
+                let group = chat.kind == proto::ChatKind::Group as i32;
+                let participants: Vec<proto::ChatParticipant> = if group {
+                    (0..12)
+                        .map(|index| proto::ChatParticipant {
+                            participant_id: format!("1555{index:07}@s.whatsapp.net"),
+                            display_name: format!("Meow friend {index}"),
+                            phone_number: format!("+1555{index:07}"),
+                            is_admin: index < 2,
+                            is_super_admin: index == 0,
+                            is_me: index == 3,
+                            ..Default::default()
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                rpc_response::Result::GetChatInfo(proto::GetChatInfoResponse {
+                    address: if group {
+                        format!("1234567890-{id}@g.us")
+                    } else {
+                        format!("1555{id:07}@s.whatsapp.net")
+                    },
+                    about: if group {
+                        String::new()
+                    } else {
+                        "Hey there! I am using Rust Meow.".into()
+                    },
+                    verified_name: if !group && id.is_multiple_of(3) {
+                        format!("Meow Business {id}")
+                    } else {
+                        String::new()
+                    },
+                    description: if group {
+                        format!("Planning the weekend, one message at a time. Group {id}.")
+                    } else {
+                        String::new()
+                    },
+                    created_at_ms: if group { 1_712_345_678_000 } else { 0 },
+                    created_by: if group {
+                        "Meow friend 0".into()
+                    } else {
+                        String::new()
+                    },
+                    participant_count: participants.len() as u32,
+                    participants,
+                    announce_only: group && id.is_multiple_of(10),
+                    locked: group && id.is_multiple_of(15),
+                    disappearing_timer_seconds: if group && id.is_multiple_of(20) {
+                        7 * 24 * 3600
+                    } else {
+                        0
+                    },
+                    is_community: false,
+                    join_approval_required: group && id.is_multiple_of(25),
+                    chat: Some(chat),
                 })
             }
             Some(rpc_request::Request::SendText(request)) => {

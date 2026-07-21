@@ -56,6 +56,9 @@ pub enum PendingRequest {
     ParticipantAvatar {
         participant_id: String,
     },
+    ChatInfo {
+        chat_id: String,
+    },
     SendText {
         chat_id: String,
         draft_text: String,
@@ -101,6 +104,7 @@ impl PendingRequest {
             | Self::MessagesAfter { .. }
             | Self::Avatar { .. }
             | Self::ParticipantAvatar { .. }
+            | Self::ChatInfo { .. }
             | Self::MessageImage { .. } => READ_REQUEST_TIMEOUT,
             Self::Pairing
             | Self::SendText { .. }

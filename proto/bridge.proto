@@ -40,6 +40,7 @@ message RpcRequest {
     SendStickerRequest send_sticker = 19;
     OpenMessageWindowRequest open_message_window = 20;
     ListMessagesAfterRequest list_messages_after = 21;
+    GetChatInfoRequest get_chat_info = 22;
   }
 }
 
@@ -68,6 +69,7 @@ message RpcResponse {
     SendStickerResponse send_sticker = 28;
     OpenMessageWindowResponse open_message_window = 29;
     ListMessagesAfterResponse list_messages_after = 30;
+    GetChatInfoResponse get_chat_info = 31;
   }
 }
 
@@ -300,6 +302,43 @@ message SendReactionRequest {
 message SendReactionResponse {
   Reaction reaction = 1;
   bool removed = 2;
+}
+
+message GetChatInfoRequest { string chat_id = 1; }
+
+message ChatParticipant {
+  // Address accepted by GetParticipantAvatarRequest for this member.
+  string participant_id = 1;
+  string display_name = 2;
+  string phone_number = 3;
+  bool is_admin = 4;
+  bool is_super_admin = 5;
+  bool is_me = 6;
+}
+
+message GetChatInfoResponse {
+  // Refreshed chat row (title, avatar, flags) for the requested conversation.
+  Chat chat = 1;
+  // Transport address, e.g. 12345@s.whatsapp.net or 1234-567@g.us.
+  string address = 2;
+
+  // Direct chats. Empty when the peer's privacy settings hide them.
+  string about = 3;
+  string verified_name = 4;
+
+  // Groups.
+  string description = 5;
+  int64 created_at_ms = 6;
+  string created_by = 7;
+  uint32 participant_count = 8;
+  repeated ChatParticipant participants = 9;
+  // Only admins may send messages.
+  bool announce_only = 10;
+  // Only admins may edit the group's subject and description.
+  bool locked = 11;
+  uint32 disappearing_timer_seconds = 12;
+  bool is_community = 13;
+  bool join_approval_required = 14;
 }
 
 message GetParticipantAvatarRequest { string participant_id = 1; }

@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
@@ -38,6 +39,7 @@ import (
 	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	_ "modernc.org/sqlite"
 )
 
@@ -336,6 +338,199 @@ func (c *Client) ChatPresentations(ctx context.Context, chatIDs []string) (map[s
 		presentations[item.chatID] = presentation
 	}
 	return presentations, nil
+}
+
+type ChatParticipant struct {
+	ID           string
+	DisplayName  string
+	PhoneNumber  string
+	IsAdmin      bool
+	IsSuperAdmin bool
+	IsMe         bool
+}
+
+type ChatInfo struct {
+	Address              string
+	About                string
+	VerifiedName         string
+	Description          string
+	CreatedAt            time.Time
+	CreatedBy            string
+	ParticipantCount     int
+	Participants         []ChatParticipant
+	AnnounceOnly         bool
+	Locked               bool
+	DisappearingTimer    uint32
+	IsCommunity          bool
+	JoinApprovalRequired bool
+}
+
+// ChatInfo resolves the rich metadata behind the desktop's chat info pane.
+// Group facts come live from the server; contact facts come from the local
+// contact store plus a best-effort about/verified-name lookup.
+func (c *Client) ChatInfo(ctx context.Context, chatID string) (ChatInfo, error) {
+	addresses, err := c.store.ConversationAddresses(ctx, chatID)
+	if err != nil {
+		return ChatInfo{}, err
+	}
+	jids := explicitIdentityJIDs(addresses...)
+	if len(jids) == 0 {
+		return ChatInfo{}, fmt.Errorf("chat %s has no resolvable address", chatID)
+	}
+	if jids[0].Server == types.GroupServer {
+		return c.groupChatInfo(ctx, jids[0])
+	}
+	return c.directChatInfo(ctx, jids), nil
+}
+
+func (c *Client) directChatInfo(ctx context.Context, jids []types.JID) ChatInfo {
+	info := ChatInfo{Address: jids[0].String()}
+	lookup := make([]types.JID, 0, len(jids))
+	for _, jid := range jids {
+		if jid.Server == types.DefaultUserServer {
+			lookup = append(lookup, jid)
+		}
+	}
+	if len(lookup) > 0 {
+		info.Address = lookup[0].String()
+	} else {
+		lookup = jids[:1]
+	}
+	if c.wa == nil || !c.wa.IsConnected() {
+		return info
+	}
+	// The about text and verified business name are server-side and may be
+	// hidden by the peer's privacy settings; absence is not an error.
+	users, err := c.wa.GetUserInfo(ctx, lookup)
+	if err != nil {
+		c.log.Warn("chat info user lookup", "jid", info.Address, "error", err)
+		return info
+	}
+	for _, user := range users {
+		if info.About == "" {
+			info.About = user.Status
+		}
+		if info.VerifiedName == "" && user.VerifiedName != nil && user.VerifiedName.Details != nil {
+			info.VerifiedName = user.VerifiedName.Details.GetVerifiedName()
+		}
+	}
+	return info
+}
+
+func (c *Client) groupChatInfo(ctx context.Context, jid types.JID) (ChatInfo, error) {
+	info := ChatInfo{Address: jid.String()}
+	if c.wa == nil {
+		return info, fmt.Errorf("whatsapp client is not ready")
+	}
+	group, err := c.wa.GetGroupInfo(ctx, jid)
+	if err != nil {
+		return info, err
+	}
+	info.Description = group.Topic
+	info.CreatedAt = group.GroupCreated
+	info.AnnounceOnly = group.IsAnnounce
+	info.Locked = group.IsLocked
+	if group.IsEphemeral {
+		info.DisappearingTimer = group.DisappearingTimer
+	}
+	info.IsCommunity = group.IsParent
+	info.JoinApprovalRequired = group.IsJoinApprovalRequired
+
+	contacts := map[types.JID]types.ContactInfo{}
+	if c.wa.Store != nil {
+		if all, contactsErr := c.wa.Store.Contacts.GetAllContacts(ctx); contactsErr == nil {
+			contacts = all
+		}
+	}
+	own := make(map[string]bool, 2)
+	if c.wa.Store != nil && c.wa.Store.ID != nil {
+		own[c.wa.Store.ID.ToNonAD().String()] = true
+	}
+	if c.wa.Store != nil && !c.wa.Store.LID.IsEmpty() {
+		own[c.wa.Store.LID.ToNonAD().String()] = true
+	}
+
+	if creator := groupMemberCandidates(group.OwnerJID, group.OwnerPN); len(creator) > 0 {
+		details := contactDetailsFromMap(creator, contacts)
+		info.CreatedBy = firstNonEmpty(
+			details.ContactName,
+			details.PushName,
+			details.BusinessName,
+			details.PhoneNumber,
+		)
+	}
+
+	participants := make([]ChatParticipant, 0, len(group.Participants))
+	for _, member := range group.Participants {
+		candidates := groupMemberCandidates(member.JID, member.PhoneNumber, member.LID)
+		if len(candidates) == 0 {
+			continue
+		}
+		details := contactDetailsFromMap(candidates, contacts)
+		participant := ChatParticipant{
+			ID:           candidates[0].String(),
+			PhoneNumber:  details.PhoneNumber,
+			IsAdmin:      member.IsAdmin || member.IsSuperAdmin,
+			IsSuperAdmin: member.IsSuperAdmin,
+		}
+		for _, candidate := range candidates {
+			if own[candidate.String()] {
+				participant.IsMe = true
+				break
+			}
+		}
+		participant.DisplayName = firstNonEmpty(
+			details.ContactName,
+			details.PushName,
+			details.BusinessName,
+			member.DisplayName,
+			participant.PhoneNumber,
+			candidates[0].User,
+		)
+		participants = append(participants, participant)
+	}
+	sort.SliceStable(participants, func(i, j int) bool {
+		left, right := participants[i], participants[j]
+		if left.IsMe != right.IsMe {
+			return left.IsMe
+		}
+		if left.IsSuperAdmin != right.IsSuperAdmin {
+			return left.IsSuperAdmin
+		}
+		if left.IsAdmin != right.IsAdmin {
+			return left.IsAdmin
+		}
+		return strings.ToLower(left.DisplayName) < strings.ToLower(right.DisplayName)
+	})
+	info.Participants = participants
+	info.ParticipantCount = group.ParticipantCount
+	if info.ParticipantCount < len(participants) {
+		info.ParticipantCount = len(participants)
+	}
+	return info, nil
+}
+
+func groupMemberCandidates(jids ...types.JID) []types.JID {
+	candidates := make([]types.JID, 0, len(jids))
+	seen := make(map[string]bool, len(jids))
+	for _, jid := range jids {
+		jid = jid.ToNonAD()
+		if jid.IsEmpty() || seen[jid.String()] {
+			continue
+		}
+		seen[jid.String()] = true
+		candidates = append(candidates, jid)
+	}
+	return candidates
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (c *Client) contactDetailsForAddresses(ctx context.Context, rawJIDs ...string) ContactDetails {
@@ -2063,11 +2258,7 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 		}
 		return
 	}
-	protocol := evt.Message.GetProtocolMessage()
-	if protocol == nil {
-		protocol = evt.RawMessage.GetProtocolMessage()
-	}
-	if protocol != nil && protocol.GetType() == waE2E.ProtocolMessage_PEER_DATA_OPERATION_REQUEST_RESPONSE_MESSAGE {
+	if passiveMessage(evt.Message) {
 		return
 	}
 	m := domainMessage(evt, chatID, transportJID)
@@ -2151,13 +2342,48 @@ func (c *Client) historyAggregateReactions(evt *events.Message) []domain.Reactio
 }
 
 func domainMessage(evt *events.Message, chatID, transportJID string) domain.Message {
+	protocol := evt.RawMessage.GetProtocolMessage()
+	if protocol == nil {
+		protocol = evt.Message.GetProtocolMessage()
+	}
+	// Edits arrive as a ProtocolMessage wrapper; the replacement content lives
+	// inside it and would otherwise decode as an empty (unsupported) message.
+	content := evt.Message
+	if evt.IsEdit && protocol.GetEditedMessage() != nil {
+		content = protocol.GetEditedMessage()
+	}
+	decoded := extractMessageContent(content, evt.Info.Type)
+	m := domain.Message{ID: string(evt.Info.ID), ChatJID: chatID, TransportJID: transportJID, SenderJID: evt.Info.Sender.ToNonAD().String(), Text: decoded.text, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe, Status: domain.StatusDelivered, Kind: decoded.kind, ReplyToID: messageContextInfo(content).GetStanzaID(), Image: decoded.image, Attachment: decoded.attachment, Contacts: decoded.contacts, Location: decoded.location}
+	if evt.IsEdit && protocol != nil && protocol.GetKey().GetID() != "" {
+		m.ID = protocol.GetKey().GetID()
+		m.EditedAt = time.UnixMilli(protocol.GetTimestampMS())
+	}
+	if protocol != nil && protocol.GetType() == waE2E.ProtocolMessage_REVOKE && protocol.GetKey().GetID() != "" {
+		m.ID = protocol.GetKey().GetID()
+		m.Text = "Message deleted"
+		m.Kind = "revoked"
+		m.Revoked = true
+		m.EditedAt = evt.Info.Timestamp
+	}
+	return m
+}
+
+type messageContent struct {
+	kind, text string
+	image      *domain.Image
+	attachment *domain.Attachment
+	contacts   []domain.Contact
+	location   *domain.Location
+}
+
+func extractMessageContent(message *waE2E.Message, infoType string) messageContent {
 	var imageInfo *domain.Image
 	var attachment *domain.Attachment
 	var contacts []domain.Contact
 	var location *domain.Location
 	text := ""
 	kind := "text"
-	if imageMessage := evt.Message.GetImageMessage(); imageMessage != nil {
+	if imageMessage := message.GetImageMessage(); imageMessage != nil {
 		kind = "image"
 		text = imageMessage.GetCaption()
 		if text == "" {
@@ -2166,12 +2392,12 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 		imageInfo = &domain.Image{Caption: imageMessage.GetCaption(), MIMEType: imageMessage.GetMimetype(), DirectPath: imageMessage.GetDirectPath(),
 			MediaKey: imageMessage.GetMediaKey(), FileSHA256: imageMessage.GetFileSHA256(), FileEncSHA256: imageMessage.GetFileEncSHA256(),
 			Width: imageMessage.GetWidth(), Height: imageMessage.GetHeight(), FileSize: imageMessage.GetFileLength()}
-	} else if sticker := evt.Message.GetStickerMessage(); sticker != nil {
+	} else if sticker := message.GetStickerMessage(); sticker != nil {
 		kind, text = "sticker", "Sticker"
 		imageInfo = &domain.Image{MIMEType: sticker.GetMimetype(), DirectPath: sticker.GetDirectPath(), MediaKey: sticker.GetMediaKey(),
 			FileSHA256: sticker.GetFileSHA256(), FileEncSHA256: sticker.GetFileEncSHA256(), Width: sticker.GetWidth(), Height: sticker.GetHeight(),
 			FileSize: sticker.GetFileLength(), Animated: sticker.GetIsAnimated() || sticker.GetIsLottie()}
-	} else if video := messageVideo(evt.Message); video != nil {
+	} else if video := messageVideo(message); video != nil {
 		kind, text = "video", video.GetCaption()
 		if text == "" {
 			text = "🎬 Video"
@@ -2179,7 +2405,7 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 		attachment = &domain.Attachment{Caption: video.GetCaption(), MIMEType: video.GetMimetype(), DirectPath: video.GetDirectPath(), MediaKey: video.GetMediaKey(),
 			FileSHA256: video.GetFileSHA256(), FileEncSHA256: video.GetFileEncSHA256(), Width: video.GetWidth(), Height: video.GetHeight(),
 			FileSize: video.GetFileLength(), DurationSeconds: video.GetSeconds(), Animated: video.GetGifPlayback()}
-	} else if audio := evt.Message.GetAudioMessage(); audio != nil {
+	} else if audio := message.GetAudioMessage(); audio != nil {
 		kind = "audio"
 		if audio.GetPTT() {
 			text = "🎤 Voice message"
@@ -2189,7 +2415,7 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 		attachment = &domain.Attachment{MIMEType: audio.GetMimetype(), DirectPath: audio.GetDirectPath(), MediaKey: audio.GetMediaKey(),
 			FileSHA256: audio.GetFileSHA256(), FileEncSHA256: audio.GetFileEncSHA256(), FileSize: audio.GetFileLength(),
 			DurationSeconds: audio.GetSeconds(), VoiceNote: audio.GetPTT()}
-	} else if document := messageDocument(evt.Message); document != nil {
+	} else if document := messageDocument(message); document != nil {
 		kind, text = "document", document.GetCaption()
 		if text == "" {
 			text = document.GetFileName()
@@ -2203,13 +2429,13 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 		attachment = &domain.Attachment{Caption: document.GetCaption(), MIMEType: document.GetMimetype(), FileName: document.GetFileName(),
 			DirectPath: document.GetDirectPath(), MediaKey: document.GetMediaKey(), FileSHA256: document.GetFileSHA256(),
 			FileEncSHA256: document.GetFileEncSHA256(), FileSize: document.GetFileLength()}
-	} else if contact := evt.Message.GetContactMessage(); contact != nil {
+	} else if contact := message.GetContactMessage(); contact != nil {
 		kind, text = "contact", contact.GetDisplayName()
 		if text == "" {
 			text = "Contact"
 		}
 		contacts = []domain.Contact{{DisplayName: contact.GetDisplayName(), VCard: contact.GetVcard()}}
-	} else if contactArray := evt.Message.GetContactsArrayMessage(); contactArray != nil {
+	} else if contactArray := message.GetContactsArrayMessage(); contactArray != nil {
 		kind, text = "contacts", contactArray.GetDisplayName()
 		if text == "" {
 			text = fmt.Sprintf("%d contacts", len(contactArray.GetContacts()))
@@ -2220,7 +2446,7 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 				contacts = append(contacts, domain.Contact{DisplayName: contact.GetDisplayName(), VCard: contact.GetVcard()})
 			}
 		}
-	} else if rawLocation := evt.Message.GetLocationMessage(); rawLocation != nil {
+	} else if rawLocation := message.GetLocationMessage(); rawLocation != nil {
 		kind, text = "location", rawLocation.GetName()
 		if text == "" {
 			text = rawLocation.GetAddress()
@@ -2230,39 +2456,329 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 		}
 		location = &domain.Location{Latitude: rawLocation.GetDegreesLatitude(), Longitude: rawLocation.GetDegreesLongitude(), Name: rawLocation.GetName(),
 			Address: rawLocation.GetAddress(), URL: rawLocation.GetURL(), Live: rawLocation.GetIsLive()}
-	} else if liveLocation := evt.Message.GetLiveLocationMessage(); liveLocation != nil {
+	} else if liveLocation := message.GetLiveLocationMessage(); liveLocation != nil {
 		kind, text = "location", liveLocation.GetCaption()
 		if text == "" {
 			text = "📍 Live location"
 		}
 		location = &domain.Location{Latitude: liveLocation.GetDegreesLatitude(), Longitude: liveLocation.GetDegreesLongitude(), Name: liveLocation.GetCaption(), Live: true}
+	} else if poll := messagePoll(message); poll != nil {
+		kind, text = "poll", pollText(poll)
+	} else if snapshot := messagePollResultSnapshot(message); snapshot != nil {
+		kind, text = "poll", joinNonEmpty(": ", "📊 Poll results", snapshot.GetName())
+	} else if invite := message.GetGroupInviteMessage(); invite != nil {
+		kind = "group_invite"
+		text = joinNonEmpty(": ", "👥 Group invite", invite.GetGroupName())
+		text = joinNonEmpty("\n", text, invite.GetCaption())
+	} else if event := message.GetEventMessage(); event != nil {
+		kind = "event"
+		text = joinNonEmpty(": ", "📅 Event", event.GetName())
+		if event.GetIsCanceled() {
+			text += " (canceled)"
+		}
+		text = joinNonEmpty("\n", text, event.GetDescription())
+	} else if eventInvite := message.GetEventInviteMessage(); eventInvite != nil {
+		kind = "event"
+		text = joinNonEmpty(": ", "📅 Event invite", eventInvite.GetEventTitle())
+		text = joinNonEmpty("\n", text, eventInvite.GetCaption())
+	} else if buttons := message.GetButtonsMessage(); buttons != nil {
+		kind = "interactive"
+		text = firstNonEmpty(buttons.GetContentText(), buttons.GetFooterText(), "Interactive message")
+	} else if buttonsResponse := message.GetButtonsResponseMessage(); buttonsResponse != nil {
+		kind = "interactive"
+		text = firstNonEmpty(buttonsResponse.GetSelectedDisplayText(), "Button reply")
+	} else if list := message.GetListMessage(); list != nil {
+		kind = "interactive"
+		text = firstNonEmpty(joinNonEmpty("\n", list.GetTitle(), list.GetDescription()), "List message")
+	} else if listResponse := message.GetListResponseMessage(); listResponse != nil {
+		kind = "interactive"
+		text = firstNonEmpty(listResponse.GetTitle(), "List reply")
+	} else if template := message.GetTemplateMessage(); template != nil {
+		kind = "interactive"
+		hydrated := template.GetHydratedTemplate()
+		text = firstNonEmpty(hydrated.GetHydratedContentText(), hydrated.GetHydratedFooterText(), "Template message")
+	} else if templateReply := message.GetTemplateButtonReplyMessage(); templateReply != nil {
+		kind = "interactive"
+		text = firstNonEmpty(templateReply.GetSelectedDisplayText(), "Button reply")
+	} else if interactive := message.GetInteractiveMessage(); interactive != nil {
+		kind = "interactive"
+		text = firstNonEmpty(joinNonEmpty("\n", interactive.GetHeader().GetTitle(), interactive.GetBody().GetText()), "Interactive message")
+	} else if interactiveResponse := message.GetInteractiveResponseMessage(); interactiveResponse != nil {
+		kind = "interactive"
+		text = firstNonEmpty(interactiveResponse.GetBody().GetText(), "Interactive reply")
+	} else if product := message.GetProductMessage(); product != nil {
+		kind = "product"
+		text = joinNonEmpty(": ", "🛍️ Product", product.GetProduct().GetTitle())
+		text = joinNonEmpty("\n", text, product.GetBody())
+	} else if order := message.GetOrderMessage(); order != nil {
+		kind = "order"
+		text = joinNonEmpty(": ", "🛒 Order", order.GetOrderTitle())
+		if count := order.GetItemCount(); count > 0 {
+			text += fmt.Sprintf(" (%d items)", count)
+		}
+		text = joinNonEmpty("\n", text, order.GetMessage())
+	} else if invoice := message.GetInvoiceMessage(); invoice != nil {
+		kind, text = "payment", joinNonEmpty(": ", "🧾 Invoice", invoice.GetNote())
+	} else if payment := message.GetSendPaymentMessage(); payment != nil {
+		kind, text = "payment", joinNonEmpty("\n", "💸 Payment", messageInlineText(payment.GetNoteMessage()))
+	} else if request := message.GetRequestPaymentMessage(); request != nil {
+		kind = "payment"
+		text = "💸 Payment request"
+		if request.GetAmount1000() > 0 {
+			text = fmt.Sprintf("%s: %s %.2f", text, request.GetCurrencyCodeIso4217(), float64(request.GetAmount1000())/1000)
+		}
+		text = joinNonEmpty("\n", text, messageInlineText(request.GetNoteMessage()))
+	} else if message.GetDeclinePaymentRequestMessage() != nil {
+		kind, text = "payment", "💸 Payment request declined"
+	} else if message.GetCancelPaymentRequestMessage() != nil {
+		kind, text = "payment", "💸 Payment request cancelled"
+	} else if message.GetPaymentInviteMessage() != nil {
+		kind, text = "payment", "💸 Payment invite"
+	} else if message.GetPaymentReminderMessage() != nil {
+		kind, text = "payment", "💸 Payment reminder"
+	} else if message.GetSplitPaymentMessage() != nil {
+		kind, text = "payment", "💸 Split payment"
+	} else if message.GetSplitPaymentUpdateMessage() != nil {
+		kind, text = "payment", "💸 Split payment update"
+	} else if callLog := message.GetCallLogMesssage(); callLog != nil {
+		kind, text = "call", callLogText(callLog)
+	} else if scheduledCall := message.GetScheduledCallCreationMessage(); scheduledCall != nil {
+		kind, text = "call", joinNonEmpty(": ", "📞 Call scheduled", scheduledCall.GetTitle())
+	} else if scheduledCallEdit := message.GetScheduledCallEditMessage(); scheduledCallEdit != nil {
+		kind, text = "call", "📞 Scheduled call updated"
+	} else if message.GetBcallMessage() != nil {
+		kind, text = "call", "📞 Call"
+	} else if pin := message.GetPinInChatMessage(); pin != nil {
+		kind = "pin"
+		if pin.GetType() == waE2E.PinInChatMessage_UNPIN_FOR_ALL {
+			text = "📌 Unpinned a message"
+		} else {
+			text = "📌 Pinned a message"
+		}
+	} else if keep := message.GetKeepInChatMessage(); keep != nil {
+		kind = "pin"
+		if keep.GetKeepType() == waE2E.KeepType_UNDO_KEEP_FOR_ALL {
+			text = "Removed a message from kept messages"
+		} else {
+			text = "Kept a message in chat"
+		}
+	} else if comment := message.GetCommentMessage(); comment != nil {
+		inner := extractMessageContent(comment.GetMessage(), infoType)
+		inner.kind = "comment"
+		return inner
+	} else if newsletterInvite := message.GetNewsletterAdminInviteMessage(); newsletterInvite != nil {
+		kind = "newsletter"
+		text = joinNonEmpty(": ", "📰 Newsletter admin invite", newsletterInvite.GetNewsletterName())
+		text = joinNonEmpty("\n", text, newsletterInvite.GetCaption())
+	} else if message.GetNewsletterFollowerInviteMessageV2() != nil {
+		kind, text = "newsletter", "📰 Newsletter invite"
+	} else if album := message.GetAlbumMessage(); album != nil {
+		kind, text = "album", albumText(album)
+	} else if pack := message.GetStickerPackMessage(); pack != nil {
+		kind, text = "sticker_pack", joinNonEmpty(": ", "🎨 Sticker pack", pack.GetName())
+	} else if message.GetRequestPhoneNumberMessage() != nil {
+		kind, text = "text", "📱 Requested a phone number"
+	} else if protocolMessage := message.GetProtocolMessage(); protocolMessage != nil && protocolMessage.GetType() == waE2E.ProtocolMessage_EPHEMERAL_SETTING {
+		kind, text = "ephemeral_setting", ephemeralSettingText(protocolMessage.GetEphemeralExpiration())
 	} else {
-		text = evt.Message.GetConversation()
+		text = messageInlineText(message)
 		if text == "" {
-			text = evt.Message.GetExtendedTextMessage().GetText()
-		}
-		if text == "" {
-			kind = evt.Info.Type
-			text = "Unsupported message"
+			kind, text = fallbackMessageContent(message, infoType)
 		}
 	}
-	m := domain.Message{ID: string(evt.Info.ID), ChatJID: chatID, TransportJID: transportJID, SenderJID: evt.Info.Sender.ToNonAD().String(), Text: text, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe, Status: domain.StatusDelivered, Kind: kind, ReplyToID: messageContextInfo(evt.Message).GetStanzaID(), Image: imageInfo, Attachment: attachment, Contacts: contacts, Location: location}
-	protocol := evt.RawMessage.GetProtocolMessage()
-	if protocol == nil {
-		protocol = evt.Message.GetProtocolMessage()
+	return messageContent{kind: kind, text: text, image: imageInfo, attachment: attachment, contacts: contacts, location: location}
+}
+
+// messagePoll returns the poll payload regardless of which versioned field
+// WhatsApp used to send it.
+func messagePoll(message *waE2E.Message) *waE2E.PollCreationMessage {
+	for _, poll := range []*waE2E.PollCreationMessage{
+		message.GetPollCreationMessage(), message.GetPollCreationMessageV2(), message.GetPollCreationMessageV3(),
+		message.GetPollCreationMessageV5(), message.GetPollCreationMessageV6(),
+	} {
+		if poll != nil {
+			return poll
+		}
 	}
-	if evt.IsEdit && protocol != nil && protocol.GetKey().GetID() != "" {
-		m.ID = protocol.GetKey().GetID()
-		m.EditedAt = time.UnixMilli(protocol.GetTimestampMS())
+	if wrapped := message.GetPollCreationMessageV4().GetMessage(); wrapped != nil {
+		return messagePoll(wrapped)
 	}
-	if protocol != nil && protocol.GetType() == waE2E.ProtocolMessage_REVOKE && protocol.GetKey().GetID() != "" {
-		m.ID = protocol.GetKey().GetID()
-		m.Text = "Message deleted"
-		m.Kind = "revoked"
-		m.Revoked = true
-		m.EditedAt = evt.Info.Timestamp
+	return nil
+}
+
+func messagePollResultSnapshot(message *waE2E.Message) *waE2E.PollResultSnapshotMessage {
+	if snapshot := message.GetPollResultSnapshotMessage(); snapshot != nil {
+		return snapshot
 	}
-	return m
+	return message.GetPollResultSnapshotMessageV3()
+}
+
+func pollText(poll *waE2E.PollCreationMessage) string {
+	var b strings.Builder
+	b.WriteString(joinNonEmpty(": ", "📊 Poll", poll.GetName()))
+	for _, option := range poll.GetOptions() {
+		if option.GetOptionName() != "" {
+			b.WriteString("\n• ")
+			b.WriteString(option.GetOptionName())
+		}
+	}
+	return b.String()
+}
+
+func callLogText(callLog *waE2E.CallLogMessage) string {
+	text := "📞 Call"
+	if callLog.GetIsVideo() {
+		text = "📹 Video call"
+	}
+	switch callLog.GetCallOutcome() {
+	case waE2E.CallLogMessage_MISSED:
+		text = "Missed " + strings.ToLower(strings.TrimLeft(text, "📞📹 "))
+	case waE2E.CallLogMessage_REJECTED:
+		text += " (declined)"
+	}
+	if seconds := callLog.GetDurationSecs(); seconds > 0 {
+		text += fmt.Sprintf(" (%s)", (time.Duration(seconds) * time.Second).String())
+	}
+	return text
+}
+
+func albumText(album *waE2E.AlbumMessage) string {
+	total := album.GetExpectedImageCount() + album.GetExpectedVideoCount()
+	if total > 0 {
+		return fmt.Sprintf("🖼️ Album (%d items)", total)
+	}
+	return "🖼️ Album"
+}
+
+func ephemeralSettingText(seconds uint32) string {
+	if seconds == 0 {
+		return "⏳ Disappearing messages turned off"
+	}
+	duration := time.Duration(seconds) * time.Second
+	switch {
+	case duration >= 24*time.Hour:
+		days := int(duration / (24 * time.Hour))
+		if days == 1 {
+			return "⏳ Disappearing messages set to 1 day"
+		}
+		return fmt.Sprintf("⏳ Disappearing messages set to %d days", days)
+	case duration >= time.Hour:
+		return fmt.Sprintf("⏳ Disappearing messages set to %d hours", int(duration/time.Hour))
+	default:
+		return fmt.Sprintf("⏳ Disappearing messages set to %d minutes", int(duration/time.Minute))
+	}
+}
+
+// messageInlineText pulls plain text out of a message without triggering any
+// of the richer content decoding.
+func messageInlineText(message *waE2E.Message) string {
+	if message == nil {
+		return ""
+	}
+	if text := message.GetConversation(); text != "" {
+		return text
+	}
+	return message.GetExtendedTextMessage().GetText()
+}
+
+func joinNonEmpty(separator string, values ...string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, separator)
+}
+
+// fallbackMessageContent derives a human-readable label from whichever payload
+// field is populated, so message types this bridge has no bespoke rendering
+// for still show what they are instead of a generic error.
+func fallbackMessageContent(message *waE2E.Message, infoType string) (string, string) {
+	name := messageContentFieldName(message)
+	if name == "" {
+		kind := infoType
+		if kind == "" {
+			kind = "unknown"
+		}
+		return kind, "Message"
+	}
+	label := humanizeMessageField(name)
+	return strings.ReplaceAll(strings.ToLower(label), " ", "_"), label
+}
+
+// messageContentFieldName returns the proto field name of the first populated
+// content payload, skipping fields that only carry signal/keying data.
+func messageContentFieldName(message *waE2E.Message) string {
+	if message == nil {
+		return ""
+	}
+	name := ""
+	message.ProtoReflect().Range(func(descriptor protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		if descriptor.Kind() != protoreflect.MessageKind {
+			return true
+		}
+		switch descriptor.Name() {
+		case "senderKeyDistributionMessage", "fastRatchetKeySenderKeyDistributionMessage", "messageContextInfo", "deviceSentMessage":
+			return true
+		}
+		name = string(descriptor.Name())
+		return false
+	})
+	return name
+}
+
+// humanizeMessageField turns a proto field name like "pollResultSnapshotMessageV3"
+// into "Poll result snapshot".
+func humanizeMessageField(name string) string {
+	trimmed := strings.TrimRight(name, "0123456789")
+	trimmed = strings.TrimSuffix(trimmed, "V")
+	trimmed = strings.TrimSuffix(trimmed, "Message")
+	if trimmed == "" {
+		trimmed = name
+	}
+	var b strings.Builder
+	for i, r := range trimmed {
+		switch {
+		case i == 0:
+			b.WriteRune(unicode.ToUpper(r))
+		case unicode.IsUpper(r):
+			b.WriteByte(' ')
+			b.WriteRune(unicode.ToLower(r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// passiveMessage reports whether the payload only carries protocol or state
+// signals that WhatsApp itself never renders as a chat bubble, such as poll
+// votes, encrypted reaction envelopes, and app-state sync notifications.
+func passiveMessage(message *waE2E.Message) bool {
+	if message == nil {
+		return true
+	}
+	if protocol := message.GetProtocolMessage(); protocol != nil {
+		switch protocol.GetType() {
+		case waE2E.ProtocolMessage_REVOKE, waE2E.ProtocolMessage_MESSAGE_EDIT, waE2E.ProtocolMessage_EPHEMERAL_SETTING:
+			return false
+		default:
+			return true
+		}
+	}
+	switch {
+	case message.GetPollUpdateMessage() != nil,
+		message.GetPollAddOptionMessage() != nil,
+		message.GetEncReactionMessage() != nil,
+		message.GetEncCommentMessage() != nil,
+		message.GetEncEventResponseMessage() != nil,
+		message.GetStickerSyncRmrMessage() != nil,
+		message.GetSecretEncryptedMessage() != nil:
+		return true
+	}
+	// Messages carrying only key-distribution data have no displayable payload.
+	return messageInlineText(message) == "" && messageContentFieldName(message) == ""
 }
 
 func messageContextInfo(message *waE2E.Message) *waE2E.ContextInfo {
@@ -2290,6 +2806,40 @@ func messageContextInfo(message *waE2E.Message) *waE2E.ContextInfo {
 		return message.GetLocationMessage().GetContextInfo()
 	case message.GetLiveLocationMessage() != nil:
 		return message.GetLiveLocationMessage().GetContextInfo()
+	case messagePoll(message) != nil:
+		return messagePoll(message).GetContextInfo()
+	case message.GetGroupInviteMessage() != nil:
+		return message.GetGroupInviteMessage().GetContextInfo()
+	case message.GetEventMessage() != nil:
+		return message.GetEventMessage().GetContextInfo()
+	case message.GetEventInviteMessage() != nil:
+		return message.GetEventInviteMessage().GetContextInfo()
+	case message.GetButtonsMessage() != nil:
+		return message.GetButtonsMessage().GetContextInfo()
+	case message.GetButtonsResponseMessage() != nil:
+		return message.GetButtonsResponseMessage().GetContextInfo()
+	case message.GetListMessage() != nil:
+		return message.GetListMessage().GetContextInfo()
+	case message.GetListResponseMessage() != nil:
+		return message.GetListResponseMessage().GetContextInfo()
+	case message.GetTemplateMessage() != nil:
+		return message.GetTemplateMessage().GetContextInfo()
+	case message.GetTemplateButtonReplyMessage() != nil:
+		return message.GetTemplateButtonReplyMessage().GetContextInfo()
+	case message.GetInteractiveMessage() != nil:
+		return message.GetInteractiveMessage().GetContextInfo()
+	case message.GetInteractiveResponseMessage() != nil:
+		return message.GetInteractiveResponseMessage().GetContextInfo()
+	case message.GetProductMessage() != nil:
+		return message.GetProductMessage().GetContextInfo()
+	case message.GetOrderMessage() != nil:
+		return message.GetOrderMessage().GetContextInfo()
+	case message.GetNewsletterAdminInviteMessage() != nil:
+		return message.GetNewsletterAdminInviteMessage().GetContextInfo()
+	case message.GetAlbumMessage() != nil:
+		return message.GetAlbumMessage().GetContextInfo()
+	case message.GetStickerPackMessage() != nil:
+		return message.GetStickerPackMessage().GetContextInfo()
 	default:
 		return nil
 	}
@@ -2510,6 +3060,9 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 				aggregates[i].ChatJID = chatID
 			}
 			reactions = append(reactions, aggregates...)
+			if passiveMessage(parsed.Message) {
+				continue
+			}
 			batch = append(batch, domainMessage(parsed, chatID, transportJID))
 		}
 		if err = c.store.ApplyMessages(c.ctx, batch, false); err != nil {

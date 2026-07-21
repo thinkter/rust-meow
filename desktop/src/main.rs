@@ -178,6 +178,13 @@ struct ChatSwitcher {
     highlighted: usize,
 }
 
+struct ChatInfoState {
+    chat_id: String,
+    loading: bool,
+    error: Option<String>,
+    info: Option<proto::GetChatInfoResponse>,
+}
+
 #[derive(Clone, Debug, Default)]
 struct SearchResults {
     contacts: Vec<proto::ContactSearchResult>,
@@ -406,6 +413,7 @@ struct RustMeow {
     chat_drafts: HashMap<String, ChatDraft>,
     recent_chat_ids: Vec<String>,
     chat_switcher: Option<ChatSwitcher>,
+    chat_info: Option<ChatInfoState>,
     focus_handle: FocusHandle,
     settings_open: bool,
     ui_scale: f32,
@@ -550,6 +558,7 @@ impl RustMeow {
             chat_drafts: HashMap::new(),
             recent_chat_ids: Vec::new(),
             chat_switcher: None,
+            chat_info: None,
             focus_handle,
             settings_open: false,
             ui_scale,
@@ -610,6 +619,14 @@ impl RustMeow {
                 }
                 PendingRequest::ParticipantAvatar { participant_id } => {
                     self.participant_avatar_attempted.remove(&participant_id);
+                }
+                PendingRequest::ChatInfo { chat_id } => {
+                    if let Some(state) = self.chat_info.as_mut()
+                        && state.chat_id == chat_id
+                    {
+                        state.loading = false;
+                        state.error = Some("Loading chat info timed out. Try again.".into());
+                    }
                 }
                 PendingRequest::MessageImage {
                     chat_id,
@@ -741,6 +758,7 @@ impl RustMeow {
         self.chat_switcher = None;
         self.reaction_details = None;
         self.image_viewer = None;
+        self.chat_info = None;
         self.search_input
             .update(cx, |input, cx| input.focus(window, cx));
     }
@@ -972,6 +990,15 @@ impl RustMeow {
             } = &pending
             {
                 self.clear_reaction_intent_if_current(chat_id, message_id, client_reaction_id);
+            }
+            if let PendingRequest::ChatInfo { chat_id } = &pending {
+                if let Some(state) = self.chat_info.as_mut()
+                    && state.chat_id == *chat_id
+                {
+                    state.loading = false;
+                    state.error = Some(error.message);
+                }
+                return;
             }
             if let PendingRequest::Avatar { chat_id } = &pending {
                 let retries = self
@@ -1245,6 +1272,18 @@ impl RustMeow {
                 if let Some(message) = sent.message {
                     self.store.upsert_message(message);
                     self.scroll_to_bottom_generation = Some(self.message_generation);
+                }
+            }
+            (PendingRequest::ChatInfo { chat_id }, rpc_response::Result::GetChatInfo(info)) => {
+                if let Some(chat) = info.chat.clone() {
+                    self.store.upsert_chat(chat);
+                }
+                if let Some(state) = self.chat_info.as_mut()
+                    && state.chat_id == chat_id
+                {
+                    state.loading = false;
+                    state.error = None;
+                    state.info = Some(info);
                 }
             }
             (PendingRequest::SendSticker, rpc_response::Result::SendSticker(sent)) => {
@@ -1879,6 +1918,7 @@ impl RustMeow {
         self.image_viewer = None;
         self.replying_to_message_id = None;
         self.chat_switcher = None;
+        self.chat_info = None;
         // This unmounts the composer (and emoji popup); if either held focus
         // the root would fall off the key dispatch path, deadening shortcuts.
         // The sidebar search input is the only input that survives the toggle.
@@ -1921,6 +1961,26 @@ impl RustMeow {
         candidates
     }
 
+    fn open_chat_info(&mut self, chat_id: String) {
+        self.settings_open = false;
+        self.emoji_target = None;
+        self.reaction_details = None;
+        self.image_viewer = None;
+        self.chat_switcher = None;
+        self.chat_info = Some(ChatInfoState {
+            chat_id: chat_id.clone(),
+            loading: true,
+            error: None,
+            info: None,
+        });
+        self.request(
+            rpc_request::Request::GetChatInfo(proto::GetChatInfoRequest {
+                chat_id: chat_id.clone(),
+            }),
+            PendingRequest::ChatInfo { chat_id },
+        );
+    }
+
     fn cycle_recent_chat(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.store.screen != Screen::Chats {
             return;
@@ -1941,6 +2001,7 @@ impl RustMeow {
         self.emoji_target = None;
         self.reaction_details = None;
         self.image_viewer = None;
+        self.chat_info = None;
         self.settings_open = false;
         self.chat_switcher = Some(switcher);
         // The commit-on-ctrl-release and escape handlers live on the root div,
@@ -2025,6 +2086,7 @@ impl RustMeow {
         self.emoji_target = None;
         self.reaction_details = None;
         self.image_viewer = None;
+        self.chat_info = None;
         self.scroll_to_bottom_generation = None;
         self.search_target_message_id = None;
         self.pending_search_scroll_id = None;
@@ -2152,6 +2214,7 @@ impl RustMeow {
         self.chat_drafts.clear();
         self.recent_chat_ids.clear();
         self.chat_switcher = None;
+        self.chat_info = None;
         self.chat_view = ChatView::Inbox;
         self.request(
             rpc_request::Request::StartPairing(proto::StartPairingRequest {}),
@@ -3181,22 +3244,38 @@ impl RustMeow {
                             },
                         )))
                     })
-                    .child(header_avatar)
                     .child(
-                        v_flex()
+                        h_flex()
+                            .id("chat-info-open")
+                            .flex_1()
                             .min_w_0()
+                            .gap_3()
+                            .items_center()
+                            .cursor_pointer()
+                            .on_click(cx.listener({
+                                let chat_id = chat.id.clone();
+                                move |this, _, _, cx| {
+                                    this.open_chat_info(chat_id.clone());
+                                    cx.notify();
+                                }
+                            }))
+                            .child(header_avatar)
                             .child(
-                                div()
-                                    .truncate()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(chat.title),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(identity_line),
+                                v_flex()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(chat.title),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(identity_line),
+                                    ),
                             ),
                     ),
             )
@@ -3749,6 +3828,362 @@ impl RustMeow {
                                     .child("Saved automatically for future launches."),
                             ),
                     ),
+            )
+    }
+
+    fn render_chat_info(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(state) = self.chat_info.as_ref() else {
+            return div();
+        };
+        let chat_id = state.chat_id.clone();
+        let loading = state.loading;
+        let error = state.error.clone();
+        let info = state.info.clone();
+        let chat = self.store.chat(&chat_id).cloned();
+        let is_group = chat
+            .as_ref()
+            .is_some_and(|chat| chat.kind() == proto::ChatKind::Group);
+        let title = chat
+            .as_ref()
+            .map(|chat| chat.title.clone())
+            .unwrap_or_else(|| "Conversation".into());
+        let avatar_path = chat
+            .as_ref()
+            .map(|chat| chat.avatar_path.clone())
+            .unwrap_or_default();
+
+        // Warm the avatars for the members that are about to be shown; the
+        // media budget in the RPC layer keeps this from flooding the backend.
+        if let Some(info) = info.as_ref() {
+            let pending: Vec<String> = info
+                .participants
+                .iter()
+                .take(24)
+                .filter(|participant| {
+                    self.store
+                        .participant_avatar_path(&participant.participant_id)
+                        .is_none()
+                })
+                .map(|participant| participant.participant_id.clone())
+                .collect();
+            for participant_id in pending {
+                self.load_participant_avatar(participant_id);
+            }
+        }
+
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let hover_background = cx.theme().muted;
+        let section = |label: &'static str, value: String| {
+            v_flex()
+                .gap_1()
+                .child(div().text_xs().text_color(muted).child(label))
+                .child(div().text_sm().child(value))
+        };
+
+        let subtitle = if let Some(info) = info.as_ref().filter(|_| is_group) {
+            format!("Group · {} members", info.participant_count)
+        } else if is_group {
+            "Group".to_string()
+        } else {
+            chat.as_ref()
+                .map(|chat| chat.phone_number.clone())
+                .unwrap_or_default()
+        };
+        let identity_avatar = Avatar::new().name(title.clone()).with_size(px(96.));
+        let identity_avatar = if avatar_path.is_empty() {
+            identity_avatar
+        } else {
+            identity_avatar.src(PathBuf::from(avatar_path))
+        };
+
+        let mut body = v_flex()
+            .id("chat-info-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_4()
+            .gap_4()
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(identity_avatar)
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_center()
+                            .child(title.clone()),
+                    )
+                    .when(!subtitle.is_empty(), |identity| {
+                        identity.child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .text_center()
+                                .child(subtitle),
+                        )
+                    }),
+            );
+        if loading {
+            body = body.child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .text_center()
+                    .child("Loading chat details…"),
+            );
+        }
+        if let Some(error) = error {
+            body = body.child(
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().text_color(rgb(0xef4444)).child(error))
+                    .child(Button::new("chat-info-retry").small().label("Retry").on_click(
+                        cx.listener({
+                            let chat_id = chat_id.clone();
+                            move |this, _, _, cx| {
+                                this.open_chat_info(chat_id.clone());
+                                cx.notify();
+                            }
+                        }),
+                    )),
+            );
+        }
+        if let Some(info) = info {
+            if !is_group {
+                if !info.about.is_empty() {
+                    body = body.child(section("About", info.about.clone()));
+                }
+                if let Some(chat) = chat.as_ref() {
+                    if !chat.phone_number.is_empty() {
+                        body = body.child(section("Phone", chat.phone_number.clone()));
+                    }
+                    if !info.verified_name.is_empty() {
+                        body =
+                            body.child(section("Verified business", info.verified_name.clone()));
+                    }
+                    if !chat.business_name.is_empty() && chat.business_name != chat.title {
+                        body = body.child(section("Business name", chat.business_name.clone()));
+                    }
+                    if !chat.push_name.is_empty() && chat.push_name != chat.title {
+                        body = body.child(section("Profile name", format!("~{}", chat.push_name)));
+                    }
+                }
+            } else {
+                let description = if info.description.is_empty() {
+                    "No description".to_string()
+                } else {
+                    info.description.clone()
+                };
+                body = body.child(section("Description", description));
+                if info.created_at_ms > 0 {
+                    let mut created = format!("Created {}", format_epoch_date(info.created_at_ms));
+                    if !info.created_by.is_empty() {
+                        created.push_str(&format!(" by {}", info.created_by));
+                    }
+                    body = body.child(div().text_xs().text_color(muted).child(created));
+                }
+                if info.disappearing_timer_seconds > 0 {
+                    body = body.child(section(
+                        "Disappearing messages",
+                        format_disappearing_timer(info.disappearing_timer_seconds),
+                    ));
+                }
+                let mut notes: Vec<&'static str> = Vec::new();
+                if info.is_community {
+                    notes.push("Community group");
+                }
+                if info.announce_only {
+                    notes.push("Only admins can send messages");
+                }
+                if info.locked {
+                    notes.push("Only admins can edit group info");
+                }
+                if info.join_approval_required {
+                    notes.push("Admins approve new members");
+                }
+                if !notes.is_empty() {
+                    body = body.child(v_flex().gap_1().children(notes.into_iter().map(|note| {
+                        div().text_xs().text_color(muted).child(format!("• {note}"))
+                    })));
+                }
+                if !info.participants.is_empty() {
+                    const MAX_MEMBER_ROWS: usize = 200;
+                    let mut members = v_flex().gap_1().child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("{} members", info.participant_count)),
+                    );
+                    for (index, participant) in
+                        info.participants.iter().take(MAX_MEMBER_ROWS).enumerate()
+                    {
+                        let display_name = if participant.is_me {
+                            "You".to_string()
+                        } else if participant.display_name.is_empty() {
+                            participant.phone_number.clone()
+                        } else {
+                            participant.display_name.clone()
+                        };
+                        let member_avatar = Avatar::new()
+                            .name(display_name.clone())
+                            .with_size(px(32.));
+                        let member_avatar = match self
+                            .store
+                            .participant_avatar_path(&participant.participant_id)
+                        {
+                            Some(path) if !path.is_empty() => {
+                                member_avatar.src(PathBuf::from(path))
+                            }
+                            _ => member_avatar,
+                        };
+                        let badge = if participant.is_super_admin {
+                            Some("Owner")
+                        } else if participant.is_admin {
+                            Some("Admin")
+                        } else {
+                            None
+                        };
+                        let clickable =
+                            !participant.is_me && !participant.participant_id.is_empty();
+                        let mut row = h_flex()
+                            .id(index)
+                            .px_2()
+                            .py_1()
+                            .gap_2()
+                            .items_center()
+                            .rounded_md()
+                            .child(member_avatar)
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().text_sm().truncate().child(display_name))
+                                    .when(
+                                        !participant.phone_number.is_empty()
+                                            && !participant.is_me,
+                                        |details| {
+                                            details.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .truncate()
+                                                    .child(participant.phone_number.clone()),
+                                            )
+                                        },
+                                    ),
+                            )
+                            .when_some(badge, |row, badge| {
+                                row.child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(border)
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(badge),
+                                )
+                            });
+                        if clickable {
+                            row = row
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(hover_background))
+                                .on_click(cx.listener({
+                                    let contact_jid = participant.participant_id.clone();
+                                    move |this, _, _, cx| {
+                                        this.chat_info = None;
+                                        this.request(
+                                            rpc_request::Request::OpenContact(
+                                                proto::OpenContactRequest {
+                                                    contact_jid: contact_jid.clone(),
+                                                },
+                                            ),
+                                            PendingRequest::OpenContact,
+                                        );
+                                        cx.notify();
+                                    }
+                                }));
+                        }
+                        members = members.child(row);
+                    }
+                    if info.participants.len() > MAX_MEMBER_ROWS {
+                        members = members.child(div().text_xs().text_color(muted).child(
+                            format!("…and {} more", info.participants.len() - MAX_MEMBER_ROWS),
+                        ));
+                    }
+                    body = body.child(members);
+                }
+            }
+            let mut flags = Vec::new();
+            if let Some(chat) = chat.as_ref() {
+                if chat.pinned {
+                    flags.push("Pinned");
+                }
+                if chat.muted {
+                    flags.push("Muted");
+                }
+                if chat.archived {
+                    flags.push("Archived");
+                }
+            }
+            if !flags.is_empty() {
+                body = body.child(h_flex().gap_2().children(flags.into_iter().map(|flag| {
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(border)
+                        .text_xs()
+                        .text_color(muted)
+                        .child(flag)
+                })));
+            }
+            if !info.address.is_empty() {
+                body = body.child(section("WhatsApp address", info.address.clone()));
+            }
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x00000066))
+            .flex()
+            .justify_end()
+            .child(
+                v_flex()
+                    .w(px(400.))
+                    .max_w_full()
+                    .h_full()
+                    .bg(cx.theme().background)
+                    .border_l_1()
+                    .border_color(border)
+                    .child(
+                        h_flex()
+                            .h(px(58.))
+                            .px_4()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(border)
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(if is_group { "Group info" } else { "Contact info" }),
+                            )
+                            .child(Button::new("close-chat-info").label("×").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.chat_info = None;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(body),
             )
     }
 
@@ -4515,6 +4950,12 @@ impl Render for RustMeow {
                     cx.notify();
                     return;
                 }
+                if this.chat_info.is_some() && event.keystroke.key == "escape" {
+                    this.chat_info = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if this.chat_switcher.is_some() && event.keystroke.key == "escape" {
                     this.cancel_chat_switcher(window, cx);
                     cx.stop_propagation();
@@ -4545,9 +4986,44 @@ impl Render for RustMeow {
             .when(self.settings_open, |root| {
                 root.child(self.render_settings(cx))
             })
+            .when(self.chat_info.is_some(), |root| {
+                root.child(self.render_chat_info(cx))
+            })
             .when(self.chat_switcher.is_some(), |root| {
                 root.child(self.render_chat_switcher(cx))
             })
+    }
+}
+
+// Civil-date conversion (Howard Hinnant's algorithm). Renders a UTC date like
+// "12 Apr 2024" for the group "created" caption without a date dependency.
+fn format_epoch_date(timestamp_ms: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = timestamp_ms.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{day} {} {year}", MONTHS[(month - 1) as usize])
+}
+
+fn format_disappearing_timer(seconds: u32) -> String {
+    match seconds {
+        0 => "Off".into(),
+        86_400 => "24 hours".into(),
+        604_800 => "7 days".into(),
+        7_776_000 => "90 days".into(),
+        s if s % 86_400 == 0 => format!("{} days", s / 86_400),
+        s if s % 3_600 == 0 => format!("{} hours", s / 3_600),
+        s if s % 60 == 0 => format!("{} minutes", s / 60),
+        s => format!("{s} seconds"),
     }
 }
 
@@ -4864,6 +5340,21 @@ mod reaction_details_ui_tests {
         assert_eq!(no_selection.selected_chat_id(), Some("active"));
         let single = ChatSwitcher::new(vec!["only".into()], false, false).unwrap();
         assert_eq!(single.selected_chat_id(), Some("only"));
+    }
+
+    #[test]
+    fn chat_info_dates_and_timers_render_human_readable_values() {
+        assert_eq!(format_epoch_date(0), "1 Jan 1970");
+        assert_eq!(format_epoch_date(1_000_000_000_000), "9 Sep 2001");
+        assert_eq!(format_epoch_date(1_712_345_678_000), "5 Apr 2024");
+
+        assert_eq!(format_disappearing_timer(0), "Off");
+        assert_eq!(format_disappearing_timer(86_400), "24 hours");
+        assert_eq!(format_disappearing_timer(604_800), "7 days");
+        assert_eq!(format_disappearing_timer(7_776_000), "90 days");
+        assert_eq!(format_disappearing_timer(3 * 86_400), "3 days");
+        assert_eq!(format_disappearing_timer(2 * 3_600), "2 hours");
+        assert_eq!(format_disappearing_timer(90), "90 seconds");
     }
 
     #[test]

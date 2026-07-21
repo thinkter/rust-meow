@@ -25,7 +25,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 11
+const ProtocolVersion uint32 = 12
 const maxTextBytes = 65_536
 
 type Server struct {
@@ -78,7 +78,9 @@ func (s *Server) Run() error {
 			return err
 		}
 		request := envelope.GetRequest()
-		if s.handshaken.Load() && envelope.GetProtocolVersion() == ProtocolVersion && (request.GetGetChatAvatar() != nil || request.GetGetParticipantAvatar() != nil || request.GetGetMessageImage() != nil || request.GetSendImage() != nil || request.GetSendSticker() != nil) {
+		// GetChatInfo joins the media pool because group and about lookups are
+		// network round-trips that must not stall the serialized RPC loop.
+		if s.handshaken.Load() && envelope.GetProtocolVersion() == ProtocolVersion && (request.GetGetChatAvatar() != nil || request.GetGetParticipantAvatar() != nil || request.GetGetMessageImage() != nil || request.GetSendImage() != nil || request.GetSendSticker() != nil || request.GetGetChatInfo() != nil) {
 			go func(envelope *bridgev1.Envelope) {
 				select {
 				case s.mediaSlots <- struct{}{}:
@@ -299,6 +301,51 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, fail("invalid_argument", err.Error(), false)
 		}
 		return &bridgev1.RpcResponse_OpenContact{OpenContact: &bridgev1.OpenContactResponse{Chat: s.wireChat(chat)}}, nil
+	case *bridgev1.RpcRequest_GetChatInfo:
+		if req.GetChatInfo.GetChatId() == "" {
+			return nil, fail("invalid_argument", "chat_id is required", false)
+		}
+		chat, err := s.store.Chat(s.ctx, req.GetChatInfo.GetChatId())
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, fail("invalid_argument", "unknown chat", false)
+			}
+			return nil, err
+		}
+		info, err := s.wa.ChatInfo(s.ctx, req.GetChatInfo.GetChatId())
+		if err != nil {
+			return nil, fail("chat_info_unavailable", err.Error(), true)
+		}
+		participants := make([]*bridgev1.ChatParticipant, len(info.Participants))
+		for i, participant := range info.Participants {
+			participants[i] = &bridgev1.ChatParticipant{
+				ParticipantId: participant.ID,
+				DisplayName:   participant.DisplayName,
+				PhoneNumber:   participant.PhoneNumber,
+				IsAdmin:       participant.IsAdmin,
+				IsSuperAdmin:  participant.IsSuperAdmin,
+				IsMe:          participant.IsMe,
+			}
+		}
+		response := &bridgev1.GetChatInfoResponse{
+			Chat:                     s.wireChat(chat),
+			Address:                  info.Address,
+			About:                    info.About,
+			VerifiedName:             info.VerifiedName,
+			Description:              info.Description,
+			CreatedBy:                info.CreatedBy,
+			ParticipantCount:         uint32(info.ParticipantCount),
+			Participants:             participants,
+			AnnounceOnly:             info.AnnounceOnly,
+			Locked:                   info.Locked,
+			DisappearingTimerSeconds: info.DisappearingTimer,
+			IsCommunity:              info.IsCommunity,
+			JoinApprovalRequired:     info.JoinApprovalRequired,
+		}
+		if !info.CreatedAt.IsZero() {
+			response.CreatedAtMs = info.CreatedAt.UnixMilli()
+		}
+		return &bridgev1.RpcResponse_GetChatInfo{GetChatInfo: response}, nil
 	case *bridgev1.RpcRequest_ListMessagesAround:
 		if req.ListMessagesAround.GetChatId() == "" || req.ListMessagesAround.GetMessageId() == "" {
 			return nil, fail("invalid_argument", "chat_id and message_id are required", false)
@@ -548,6 +595,8 @@ func success(result any) *bridgev1.RpcResponse {
 	case *bridgev1.RpcResponse_OpenMessageWindow:
 		response.Result = value
 	case *bridgev1.RpcResponse_ListMessagesAfter:
+		response.Result = value
+	case *bridgev1.RpcResponse_GetChatInfo:
 		response.Result = value
 	case *bridgev1.RpcResponse_MarkRead:
 		response.Result = value
