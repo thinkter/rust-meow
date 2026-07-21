@@ -464,6 +464,36 @@ func TestDomainMessageDecodesRichContent(t *testing.T) {
 		{"location", event("location", &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: proto.Float64(12.9), DegreesLongitude: proto.Float64(77.5), Name: proto.String("Office"), Address: proto.String("Bengaluru")}}), func(m domain.Message) bool {
 			return m.Kind == "location" && m.Location != nil && m.Location.Latitude == 12.9 && m.Location.Name == "Office"
 		}},
+		{"poll", event("poll", &waE2E.Message{PollCreationMessageV3: &waE2E.PollCreationMessage{Name: proto.String("Lunch"), Options: []*waE2E.PollCreationMessage_Option{{OptionName: proto.String("Pizza")}, {OptionName: proto.String("Sushi")}}}}), func(m domain.Message) bool {
+			return m.Kind == "poll" && m.Text == "📊 Poll: Lunch\n• Pizza\n• Sushi"
+		}},
+		{"group invite", event("invite", &waE2E.Message{GroupInviteMessage: &waE2E.GroupInviteMessage{GroupName: proto.String("Friends")}}), func(m domain.Message) bool {
+			return m.Kind == "group_invite" && m.Text == "👥 Group invite: Friends"
+		}},
+		{"event", event("event", &waE2E.Message{EventMessage: &waE2E.EventMessage{Name: proto.String("Standup")}}), func(m domain.Message) bool {
+			return m.Kind == "event" && m.Text == "📅 Event: Standup"
+		}},
+		{"buttons response", event("buttons", &waE2E.Message{ButtonsResponseMessage: &waE2E.ButtonsResponseMessage{Response: &waE2E.ButtonsResponseMessage_SelectedDisplayText{SelectedDisplayText: "Yes"}}}), func(m domain.Message) bool {
+			return m.Kind == "interactive" && m.Text == "Yes"
+		}},
+		{"list", event("list", &waE2E.Message{ListMessage: &waE2E.ListMessage{Title: proto.String("Menu"), Description: proto.String("Pick one")}}), func(m domain.Message) bool {
+			return m.Kind == "interactive" && m.Text == "Menu\nPick one"
+		}},
+		{"order", event("order", &waE2E.Message{OrderMessage: &waE2E.OrderMessage{OrderTitle: proto.String("Groceries"), ItemCount: proto.Int32(3)}}), func(m domain.Message) bool {
+			return m.Kind == "order" && m.Text == "🛒 Order: Groceries (3 items)"
+		}},
+		{"missed video call", event("call", &waE2E.Message{CallLogMesssage: &waE2E.CallLogMessage{IsVideo: proto.Bool(true), CallOutcome: waE2E.CallLogMessage_MISSED.Enum()}}), func(m domain.Message) bool {
+			return m.Kind == "call" && m.Text == "Missed video call"
+		}},
+		{"album", event("album", &waE2E.Message{AlbumMessage: &waE2E.AlbumMessage{ExpectedImageCount: proto.Uint32(4)}}), func(m domain.Message) bool {
+			return m.Kind == "album" && m.Text == "🖼️ Album (4 items)"
+		}},
+		{"disappearing timer", event("timer", &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_EPHEMERAL_SETTING.Enum(), EphemeralExpiration: proto.Uint32(604800)}}), func(m domain.Message) bool {
+			return m.Kind == "ephemeral_setting" && m.Text == "⏳ Disappearing messages set to 7 days"
+		}},
+		{"unknown type keeps descriptive label", event("placeholder", &waE2E.Message{PlaceholderMessage: &waE2E.PlaceholderMessage{}}), func(m domain.Message) bool {
+			return m.Kind == "placeholder" && m.Text == "Placeholder"
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -471,6 +501,58 @@ func TestDomainMessageDecodesRichContent(t *testing.T) {
 				t.Fatalf("message=%+v", got)
 			}
 		})
+	}
+}
+
+func TestDomainMessageExtractsEditedContent(t *testing.T) {
+	chat, _ := types.ParseJID("123@g.us")
+	sender, _ := types.ParseJID("456@s.whatsapp.net")
+	edit := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+		Type:          waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+		Key:           &waCommon.MessageKey{ID: proto.String("original")},
+		TimestampMS:   proto.Int64(9999),
+		EditedMessage: &waE2E.Message{Conversation: proto.String("corrected text")},
+	}}
+	evt := &events.Message{
+		Info:    types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender}, ID: "edit-event", Timestamp: time.UnixMilli(1234)},
+		Message: edit,
+		IsEdit:  true,
+	}
+	got := domainMessage(evt, chat.String(), chat.String())
+	if got.ID != "original" || got.Text != "corrected text" || got.Kind != "text" {
+		t.Fatalf("edited message=%+v", got)
+	}
+	if got.EditedAt.UnixMilli() != 9999 {
+		t.Fatalf("edited_at=%v", got.EditedAt)
+	}
+}
+
+func TestPassiveMessageFiltersSignalOnlyPayloads(t *testing.T) {
+	passive := []*waE2E.Message{
+		{PollUpdateMessage: &waE2E.PollUpdateMessage{}},
+		{EncReactionMessage: &waE2E.EncReactionMessage{}},
+		{StickerSyncRmrMessage: &waE2E.StickerSyncRMRMessage{}},
+		{ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_APP_STATE_SYNC_KEY_SHARE.Enum()}},
+		{ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_PEER_DATA_OPERATION_REQUEST_RESPONSE_MESSAGE.Enum()}},
+		{SenderKeyDistributionMessage: &waE2E.SenderKeyDistributionMessage{}},
+		nil,
+	}
+	for i, message := range passive {
+		if !passiveMessage(message) {
+			t.Fatalf("payload %d should be passive: %+v", i, message)
+		}
+	}
+	displayable := []*waE2E.Message{
+		{Conversation: proto.String("hi")},
+		{ImageMessage: &waE2E.ImageMessage{}},
+		{PollCreationMessage: &waE2E.PollCreationMessage{Name: proto.String("Lunch")}},
+		{ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_REVOKE.Enum(), Key: &waCommon.MessageKey{ID: proto.String("x")}}},
+		{ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_EPHEMERAL_SETTING.Enum()}},
+	}
+	for i, message := range displayable {
+		if passiveMessage(message) {
+			t.Fatalf("payload %d should be displayable: %+v", i, message)
+		}
 	}
 }
 
