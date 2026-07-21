@@ -90,6 +90,8 @@ type Client struct {
 	appStateProjection sync.Mutex
 	projectionComplete bool
 	fetchAppStateFn    func(context.Context, appstate.WAPatchName, bool, bool) error
+	groupNameFetchMu   sync.Mutex
+	groupNameFetches   map[string]bool
 }
 
 type avatarFetch struct {
@@ -167,7 +169,7 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 	// this, whatsmeow updates its own session cache during an initial sync but
 	// does not project those events into Rust Meow's product database.
 	w.EmitAppStateEventsOnFullSync = true
-	c := &Client{ctx: ctx, wa: w, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time)}
+	c := &Client{ctx: ctx, wa: w, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time), groupNameFetches: make(map[string]bool)}
 	c.loadCachedAvatars()
 	c.fetchAppStateFn = w.FetchAppState
 	c.logoutFn = w.Logout
@@ -2329,6 +2331,50 @@ func (c *Client) reduceArchive(evt *events.Archive) {
 		return
 	}
 	c.emitChat(chatID)
+}
+
+// BackfillGroupName fills in a group chat's name on demand for chats that
+// never got one from a live JoinedGroup/GroupInfo event or history sync
+// (e.g. because the add happened while this device wasn't connected). It is
+// safe to call repeatedly for the same JID; the fetch is deduped and runs in
+// the background so it never blocks the caller (typically a chat-list
+// request) — the resolved name arrives shortly after via a "chat" event.
+func (c *Client) BackfillGroupName(chatID, addressJID string) {
+	if c.wa == nil {
+		return
+	}
+	jid, err := types.ParseJID(addressJID)
+	if err != nil || jid.Server != types.GroupServer {
+		return
+	}
+	key := jid.String()
+	c.groupNameFetchMu.Lock()
+	if c.groupNameFetches[key] {
+		c.groupNameFetchMu.Unlock()
+		return
+	}
+	c.groupNameFetches[key] = true
+	c.groupNameFetchMu.Unlock()
+	go func() {
+		defer func() {
+			c.groupNameFetchMu.Lock()
+			delete(c.groupNameFetches, key)
+			c.groupNameFetchMu.Unlock()
+		}()
+		info, infoErr := c.wa.GetGroupInfo(c.ctx, jid)
+		if infoErr != nil {
+			c.log.Warn("backfill group info", "chat_id", chatID, "jid", key, "error", infoErr)
+			return
+		}
+		if info.Name == "" {
+			return
+		}
+		if err = c.store.UpsertChatName(c.ctx, chatID, info.Name); err != nil {
+			c.log.Error("persist backfilled group name", "chat_id", chatID, "error", err)
+			return
+		}
+		c.emitChat(chatID)
+	}()
 }
 
 // reduceJoinedGroup handles being added to (or creating) a group. Without

@@ -214,7 +214,13 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			}
 		}
 		for i := range page.Items {
-			chats[i] = wireChatWithPresentation(page.Items[i], presentations[page.Items[i].JID])
+			item := page.Items[i]
+			chats[i] = wireChatWithPresentation(item, presentations[item.JID])
+			if s.wa != nil && item.Name == "" {
+				if jid, jidErr := types.ParseJID(item.AddressJID); jidErr == nil && jid.Server == types.GroupServer {
+					s.wa.BackfillGroupName(item.JID, item.AddressJID)
+				}
+			}
 		}
 		return &bridgev1.RpcResponse_ListChats{ListChats: &bridgev1.ListChatsResponse{Chats: chats, TotalCount: uint64(total), NextCursor: page.NextCursor}}, nil
 	case *bridgev1.RpcRequest_GetChatAvatar:
@@ -575,6 +581,11 @@ func wireChat(c domain.Chat) *bridgev1.Chat {
 func (s *Server) wireChat(c domain.Chat) *bridgev1.Chat {
 	if s.wa == nil {
 		return wireChat(c)
+	}
+	if c.Name == "" {
+		if jid, jidErr := types.ParseJID(c.AddressJID); jidErr == nil && jid.Server == types.GroupServer {
+			s.wa.BackfillGroupName(c.JID, c.AddressJID)
+		}
 	}
 	details, cachedAvatar := s.wa.ChatPresentation(s.ctx, c.JID)
 	return wireChatWithPresentation(c, wa.ChatPresentation{Details: details, AvatarPath: cachedAvatar})
