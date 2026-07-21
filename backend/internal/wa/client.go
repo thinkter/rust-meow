@@ -1934,6 +1934,10 @@ func (c *Client) handleEvent(raw any) {
 		c.enqueue(func() { c.reduceArchive(evt) })
 	case *events.MarkChatAsRead:
 		c.enqueue(func() { c.reduceMarkChatAsRead(evt) })
+	case *events.JoinedGroup:
+		c.enqueue(func() { c.reduceJoinedGroup(evt) })
+	case *events.GroupInfo:
+		c.enqueue(func() { c.reduceGroupInfo(evt) })
 	case *events.Contact:
 		c.invalidateContact(evt.JID)
 	case *events.PushName:
@@ -2322,6 +2326,39 @@ func (c *Client) reduceArchive(evt *events.Archive) {
 	archived := evt.Action.GetArchived()
 	if err = c.store.UpsertChatMetadata(c.ctx, chatID, "", &archived); err != nil {
 		c.log.Error("persist archive state", "chat_id", chatID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
+}
+
+// reduceJoinedGroup handles being added to (or creating) a group. Without
+// this, a newly joined group's chat row is created with no name the first
+// time a message arrives, and the UI falls back to showing the raw JID.
+func (c *Client) reduceJoinedGroup(evt *events.JoinedGroup) {
+	chatID, _, err := c.resolveConversation(evt.JID.String())
+	if err != nil {
+		c.log.Error("resolve joined group conversation", "chat_id", evt.JID.String(), "error", err)
+		return
+	}
+	if err = c.store.UpsertChatName(c.ctx, chatID, evt.Name); err != nil {
+		c.log.Error("persist joined group name", "chat_id", chatID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
+}
+
+// reduceGroupInfo keeps the cached group name in sync with rename events.
+func (c *Client) reduceGroupInfo(evt *events.GroupInfo) {
+	if evt.Name == nil || evt.Name.Name == "" {
+		return
+	}
+	chatID, _, err := c.resolveConversation(evt.JID.String())
+	if err != nil {
+		c.log.Error("resolve group info conversation", "chat_id", evt.JID.String(), "error", err)
+		return
+	}
+	if err = c.store.UpsertChatName(c.ctx, chatID, evt.Name.Name); err != nil {
+		c.log.Error("persist group name change", "chat_id", chatID, "error", err)
 		return
 	}
 	c.emitChat(chatID)
