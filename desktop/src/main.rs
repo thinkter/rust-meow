@@ -19,8 +19,9 @@ use std::{
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    KeyBinding, KeyDownEvent, ModifiersChangedEvent, ObjectFit, ParentElement as _,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, ModifiersChangedEvent,
+    ObjectFit, ParentElement as _, WeakEntity,
     PathPromptOptions, Pixels, Point, Render, ScrollStrategy, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window,
     WindowBounds, WindowOptions, actions, canvas, div, img, point, px, rgb, rgba, size,
@@ -301,11 +302,18 @@ impl SearchResults {
 }
 
 impl ChatSwitcher {
-    fn new(chat_ids: Vec<String>, reverse: bool) -> Option<Self> {
-        if chat_ids.len() < 2 {
+    fn new(chat_ids: Vec<String>, reverse: bool, selected_is_first: bool) -> Option<Self> {
+        // With the active chat at the front there must be something else to
+        // switch to; without one, any single candidate is a valid target.
+        let min_len = if selected_is_first { 2 } else { 1 };
+        if chat_ids.len() < min_len {
             return None;
         }
-        let highlighted = if reverse { chat_ids.len() - 1 } else { 1 };
+        let highlighted = match (reverse, selected_is_first) {
+            (true, _) => chat_ids.len() - 1,
+            (false, true) => 1,
+            (false, false) => 0,
+        };
         Some(Self {
             chat_ids,
             highlighted,
@@ -398,6 +406,7 @@ struct RustMeow {
     chat_drafts: HashMap<String, ChatDraft>,
     recent_chat_ids: Vec<String>,
     chat_switcher: Option<ChatSwitcher>,
+    focus_handle: FocusHandle,
     settings_open: bool,
     ui_scale: f32,
     chat_view: ChatView,
@@ -442,6 +451,11 @@ impl RustMeow {
                 .placeholder("Search contacts, groups, messages")
                 .clean_on_escape()
         });
+        let focus_handle = cx.focus_handle();
+        // GPUI only routes key events along the focused path. Anchor focus to
+        // the app root from the start so shortcuts work before (and after) any
+        // text input holds focus.
+        focus_handle.focus(window, cx);
         let _subscriptions = vec![
             cx.subscribe_in(&composer, window, {
                 let composer = composer.clone();
@@ -536,6 +550,7 @@ impl RustMeow {
             chat_drafts: HashMap::new(),
             recent_chat_ids: Vec::new(),
             chat_switcher: None,
+            focus_handle,
             settings_open: false,
             ui_scale,
             chat_view: ChatView::Inbox,
@@ -797,8 +812,10 @@ impl RustMeow {
                 record_recent_chat(&mut self.recent_chat_ids, &chat_id);
                 let draft = self.chat_drafts.get(&chat_id).cloned().unwrap_or_default();
                 self.replying_to_message_id = draft.reply_to_message_id;
-                self.composer
-                    .update(cx, |input, cx| input.set_value(draft.text, window, cx));
+                self.composer.update(cx, |input, cx| {
+                    input.set_value(draft.text, window, cx);
+                    input.focus(window, cx);
+                });
                 self.emoji_target = None;
                 self.reaction_details = None;
                 self.image_viewer = None;
@@ -1850,7 +1867,7 @@ impl RustMeow {
         self.set_ui_scale(self.ui_scale + delta, window, cx);
     }
 
-    fn toggle_chat_view(&mut self) {
+    fn toggle_chat_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.chat_view = match self.chat_view {
             ChatView::Inbox => ChatView::Archived,
             ChatView::Archived => ChatView::Inbox,
@@ -1862,39 +1879,63 @@ impl RustMeow {
         self.image_viewer = None;
         self.replying_to_message_id = None;
         self.chat_switcher = None;
+        // This unmounts the composer (and emoji popup); if either held focus
+        // the root would fall off the key dispatch path, deadening shortcuts.
+        // The sidebar search input is the only input that survives the toggle.
+        if !self.search_input.read(cx).focus_handle(cx).is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }
     }
 
     fn recent_chat_candidates(&self) -> Vec<String> {
-        let Some(selected_chat_id) = self.store.selected_chat_id.as_deref() else {
-            return Vec::new();
-        };
         let mut candidates = self
             .recent_chat_ids
             .iter()
             .filter(|chat_id| self.store.chat(chat_id).is_some())
             .cloned()
             .collect::<Vec<_>>();
-        if let Some(selected_index) = candidates
-            .iter()
-            .position(|chat_id| chat_id == selected_chat_id)
-        {
-            candidates.swap(0, selected_index);
-        } else if self.store.chat(selected_chat_id).is_some() {
-            candidates.insert(0, selected_chat_id.to_owned());
+        // The recency history only exists within a session, so seed from the
+        // visible chat list (already recency-ordered) until enough history has
+        // accumulated to cycle.
+        if candidates.len() < 2 {
+            for chat_id in self.store.chat_ids(self.chat_view).iter() {
+                if !candidates.contains(chat_id) {
+                    candidates.push(chat_id.clone());
+                }
+                if candidates.len() >= MAX_RECENT_CHATS {
+                    break;
+                }
+            }
+        }
+        if let Some(selected_chat_id) = self.store.selected_chat_id.as_deref() {
+            if let Some(selected_index) = candidates
+                .iter()
+                .position(|chat_id| chat_id == selected_chat_id)
+            {
+                candidates.swap(0, selected_index);
+            } else if self.store.chat(selected_chat_id).is_some() {
+                candidates.insert(0, selected_chat_id.to_owned());
+            }
         }
         candidates.truncate(MAX_RECENT_CHATS);
         candidates
     }
 
-    fn cycle_recent_chat(&mut self, reverse: bool) {
-        if self.store.screen != Screen::Chats || self.store.selected_chat_id.is_none() {
+    fn cycle_recent_chat(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.screen != Screen::Chats {
             return;
         }
         if let Some(switcher) = self.chat_switcher.as_mut() {
             switcher.cycle(reverse);
             return;
         }
-        let Some(switcher) = ChatSwitcher::new(self.recent_chat_candidates(), reverse) else {
+        let candidates = self.recent_chat_candidates();
+        let selected_is_first = self
+            .store
+            .selected_chat_id
+            .as_deref()
+            .is_some_and(|selected| candidates.first().is_some_and(|first| first == selected));
+        let Some(switcher) = ChatSwitcher::new(candidates, reverse, selected_is_first) else {
             return;
         };
         self.emoji_target = None;
@@ -1902,10 +1943,41 @@ impl RustMeow {
         self.image_viewer = None;
         self.settings_open = false;
         self.chat_switcher = Some(switcher);
+        // The commit-on-ctrl-release and escape handlers live on the root div,
+        // which only sees events while focus is somewhere inside it. Opening
+        // the switcher may unmount the focused input (emoji search), so anchor
+        // focus to the root for the switcher's lifetime.
+        self.focus_handle.focus(window, cx);
     }
 
-    fn cancel_chat_switcher(&mut self) {
+    fn cycle_recent_chat_from_global(
+        this: &WeakEntity<Self>,
+        window: AnyWindowHandle,
+        reverse: bool,
+        cx: &mut App,
+    ) {
+        let Some(this) = this.upgrade() else {
+            return;
+        };
+        // Global action handlers fire while the window is mid-dispatch, so
+        // defer until its lease is released before updating it again.
+        cx.defer(move |cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |app, cx| {
+                        app.cycle_recent_chat(reverse, window, cx);
+                        cx.notify();
+                    });
+                })
+                .ok();
+        });
+    }
+
+    fn cancel_chat_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.chat_switcher = None;
+        if self.store.selected_chat_id.is_some() {
+            self.composer.update(cx, |input, cx| input.focus(window, cx));
+        }
     }
 
     fn commit_chat_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1941,8 +2013,10 @@ impl RustMeow {
         self.load_selected_chat(chat_id.clone());
         let draft = self.chat_drafts.get(&chat_id).cloned().unwrap_or_default();
         self.replying_to_message_id = draft.reply_to_message_id;
-        self.composer
-            .update(cx, |input, cx| input.set_value(draft.text, window, cx));
+        self.composer.update(cx, |input, cx| {
+            input.set_value(draft.text, window, cx);
+            input.focus(window, cx);
+        });
     }
 
     fn load_selected_chat(&mut self, chat_id: String) {
@@ -2461,8 +2535,8 @@ impl RustMeow {
                                             } else {
                                                 "Archived"
                                             })
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.toggle_chat_view();
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.toggle_chat_view(window, cx);
                                                 cx.notify();
                                             })),
                                     )
@@ -4381,13 +4455,14 @@ impl Render for RustMeow {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
-            .on_action(cx.listener(|this, _: &CycleRecentChat, _, cx| {
-                this.cycle_recent_chat(false);
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &CycleRecentChat, window, cx| {
+                this.cycle_recent_chat(false, window, cx);
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &CycleRecentChatReverse, _, cx| {
-                this.cycle_recent_chat(true);
+            .on_action(cx.listener(|this, _: &CycleRecentChatReverse, window, cx| {
+                this.cycle_recent_chat(true, window, cx);
                 cx.stop_propagation();
                 cx.notify();
             }))
@@ -4441,7 +4516,7 @@ impl Render for RustMeow {
                     return;
                 }
                 if this.chat_switcher.is_some() && event.keystroke.key == "escape" {
-                    this.cancel_chat_switcher();
+                    this.cancel_chat_switcher(window, cx);
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -4572,6 +4647,20 @@ fn main() {
         cx.spawn(async move |cx| {
             cx.open_window(options, |window, cx| {
                 let app = cx.new(|cx| RustMeow::new(window, cx));
+                // Fallback for when focus is lost or points at an unmounted
+                // element: in that state the root div is off the dispatch path
+                // and its on_action handlers never run, so also handle the
+                // switcher actions globally. When the root handlers do run
+                // they stop propagation, which keeps these from firing twice.
+                let window_handle = window.window_handle();
+                let weak = app.downgrade();
+                cx.on_action(move |_: &CycleRecentChat, cx| {
+                    RustMeow::cycle_recent_chat_from_global(&weak, window_handle, false, cx);
+                });
+                let weak = app.downgrade();
+                cx.on_action(move |_: &CycleRecentChatReverse, cx| {
+                    RustMeow::cycle_recent_chat_from_global(&weak, window_handle, true, cx);
+                });
                 cx.new(|cx| Root::new(app, window, cx))
             })
             .expect("open Rust Meow window");
@@ -4755,19 +4844,26 @@ mod reaction_details_ui_tests {
 
     #[test]
     fn recent_chat_switcher_cycles_in_both_directions_and_wraps() {
-        let ids = vec!["active".into(), "previous".into(), "older".into()];
-        let mut forward = ChatSwitcher::new(ids.clone(), false).unwrap();
+        let ids: Vec<String> = vec!["active".into(), "previous".into(), "older".into()];
+        let mut forward = ChatSwitcher::new(ids.clone(), false, true).unwrap();
         assert_eq!(forward.selected_chat_id(), Some("previous"));
         forward.cycle(false);
         assert_eq!(forward.selected_chat_id(), Some("older"));
         forward.cycle(false);
         assert_eq!(forward.selected_chat_id(), Some("active"));
 
-        let mut reverse = ChatSwitcher::new(ids, true).unwrap();
+        let mut reverse = ChatSwitcher::new(ids.clone(), true, true).unwrap();
         assert_eq!(reverse.selected_chat_id(), Some("older"));
         reverse.cycle(true);
         assert_eq!(reverse.selected_chat_id(), Some("previous"));
-        assert!(ChatSwitcher::new(vec!["only".into()], false).is_none());
+        assert!(ChatSwitcher::new(vec!["only".into()], false, true).is_none());
+
+        // Without an active chat at the front, the most recent candidate is
+        // the immediate target and a single candidate is enough.
+        let no_selection = ChatSwitcher::new(ids, false, false).unwrap();
+        assert_eq!(no_selection.selected_chat_id(), Some("active"));
+        let single = ChatSwitcher::new(vec!["only".into()], false, false).unwrap();
+        assert_eq!(single.selected_chat_id(), Some("only"));
     }
 
     #[test]
