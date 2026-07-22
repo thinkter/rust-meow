@@ -30,6 +30,7 @@ import (
 
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
+	"github.com/rust-meow/rust-meow/backend/internal/securefs"
 	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
@@ -157,7 +158,16 @@ func (e *LogoutError) Error() string {
 }
 
 func New(ctx context.Context, dataDir string, productStore *store.Store, sink Sink, log *slog.Logger) (*Client, error) {
-	db, err := sql.Open("sqlite", filepath.Join(dataDir, "session.db"))
+	sessionPath := filepath.Join(dataDir, "session.db")
+	if err := securefs.EnsurePrivateFile(sessionPath); err != nil {
+		return nil, fmt.Errorf("secure whatsmeow database: %w", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := securefs.RestrictFileIfPresent(sessionPath + suffix); err != nil {
+			return nil, fmt.Errorf("secure whatsmeow database sidecar: %w", err)
+		}
+	}
+	db, err := sql.Open("sqlite", sessionPath)
 	if err != nil {
 		return nil, err
 	}

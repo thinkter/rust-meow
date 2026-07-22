@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
+
+	"github.com/rust-meow/rust-meow/backend/internal/securefs"
 )
 
 func New(path string) (*slog.Logger, io.Closer, error) {
@@ -14,6 +16,10 @@ func New(path string) (*slog.Logger, io.Closer, error) {
 		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open log file: %w", err)
+		}
+		if err = securefs.RestrictOpenFile(file); err != nil {
+			file.Close()
+			return nil, nil, fmt.Errorf("secure log file: %w", err)
 		}
 		writer = io.MultiWriter(os.Stderr, file)
 		closer = file

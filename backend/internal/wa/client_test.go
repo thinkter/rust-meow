@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,39 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestNewRestrictsWhatsMeowDatabaseMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows permissions are enforced by the user-profile ACL")
+	}
+	ctx := context.Background()
+	directory := t.TempDir()
+	sessionPath := filepath.Join(directory, "session.db")
+	if err := os.WriteFile(sessionPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sessionPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	client, err := New(ctx, directory, productStore, func(Event) {}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	info, err := os.Stat(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("session database mode = %04o, want 0600", got)
+	}
+}
 
 func startTestReducer(c *Client) func() {
 	c.reducerWG.Add(1)

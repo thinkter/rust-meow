@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +15,37 @@ import (
 
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 )
+
+func TestOpenRestrictsDatabaseAndSQLiteSidecarModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows permissions are enforced by the user-profile ACL")
+	}
+	path := filepath.Join(t.TempDir(), "client.db")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		info, statErr := os.Stat(candidate)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("mode for %s = %04o, want 0600", candidate, got)
+		}
+	}
+}
 
 func TestEmptyLegacyCacheRebuildsAsConversationSchema(t *testing.T) {
 	ctx := context.Background()

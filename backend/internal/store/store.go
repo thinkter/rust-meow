@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
+	"github.com/rust-meow/rust-meow/backend/internal/securefs"
 	_ "modernc.org/sqlite"
 )
 
@@ -40,6 +41,14 @@ var (
 )
 
 func Open(ctx context.Context, path string) (*Store, error) {
+	if err := securefs.EnsurePrivateFile(path); err != nil {
+		return nil, fmt.Errorf("secure database: %w", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := securefs.RestrictFileIfPresent(path + suffix); err != nil {
+			return nil, fmt.Errorf("secure database sidecar: %w", err)
+		}
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
