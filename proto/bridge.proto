@@ -619,8 +619,8 @@ message GetMessageAttachmentRequest {
 message GetMessageAttachmentResponse {
   string chat_id = 1;
   string message_id = 2;
-  // A backend-owned cache entry, or the still-valid source path for an
-  // attachment sent from this device.
+  // A regular file in the backend-owned media cache. User-selected source
+  // paths are never exposed through the bridge.
   string local_path = 3;
 }
 

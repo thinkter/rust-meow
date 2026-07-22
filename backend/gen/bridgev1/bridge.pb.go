@@ -6181,8 +6181,8 @@ type GetMessageAttachmentResponse struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	ChatId    string                 `protobuf:"bytes,1,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
 	MessageId string                 `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
-	// A backend-owned cache entry, or the still-valid source path for an
-	// attachment sent from this device.
+	// A regular file in the backend-owned media cache. User-selected source
+	// paths are never exposed through the bridge.
 	LocalPath     string `protobuf:"bytes,3,opt,name=local_path,json=localPath,proto3" json:"local_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

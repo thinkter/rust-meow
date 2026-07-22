@@ -587,23 +587,30 @@ func TestDownloadAttachmentUsesValidLocalFilesWithoutNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &Client{store: productStore, mediaDir: filepath.Join(directory, "media")}
-	path, err := client.DownloadAttachment(ctx, message.ChatJID, message.ID)
-	if err != nil || path != sourcePath {
-		t.Fatalf("path=%q err=%v", path, err)
-	}
-	if err = os.Remove(sourcePath); err != nil {
-		t.Fatal(err)
-	}
 	stored, err := productStore.Message(ctx, message.ChatJID, message.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	path, err := client.DownloadAttachment(ctx, message.ChatJID, message.ID)
 	cachePath := client.attachmentPath(stored.ChatJID, stored.ID, stored.Attachment)
-	if err = os.MkdirAll(client.mediaDir, 0o700); err != nil {
+	if err != nil || path != cachePath {
+		t.Fatalf("path=%q want=%q err=%v", path, cachePath, err)
+	}
+	if path == sourcePath || !validManagedAttachment(client.mediaDir, path, uint64(len(contents))) {
+		t.Fatalf("external source escaped instead of a managed cache path: %q", path)
+	}
+	if cached, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(cached, contents) {
+		t.Fatalf("cached contents=%q err=%v", cached, readErr)
+	}
+	if err = os.Remove(sourcePath); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(cachePath, contents, 0o600); err != nil {
+	stored, err = productStore.Message(ctx, message.ChatJID, message.ID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if stored.Attachment == nil || stored.Attachment.LocalPath != cachePath {
+		t.Fatalf("stored=%+v, want managed path %q", stored.Attachment, cachePath)
 	}
 	path, err = client.DownloadAttachment(ctx, message.ChatJID, message.ID)
 	if err != nil || path != cachePath {
@@ -612,6 +619,77 @@ func TestDownloadAttachmentUsesValidLocalFilesWithoutNetwork(t *testing.T) {
 	stored, err = productStore.Message(ctx, message.ChatJID, message.ID)
 	if err != nil || stored.Attachment == nil || stored.Attachment.LocalPath != cachePath {
 		t.Fatalf("stored=%+v err=%v", stored.Attachment, err)
+	}
+}
+
+func TestCachedAttachmentPathNeverExposesExternalOrSymlinkedFiles(t *testing.T) {
+	directory := t.TempDir()
+	mediaDir := filepath.Join(directory, "media")
+	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(directory, "external.pdf")
+	contents := []byte("%PDF-1.7 external")
+	if err := os.WriteFile(external, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{mediaDir: mediaDir}
+	attachment := &domain.Attachment{
+		MIMEType: "application/pdf", FileName: "external.pdf", LocalPath: external, FileSize: uint64(len(contents)),
+	}
+	if path := client.CachedAttachmentPath("chat", "message", attachment); path != "" {
+		t.Fatalf("external path %q was exposed", path)
+	}
+
+	cachePath := client.attachmentPath("chat", "message", attachment)
+	if err := os.Symlink(external, cachePath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if path := client.CachedAttachmentPath("chat", "message", attachment); path != "" {
+		t.Fatalf("symlinked cache path %q was exposed", path)
+	}
+}
+
+func TestMaterializeAttachmentSourcePublishesStableBoundedSnapshot(t *testing.T) {
+	directory := t.TempDir()
+	mediaDir := filepath.Join(directory, "media")
+	external := filepath.Join(directory, "external.bin")
+	contents := []byte("stable attachment snapshot")
+	if err := os.WriteFile(external, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{mediaDir: mediaDir}
+	attachment := &domain.Attachment{
+		MIMEType: "application/octet-stream", FileName: "external.bin", FileSize: uint64(len(contents)),
+	}
+	path, err := client.materializeAttachmentSource("chat", "message", attachment, external, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := client.attachmentPath("chat", "message", attachment); path != want {
+		t.Fatalf("path=%q want stable path %q", path, want)
+	}
+	if !validManagedAttachment(mediaDir, path, attachment.FileSize) {
+		t.Fatalf("materialized path %q is not a managed attachment", path)
+	}
+	if err = os.WriteFile(external, []byte("mutated source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cached, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(cached, contents) {
+		t.Fatalf("cached contents=%q err=%v", cached, readErr)
+	}
+	entries, err := os.ReadDir(mediaDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		t.Fatalf("cache entries=%v", entries)
+	}
+
+	mismatch := *attachment
+	mismatch.FileSize++
+	if _, err = client.materializeAttachmentSource("chat", "other", &mismatch, external, nil); err == nil {
+		t.Fatal("source with mismatched metadata size was cached")
 	}
 }
 

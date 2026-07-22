@@ -1530,19 +1530,145 @@ func validLocalAttachment(path string, expectedSize uint64) bool {
 	return expectedSize == 0 || uint64(info.Size()) == expectedSize
 }
 
+func pathWithin(root, target string) bool {
+	relative, err := filepath.Rel(root, target)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func validManagedAttachment(mediaDir, path string, expectedSize uint64) bool {
+	if !filepath.IsAbs(mediaDir) || !filepath.IsAbs(path) {
+		return false
+	}
+	root, err := filepath.EvalSymlinks(mediaDir)
+	if err != nil {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || !pathWithin(root, resolved) {
+		return false
+	}
+	// Reject a final-component symlink even when it resolves back into the
+	// cache. Only backend-created regular files are valid bridge assets.
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxAttachmentBytes {
+		return false
+	}
+	return expectedSize == 0 || uint64(info.Size()) == expectedSize
+}
+
 func (c *Client) CachedAttachmentPath(chatID, messageID string, attachment *domain.Attachment) string {
 	if attachment == nil {
 		return ""
 	}
-	if attachment.LocalPath != "" && validLocalAttachment(attachment.LocalPath, attachment.FileSize) {
-		return attachment.LocalPath
-	}
 	path := c.attachmentPath(chatID, messageID, attachment)
-	if validLocalAttachment(path, attachment.FileSize) {
+	if validManagedAttachment(c.mediaDir, path, attachment.FileSize) {
 		return path
 	}
 	_ = os.Remove(path)
 	return ""
+}
+
+// materializeAttachmentSource publishes an immutable snapshot of a local
+// attachment under the backend-owned media directory. The source may be a
+// user-selected path, but the returned path is always the stable cache name
+// derived from the chat and message IDs.
+func (c *Client) materializeAttachmentSource(chatID, messageID string, attachment *domain.Attachment, sourcePath string, opened *os.File) (path string, err error) {
+	if attachment == nil {
+		return "", fmt.Errorf("attachment metadata is missing")
+	}
+	if !filepath.IsAbs(sourcePath) {
+		return "", fmt.Errorf("attachment source path must be absolute")
+	}
+	if err = os.MkdirAll(c.mediaDir, 0o700); err != nil {
+		return "", fmt.Errorf("create media cache: %w", err)
+	}
+	root, err := filepath.EvalSymlinks(c.mediaDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve media cache: %w", err)
+	}
+	path = c.attachmentPath(chatID, messageID, attachment)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil || parent != root || !pathWithin(root, filepath.Join(parent, filepath.Base(path))) {
+		return "", fmt.Errorf("attachment cache path escapes the media directory")
+	}
+	if validManagedAttachment(c.mediaDir, path, attachment.FileSize) {
+		return path, nil
+	}
+	if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return "", fmt.Errorf("replace invalid attachment cache file: %w", removeErr)
+	}
+
+	resolvedSource, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve attachment source: %w", err)
+	}
+	if !filepath.IsAbs(resolvedSource) {
+		return "", fmt.Errorf("resolved attachment source path must be absolute")
+	}
+	sourceInfo, err := os.Stat(resolvedSource)
+	if err != nil {
+		return "", fmt.Errorf("inspect attachment source: %w", err)
+	}
+	if !sourceInfo.Mode().IsRegular() || sourceInfo.Size() <= 0 || sourceInfo.Size() > maxAttachmentBytes {
+		return "", fmt.Errorf("attachment source must be a regular file between 1 byte and 2 GiB")
+	}
+	if attachment.FileSize > 0 && uint64(sourceInfo.Size()) != attachment.FileSize {
+		return "", fmt.Errorf("attachment source size does not match metadata")
+	}
+
+	source := opened
+	closeSource := false
+	if source == nil {
+		source, err = os.Open(resolvedSource)
+		if err != nil {
+			return "", fmt.Errorf("open attachment source: %w", err)
+		}
+		closeSource = true
+	} else {
+		openedInfo, statErr := source.Stat()
+		if statErr != nil || !os.SameFile(sourceInfo, openedInfo) {
+			return "", fmt.Errorf("attachment source changed after validation")
+		}
+	}
+	if closeSource {
+		defer source.Close()
+	}
+	if _, err = source.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("rewind attachment source: %w", err)
+	}
+
+	temporary, err := os.CreateTemp(c.mediaDir, ".attachment-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create attachment cache file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err == nil {
+		var copied int64
+		copied, err = io.Copy(temporary, io.LimitReader(source, maxAttachmentBytes+1))
+		if err == nil && (copied <= 0 || copied > maxAttachmentBytes || copied != sourceInfo.Size()) {
+			err = fmt.Errorf("attachment source changed while it was cached")
+		}
+		if err == nil && attachment.FileSize > 0 && uint64(copied) != attachment.FileSize {
+			err = fmt.Errorf("cached attachment size does not match metadata")
+		}
+		if err == nil {
+			err = temporary.Sync()
+		}
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("cache attachment source: %w", err)
+	}
+	if err = os.Rename(temporaryPath, path); err != nil && !validManagedAttachment(c.mediaDir, path, attachment.FileSize) {
+		return "", fmt.Errorf("publish attachment cache: %w", err)
+	}
+	if !validManagedAttachment(c.mediaDir, path, attachment.FileSize) {
+		return "", fmt.Errorf("published attachment cache file is invalid")
+	}
+	return path, nil
 }
 
 func imageExtension(mimeType string) string {
@@ -2031,7 +2157,7 @@ func (c *Client) SendAttachment(ctx context.Context, clientID, chatID, sourcePat
 	}
 	waID := string(c.wa.GenerateMessageID())
 	attachment := &domain.Attachment{
-		Caption: caption, MIMEType: source.mimeType, LocalPath: source.path, FileSize: uint64(source.size), VoiceNote: voiceNote,
+		Caption: caption, MIMEType: source.mimeType, FileSize: uint64(source.size), VoiceNote: voiceNote,
 	}
 	if kind == "document" {
 		attachment.FileName = source.fileName
@@ -2049,8 +2175,31 @@ func (c *Client) SendAttachment(ctx context.Context, clientID, chatID, sourcePat
 	if existed {
 		return c.store.Message(ctx, chatID, waID)
 	}
+	cachePath, err := c.materializeAttachmentSource(chatID, waID, attachment, source.path, source.file)
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("cache %s: %w", kind, err)
+	}
+	attachment.LocalPath = cachePath
+	if err = c.store.SetAttachmentLocalPath(ctx, chatID, waID, cachePath); err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("store cached %s path: %w", kind, err)
+	}
+	uploadSource, err := os.Open(cachePath)
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("open cached %s: %w", kind, err)
+	}
+	defer uploadSource.Close()
+	c.pruneMediaCacheExcept(mediaCacheBytes, attachmentCacheKey(chatID, waID))
 	uploadCtx, cancelUpload := context.WithTimeout(ctx, 10*time.Minute)
-	upload, err := c.wa.UploadReader(uploadCtx, source.file, nil, mediaType)
+	upload, err := c.wa.UploadReader(uploadCtx, uploadSource, nil, mediaType)
 	cancelUpload()
 	if err == nil && !validUploadResponse(upload, source.size) {
 		err = fmt.Errorf("WhatsApp returned incomplete attachment upload metadata")
@@ -2309,13 +2458,25 @@ func (c *Client) DownloadAttachment(ctx context.Context, chatID, messageID strin
 		}
 		return path, nil
 	}
+	var localSourceErr error
+	if attachment.LocalPath != "" {
+		path, cacheErr := c.materializeAttachmentSource(chatID, messageID, attachment, attachment.LocalPath, nil)
+		if cacheErr == nil {
+			if err = c.store.SetAttachmentLocalPath(ctx, chatID, messageID, path); err != nil {
+				return "", err
+			}
+			c.pruneMediaCacheExcept(mediaCacheBytes, attachmentCacheKey(chatID, messageID))
+			return path, nil
+		}
+		localSourceErr = fmt.Errorf("cache local attachment source: %w", cacheErr)
+	}
 	if attachment.FileSize > uint64(maxAttachmentBytes) {
 		return "", fmt.Errorf("attachment exceeds the 2 GiB download limit")
 	}
 	if attachment.DirectPath == "" || len(attachment.MediaKey) == 0 {
 		attachment, err = c.recoverAttachmentDescriptor(ctx, message, attachment)
 		if err != nil {
-			return "", err
+			return "", errors.Join(localSourceErr, err)
 		}
 		if attachment.FileSize > uint64(maxAttachmentBytes) {
 			return "", fmt.Errorf("attachment exceeds the 2 GiB download limit")

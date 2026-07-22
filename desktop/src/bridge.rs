@@ -3,7 +3,10 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
@@ -12,7 +15,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -99,9 +102,18 @@ impl BackendClient {
     fn fake() -> Self {
         let (outgoing, outgoing_rx) = async_channel::bounded(256);
         let (incoming_tx, incoming) = async_channel::bounded(1024);
+        let event_sequence = Arc::new(Mutex::new(1_u64));
+        let handshaken = Arc::new(AtomicBool::new(false));
+        let live_incoming = incoming_tx.clone();
+        let live_sequence = event_sequence.clone();
+        let live_handshaken = handshaken.clone();
+        thread::Builder::new()
+            .name("fake-live-events".into())
+            .spawn(move || fake_live_loop(live_incoming, live_sequence, live_handshaken))
+            .expect("spawn fake live events");
         thread::Builder::new()
             .name("fake-backend".into())
-            .spawn(move || fake_loop(outgoing_rx, incoming_tx))
+            .spawn(move || fake_loop(outgoing_rx, incoming_tx, event_sequence, handshaken))
             .expect("spawn fake backend");
         Self {
             outgoing,
@@ -208,6 +220,8 @@ fn backend_executable() -> Result<PathBuf> {
 fn fake_loop(
     outgoing: async_channel::Receiver<proto::Envelope>,
     incoming: async_channel::Sender<BridgeMessage>,
+    event_sequence: Arc<Mutex<u64>>,
+    handshaken: Arc<AtomicBool>,
 ) {
     let pairing = env::var_os("RUST_MEOW_FAKE_PAIRING").is_some();
     while let Ok(envelope) = outgoing.recv_blocking() {
@@ -215,6 +229,10 @@ fn fake_loop(
         let Some(envelope::Body::Request(request)) = envelope.body else {
             continue;
         };
+        let is_hello = matches!(
+            request.request.as_ref(),
+            Some(rpc_request::Request::Hello(_))
+        );
         let result = match request.request {
             Some(rpc_request::Request::Hello(_)) => {
                 rpc_response::Result::Hello(proto::HelloResponse {
@@ -235,19 +253,14 @@ fn fake_loop(
                 })
             }
             Some(rpc_request::Request::StartPairing(_)) => {
-                let event = proto::BackendEvent {
-                    sequence: 1,
-                    event: Some(proto::backend_event::Event::PairingQr(proto::PairingQr {
+                emit_fake_event(
+                    &incoming,
+                    &event_sequence,
+                    proto::backend_event::Event::PairingQr(proto::PairingQr {
                         code: "2@RUST-MEOW-FAKE-PAIRING-CODE".into(),
                         expires_at_ms: 4_102_444_800_000,
-                    })),
-                };
-                let _ =
-                    incoming.send_blocking(BridgeMessage::Envelope(Box::new(proto::Envelope {
-                        protocol_version: PROTOCOL_VERSION,
-                        request_id: 0,
-                        body: Some(envelope::Body::Event(event)),
-                    })));
+                    }),
+                );
                 rpc_response::Result::StartPairing(proto::StartPairingResponse { started: true })
             }
             Some(rpc_request::Request::ListChats(request)) => {
@@ -532,6 +545,14 @@ fn fake_loop(
                     thumbnail_path: String::new(),
                 })
             }
+            Some(rpc_request::Request::GetMessageAttachment(request)) => {
+                rpc_response::Result::GetMessageAttachment(proto::GetMessageAttachmentResponse {
+                    chat_id: request.chat_id,
+                    message_id: request.message_id,
+                    local_path: String::new(),
+                })
+            }
+            Some(rpc_request::Request::SendAttachment(request)) => fake_send_attachment(request),
             Some(rpc_request::Request::SendReaction(request)) => {
                 let removed = request.emoji.is_empty();
                 rpc_response::Result::SendReaction(proto::SendReactionResponse {
@@ -569,14 +590,184 @@ fn fake_loop(
             }
             None => continue,
         };
-        let _ = incoming.send_blocking(BridgeMessage::Envelope(Box::new(proto::Envelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id,
-            body: Some(envelope::Body::Response(proto::RpcResponse {
-                result: Some(result),
-            })),
-        })));
+        if incoming
+            .send_blocking(BridgeMessage::Envelope(Box::new(proto::Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id,
+                body: Some(envelope::Body::Response(proto::RpcResponse {
+                    result: Some(result),
+                })),
+            })))
+            .is_err()
+        {
+            return;
+        }
+        if is_hello {
+            // The real backend only exposes events after the Hello response has
+            // been written, so the deterministic backend must keep the same
+            // subscription boundary.
+            handshaken.store(true, Ordering::Release);
+        }
     }
+}
+
+fn fake_invalid_argument(message: impl Into<String>) -> rpc_response::Result {
+    rpc_response::Result::Error(proto::RpcError {
+        code: "invalid_argument".into(),
+        message: message.into(),
+        retryable: false,
+    })
+}
+
+fn fake_send_attachment(request: proto::SendAttachmentRequest) -> rpc_response::Result {
+    let Ok(kind) = proto::AttachmentKind::try_from(request.kind) else {
+        return fake_invalid_argument("unknown attachment kind");
+    };
+    if kind == proto::AttachmentKind::Unspecified {
+        return fake_invalid_argument("attachment kind is required");
+    }
+    if request.voice_note && kind != proto::AttachmentKind::Audio {
+        return fake_invalid_argument("voice_note is only valid for audio attachments");
+    }
+    if kind == proto::AttachmentKind::Audio && !request.caption.is_empty() {
+        return fake_invalid_argument("audio messages do not support captions");
+    }
+    let (kind_name, mime_type, file_name) = match kind {
+        proto::AttachmentKind::Document => (
+            "document",
+            "application/octet-stream",
+            Path::new(&request.file_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("attachment")
+                .to_owned(),
+        ),
+        proto::AttachmentKind::Video => ("video", "video/mp4", String::new()),
+        proto::AttachmentKind::Audio => (
+            "audio",
+            if request.voice_note {
+                "audio/ogg; codecs=opus"
+            } else {
+                "audio/ogg"
+            },
+            String::new(),
+        ),
+        proto::AttachmentKind::Unspecified => unreachable!("validated above"),
+    };
+    rpc_response::Result::SendAttachment(proto::SendAttachmentResponse {
+        message: Some(proto::Message {
+            id: request.client_message_id,
+            chat_id: request.chat_id,
+            sender_id: "me@s.whatsapp.net".into(),
+            sender_name: "You".into(),
+            from_me: true,
+            timestamp_ms: 1_900_000_000_000,
+            status: proto::MessageStatus::Sent as i32,
+            content: Some(proto::message::Content::Attachment(
+                proto::AttachmentContent {
+                    kind: kind_name.into(),
+                    caption: request.caption,
+                    mime_type: mime_type.into(),
+                    file_name,
+                    // Match the real backend's ownership boundary: a selected
+                    // source path is never exposed as a renderable cache asset.
+                    local_path: String::new(),
+                    voice_note: request.voice_note,
+                    downloadable: true,
+                    ..Default::default()
+                },
+            )),
+            reply_to_message_id: request.reply_to_message_id,
+            ..Default::default()
+        }),
+    })
+}
+
+fn emit_fake_event(
+    incoming: &async_channel::Sender<BridgeMessage>,
+    sequence: &Mutex<u64>,
+    event: proto::backend_event::Event,
+) -> bool {
+    let mut sequence = sequence.lock().expect("fake event sequence poisoned");
+    let envelope = proto::Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: 0,
+        body: Some(envelope::Body::Event(proto::BackendEvent {
+            sequence: *sequence,
+            event: Some(event),
+        })),
+    };
+    *sequence = sequence.saturating_add(1);
+    incoming
+        .send_blocking(BridgeMessage::Envelope(Box::new(envelope)))
+        .is_ok()
+}
+
+fn fake_live_loop(
+    incoming: async_channel::Sender<BridgeMessage>,
+    sequence: Arc<Mutex<u64>>,
+    handshaken: Arc<AtomicBool>,
+) {
+    while !handshaken.load(Ordering::Acquire) {
+        if incoming.is_closed() {
+            return;
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // The deterministic fixture also exercises the real-time path: incoming
+    // messages appear at the bottom while the chat row moves to the top.
+    thread::sleep(std::time::Duration::from_secs(3));
+    for counter in 1_u64.. {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as i64);
+        let (message_event, chat_event) = fake_live_event_pair(counter, timestamp_ms);
+        // Match the real backend: publish the stored message before its derived
+        // chat preview/unread-count update.
+        if !emit_fake_event(&incoming, &sequence, message_event)
+            || !emit_fake_event(&incoming, &sequence, chat_event)
+        {
+            return;
+        }
+        thread::sleep(std::time::Duration::from_secs(4));
+    }
+}
+
+fn fake_live_event_pair(
+    counter: u64,
+    timestamp_ms: i64,
+) -> (proto::backend_event::Event, proto::backend_event::Event) {
+    let message = proto::Message {
+        id: format!("live-{counter}"),
+        chat_id: "chat-0".into(),
+        sender_id: "friend@s.whatsapp.net".into(),
+        sender_name: "Meow friend".into(),
+        sender_phone_number: "+15551234567".into(),
+        timestamp_ms,
+        status: proto::MessageStatus::Delivered as i32,
+        content: Some(proto::message::Content::Text(proto::TextContent {
+            text: format!("Live message {counter} streamed into the bottom of the chat"),
+            link_preview: None,
+        })),
+        ..Default::default()
+    };
+    let mut chat = fake_chat(0);
+    chat.last_message_preview = message
+        .content
+        .as_ref()
+        .and_then(|content| match content {
+            proto::message::Content::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    chat.last_message_timestamp_ms = timestamp_ms;
+    chat.unread_count = 1;
+    (
+        proto::backend_event::Event::MessageUpserted(proto::MessageUpserted {
+            message: Some(message),
+        }),
+        proto::backend_event::Event::ChatUpserted(proto::ChatUpserted { chat: Some(chat) }),
+    )
 }
 
 fn fake_chat(id: usize) -> proto::Chat {
@@ -698,5 +889,136 @@ mod tests {
     fn oversized_prefix_is_rejected_before_allocation() {
         let bytes = ((MAX_FRAME_BYTES + 1) as u32).to_be_bytes();
         assert!(read_frame(&mut bytes.as_slice()).is_err());
+    }
+
+    #[test]
+    fn fake_handshake_opens_event_boundary_after_response() {
+        let (outgoing, outgoing_rx) = async_channel::bounded(2);
+        let (incoming_tx, incoming) = async_channel::bounded(2);
+        let handshaken = Arc::new(AtomicBool::new(false));
+        let worker_handshaken = handshaken.clone();
+        let worker = thread::spawn(move || {
+            fake_loop(
+                outgoing_rx,
+                incoming_tx,
+                Arc::new(Mutex::new(1)),
+                worker_handshaken,
+            );
+        });
+        let request = |request_id, request| proto::Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            body: Some(envelope::Body::Request(proto::RpcRequest {
+                request: Some(request),
+            })),
+        };
+        outgoing
+            .send_blocking(request(
+                1,
+                rpc_request::Request::GetAuthState(proto::GetAuthStateRequest {}),
+            ))
+            .unwrap();
+        let _ = incoming.recv_blocking().unwrap();
+        assert!(!handshaken.load(Ordering::Acquire));
+
+        outgoing
+            .send_blocking(request(
+                2,
+                rpc_request::Request::Hello(proto::HelloRequest::default()),
+            ))
+            .unwrap();
+        let response = incoming.recv_blocking().unwrap();
+        assert!(matches!(response, BridgeMessage::Envelope(_)));
+        for _ in 0..100 {
+            if handshaken.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(handshaken.load(Ordering::Acquire));
+        drop(outgoing);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn fake_attachment_responses_match_v14_contract() {
+        let request = |kind, caption: &str, voice_note| proto::SendAttachmentRequest {
+            client_message_id: "request-id".into(),
+            chat_id: "chat-id".into(),
+            file_path: "/tmp/voice.ogg".into(),
+            kind: kind as i32,
+            caption: caption.into(),
+            reply_to_message_id: "reply-id".into(),
+            voice_note,
+        };
+        let rpc_response::Result::SendAttachment(response) =
+            fake_send_attachment(request(proto::AttachmentKind::Audio, "", true))
+        else {
+            panic!("valid voice note did not return send_attachment");
+        };
+        let message = response.message.unwrap();
+        let Some(proto::message::Content::Attachment(attachment)) = message.content else {
+            panic!("fake response did not contain attachment content");
+        };
+        assert_eq!(attachment.kind, "audio");
+        assert_eq!(attachment.mime_type, "audio/ogg; codecs=opus");
+        assert!(attachment.voice_note);
+        assert!(attachment.local_path.is_empty());
+        assert_eq!(message.reply_to_message_id, "reply-id");
+
+        assert!(matches!(
+            fake_send_attachment(request(proto::AttachmentKind::Unspecified, "", false)),
+            rpc_response::Result::Error(_)
+        ));
+        assert!(matches!(
+            fake_send_attachment(request(proto::AttachmentKind::Video, "", true)),
+            rpc_response::Result::Error(_)
+        ));
+        assert!(matches!(
+            fake_send_attachment(request(proto::AttachmentKind::Audio, "caption", false)),
+            rpc_response::Result::Error(_)
+        ));
+    }
+
+    #[test]
+    fn fake_live_pair_matches_backend_event_order() {
+        let (message_event, chat_event) = fake_live_event_pair(7, 1234);
+        let proto::backend_event::Event::MessageUpserted(message) = message_event else {
+            panic!("first event was not the message upsert");
+        };
+        let proto::backend_event::Event::ChatUpserted(chat) = chat_event else {
+            panic!("second event was not the derived chat upsert");
+        };
+        let message = message.message.unwrap();
+        let chat = chat.chat.unwrap();
+        assert_eq!(message.timestamp_ms, chat.last_message_timestamp_ms);
+        assert_eq!(chat.unread_count, 1);
+        assert!(chat.last_message_preview.contains("Live message 7"));
+    }
+
+    #[test]
+    fn fake_event_emission_is_monotonic() {
+        let (incoming, received) = async_channel::bounded(2);
+        let sequence = Mutex::new(41);
+        for detail in ["first", "second"] {
+            assert!(emit_fake_event(
+                &incoming,
+                &sequence,
+                proto::backend_event::Event::ConnectionChanged(proto::ConnectionChanged {
+                    detail: detail.into(),
+                    ..Default::default()
+                }),
+            ));
+        }
+        let sequences: Vec<_> = (0..2)
+            .map(|_| match received.recv_blocking().unwrap() {
+                BridgeMessage::Envelope(envelope) => match envelope.body {
+                    Some(envelope::Body::Event(event)) => event.sequence,
+                    _ => panic!("fake event used the wrong envelope body"),
+                },
+                BridgeMessage::Exited(_) => panic!("fake bridge exited"),
+            })
+            .collect();
+        assert_eq!(sequences, [41, 42]);
     }
 }
