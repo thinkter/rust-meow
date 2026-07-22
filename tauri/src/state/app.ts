@@ -3,6 +3,7 @@ import { createStore, reconcile } from "solid-js/store";
 import { bridge, normalizeBridgeError, openFile } from "../lib/bridge";
 import { BoundedSet, boundWindowAround } from "../lib/performance";
 import { ParticipantAvatarQueue } from "../lib/participant-avatar-queue";
+import { clearMergedPollVotes } from "../lib/chat-merge";
 import { clonePollContent, optimisticPollVote, preservePendingPollIntent } from "../lib/polls";
 import {
   ensureNotificationPermission,
@@ -1620,19 +1621,26 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
               const hello = await bridge.hello();
               const auth = await bridge.getAuthState();
               const openChatIds = activeConversationIds(state.panes);
-              batch(() => {
-                setState("backendVersion", hello.backendVersion);
-                setState("connection", auth.connectionState);
-                setState("ownUserId", auth.ownUserId);
-                setState("screen", pairingStartupDecision(auth).screen);
-              });
-              await Promise.all([
+              // Finish every read from this attempt before retrying. This
+              // prevents a slow, older pin response from overwriting a newer
+              // attempt after Promise.all rejects early.
+              const refreshes = await Promise.allSettled([
                 loadChats(true, true, true),
                 ...openChatIds.flatMap((chatId) => [
                   loadConversation(chatId, "", true),
                   loadPinnedMessages(chatId, true),
                 ]),
               ]);
+              const failed = refreshes.find(
+                (result): result is PromiseRejectedResult => result.status === "rejected",
+              );
+              if (failed) throw failed.reason;
+              batch(() => {
+                setState("backendVersion", hello.backendVersion);
+                setState("connection", auth.connectionState);
+                setState("ownUserId", auth.ownUserId);
+                setState("screen", pairingStartupDecision(auth).screen);
+              });
             }, 3);
             batch(() => {
               setState("connectionDetail", "");
@@ -1643,6 +1651,10 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
           } catch (error) {
             const bridgeError = normalizeBridgeError(error);
             if (bridgeError.code !== "backend_epoch_changed") {
+              batch(() => {
+                setState("connection", ConnectionState.Reconnecting);
+                setState("connectionDetail", "State refresh failed after 3 attempts");
+              });
               toast(`Backend reconnected but refresh failed: ${bridgeError.message}`);
             }
           }
@@ -1726,6 +1738,11 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     const remappedPanes = state.panes.map((pane) => remapPaneChatId(pane, oldId, newId));
     const oldTyping = state.typing[oldId];
     const currentTyping = state.typing[newId];
+    const canonicalPins = (state.pinnedMessages[newId] ?? []).map((pin) => ({
+      ...pin,
+      message: pin.message ? { ...pin.message, chatId: newId } : null,
+    }));
+    const remainingPendingPollVotes = clearMergedPollVotes(state.pendingPollVotes, oldId);
 
     batch(() => {
       setState("chats", reconcile(sortChats(chats), { key: "id" }));
@@ -1736,6 +1753,9 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       setState("drafts", oldId, undefined!);
       if (oldTyping) setState("typing", newId, { ...oldTyping, ...currentTyping });
       setState("typing", oldId, undefined!);
+      setState("pinnedMessages", newId, canonicalPins);
+      setState("pinnedMessages", oldId, undefined!);
+      setState("pendingPollVotes", remainingPendingPollVotes);
       if (state.chatInfo?.chat?.id === oldId) setState("chatInfo", "chat", "id", newId);
       syncSelectedChatId();
     });
@@ -1746,10 +1766,18 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     );
     conversationLastFocusedAt.delete(oldId);
     conversationGenerations.delete(oldId);
+    for (const generations of [pollVoteGenerations, pinGenerations]) {
+      for (const key of generations.keys()) {
+        if (key.startsWith(`${oldId}\u0000`)) generations.delete(key);
+      }
+    }
     if (typingChatId === oldId) typingChatId = newId;
     const recent = readRecentChats().map((id) => (id === oldId ? newId : id));
     writeRecentChats([...new Set(recent)]);
     persistWorkspace();
+    // Active pin lists omit unpin tombstones, so old and canonical lists must
+    // never be merged locally. Hydrate the authoritative canonical set.
+    void loadPinnedMessages(newId);
   }
 
   function updateTyping(payload: {
