@@ -172,6 +172,22 @@ test("once every hydrated chat is still open, the cap evicts the least recently 
   assert.deepEqual(evicted, ["a"]);
 });
 
+test("conversation eviction never drops a chat currently visible in a pane", () => {
+  const lastFocusedAt = new Map([
+    ["visible", 1],
+    ["inactive-old", 2],
+    ["inactive-new", 3],
+  ]);
+  const evicted = conversationsToEvict(
+    ["visible", "inactive-old", "inactive-new"],
+    new Set(["visible", "inactive-old", "inactive-new"]),
+    lastFocusedAt,
+    2,
+    new Set(["visible"]),
+  );
+  assert.deepEqual(evicted, ["inactive-old"]);
+});
+
 test("normalizing a workspace snapshot rejects untrusted shapes", () => {
   assert.equal(normalizeWorkspaceSnapshot(null), undefined);
   assert.equal(normalizeWorkspaceSnapshot({}), undefined);

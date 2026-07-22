@@ -382,11 +382,13 @@ export function createAppModel() {
   /** Evict conversations that are no longer open anywhere, then trim to the LRU cap. */
   function pruneConversations() {
     const openChatIds = new Set(state.panes.flatMap((pane) => pane.tabChatIds));
+    const visibleChatIds = new Set(state.panes.map((pane) => pane.activeChatId).filter(Boolean));
     const evicted = conversationsToEvict(
       Object.keys(state.conversations),
       openChatIds,
       conversationLastFocusedAt,
       MAX_HYDRATED_CONVERSATIONS,
+      visibleChatIds,
     );
     if (evicted.length === 0) return;
     batch(() => {

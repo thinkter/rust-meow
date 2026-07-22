@@ -212,6 +212,7 @@ export function conversationsToEvict(
   openChatIds: ReadonlySet<string>,
   lastFocusedAt: ReadonlyMap<string, number>,
   maxHydrated: number,
+  protectedChatIds: ReadonlySet<string> = new Set(),
 ): string[] {
   const evicted: string[] = [];
   const survivors: string[] = [];
@@ -220,10 +221,10 @@ export function conversationsToEvict(
     else evicted.push(chatId);
   }
   if (survivors.length > maxHydrated) {
-    const ordered = [...survivors].sort(
+    const ordered = survivors.filter((chatId) => !protectedChatIds.has(chatId)).sort(
       (left, right) => (lastFocusedAt.get(left) ?? 0) - (lastFocusedAt.get(right) ?? 0),
     );
-    evicted.push(...ordered.slice(0, survivors.length - maxHydrated));
+    evicted.push(...ordered.slice(0, Math.max(0, survivors.length - maxHydrated)));
   }
   return evicted;
 }
