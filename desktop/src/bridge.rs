@@ -12,7 +12,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -414,7 +414,6 @@ fn fake_loop(
                             is_admin: index < 2,
                             is_super_admin: index == 0,
                             is_me: index == 3,
-                            ..Default::default()
                         })
                         .collect()
                 } else {
@@ -473,6 +472,7 @@ fn fake_loop(
                         status: proto::MessageStatus::Sent as i32,
                         content: Some(proto::message::Content::Text(proto::TextContent {
                             text: request.text,
+                            link_preview: None,
                         })),
                         reply_to_message_id: request.reply_to_message_id,
                         ..Default::default()
@@ -647,6 +647,12 @@ fn fake_message(chat_id: &str, id: usize) -> proto::Message {
             } else {
                 format!("Fast native message {id}")
             },
+            link_preview: id.is_multiple_of(13).then(|| proto::LinkPreview {
+                url: "https://example.com/rust-meow".into(),
+                title: "Rust Meow link preview".into(),
+                description: "OpenGraph metadata supplied by the fake backend".into(),
+                ..Default::default()
+            }),
         })),
         reactions: if id.is_multiple_of(11) {
             vec![proto::Reaction {

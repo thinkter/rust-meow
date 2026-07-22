@@ -148,6 +148,16 @@ func TestWireMessageIncludesReplyTarget(t *testing.T) {
 	}
 }
 
+func TestWireTextMessageIncludesLinkPreview(t *testing.T) {
+	message := wireMessage(domain.Message{Kind: "text", Text: "https://example.com", LinkPreview: &domain.LinkPreview{
+		URL: "https://example.com", Title: "Example", Description: "Preview", JPEGThumbnail: []byte{1, 2}, ThumbnailWidth: 320, ThumbnailHeight: 180,
+	}})
+	preview := message.GetText().GetLinkPreview()
+	if preview == nil || preview.GetUrl() != "https://example.com" || preview.GetTitle() != "Example" || preview.GetThumbnailWidth() != 320 || string(preview.GetJpegThumbnail()) != "\x01\x02" {
+		t.Fatalf("preview=%+v", preview)
+	}
+}
+
 func TestWireLegacyImageCanRequestDescriptorRepair(t *testing.T) {
 	message := wireMessage(domain.Message{ID: "old-image", ChatJID: "c@g.us", Kind: "image", Image: &domain.Image{}})
 	if message.GetImage() == nil || !message.GetImage().GetDownloadable() {

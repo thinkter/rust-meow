@@ -487,6 +487,18 @@ message ChatMerged {
 
 message TextContent {
   string text = 1;
+  LinkPreview link_preview = 2;
+}
+
+// OpenGraph-style metadata already attached by WhatsApp to an extended text
+// message. The desktop never fetches arbitrary message URLs on its own.
+message LinkPreview {
+  string url = 1;
+  string title = 2;
+  string description = 3;
+  bytes jpeg_thumbnail = 4;
+  uint32 thumbnail_width = 5;
+  uint32 thumbnail_height = 6;
 }
 
 message ImageContent {

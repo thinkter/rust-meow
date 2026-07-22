@@ -2394,7 +2394,7 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 		content = protocol.GetEditedMessage()
 	}
 	decoded := extractMessageContent(content, evt.Info.Type)
-	m := domain.Message{ID: string(evt.Info.ID), ChatJID: chatID, TransportJID: transportJID, SenderJID: evt.Info.Sender.ToNonAD().String(), Text: decoded.text, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe, Status: domain.StatusDelivered, Kind: decoded.kind, ReplyToID: messageContextInfo(content).GetStanzaID(), Image: decoded.image, Attachment: decoded.attachment, Contacts: decoded.contacts, Location: decoded.location}
+	m := domain.Message{ID: string(evt.Info.ID), ChatJID: chatID, TransportJID: transportJID, SenderJID: evt.Info.Sender.ToNonAD().String(), Text: decoded.text, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe, Status: domain.StatusDelivered, Kind: decoded.kind, ReplyToID: messageContextInfo(content).GetStanzaID(), Image: decoded.image, Attachment: decoded.attachment, Contacts: decoded.contacts, Location: decoded.location, LinkPreview: decoded.linkPreview}
 	if evt.IsEdit && protocol != nil && protocol.GetKey().GetID() != "" {
 		m.ID = protocol.GetKey().GetID()
 		m.EditedAt = time.UnixMilli(protocol.GetTimestampMS())
@@ -2410,11 +2410,12 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 }
 
 type messageContent struct {
-	kind, text string
-	image      *domain.Image
-	attachment *domain.Attachment
-	contacts   []domain.Contact
-	location   *domain.Location
+	kind, text  string
+	image       *domain.Image
+	attachment  *domain.Attachment
+	contacts    []domain.Contact
+	location    *domain.Location
+	linkPreview *domain.LinkPreview
 }
 
 func extractMessageContent(message *waE2E.Message, infoType string) messageContent {
@@ -2422,6 +2423,7 @@ func extractMessageContent(message *waE2E.Message, infoType string) messageConte
 	var attachment *domain.Attachment
 	var contacts []domain.Contact
 	var location *domain.Location
+	var linkPreview *domain.LinkPreview
 	text := ""
 	kind := "text"
 	if imageMessage := message.GetImageMessage(); imageMessage != nil {
@@ -2623,11 +2625,21 @@ func extractMessageContent(message *waE2E.Message, infoType string) messageConte
 		kind, text = "ephemeral_setting", ephemeralSettingText(protocolMessage.GetEphemeralExpiration())
 	} else {
 		text = messageInlineText(message)
+		if extended := message.GetExtendedTextMessage(); extended != nil && extended.GetMatchedText() != "" {
+			linkPreview = &domain.LinkPreview{
+				URL:             extended.GetMatchedText(),
+				Title:           extended.GetTitle(),
+				Description:     extended.GetDescription(),
+				JPEGThumbnail:   append([]byte(nil), extended.GetJPEGThumbnail()...),
+				ThumbnailWidth:  extended.GetThumbnailWidth(),
+				ThumbnailHeight: extended.GetThumbnailHeight(),
+			}
+		}
 		if text == "" {
 			kind, text = fallbackMessageContent(message, infoType)
 		}
 	}
-	return messageContent{kind: kind, text: text, image: imageInfo, attachment: attachment, contacts: contacts, location: location}
+	return messageContent{kind: kind, text: text, image: imageInfo, attachment: attachment, contacts: contacts, location: location, linkPreview: linkPreview}
 }
 
 // messagePoll returns the poll payload regardless of which versioned field

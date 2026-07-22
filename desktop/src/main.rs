@@ -14,6 +14,7 @@ use std::{
     ops::Range,
     path::PathBuf,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -21,9 +22,9 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, ModifiersChangedEvent,
-    ObjectFit, ParentElement as _, WeakEntity,
-    PathPromptOptions, Pixels, Point, Render, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window,
+    ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Point, Render, ScrollDelta,
+    ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
+    Styled as _, StyledImage as _, Subscription, UniformListScrollHandle, WeakEntity, Window,
     WindowBounds, WindowOptions, actions, canvas, div, img, point, px, rgb, rgba, size,
     uniform_list,
 };
@@ -67,8 +68,114 @@ const UI_SCALE_STEP: f32 = 0.1;
 const BASE_UI_FONT_SIZE: f32 = 16.0;
 const BASE_MONO_FONT_SIZE: f32 = 13.0;
 const MAX_RECENT_CHATS: usize = 10;
+const SMOOTH_SCROLL_INPUT_RESET: Duration = Duration::from_millis(180);
+const SMOOTH_SCROLL_FRAME: Duration = Duration::from_millis(16);
+const SMOOTH_SCROLL_IMPULSE: f32 = 900.0;
+const SMOOTH_SCROLL_MAX_VELOCITY: f32 = 3_600.0;
+const SMOOTH_SCROLL_FRICTION: f32 = 10.0;
+const SMOOTH_SCROLL_STOP_VELOCITY: f32 = 18.0;
 
 actions!(rust_meow, [CycleRecentChat, CycleRecentChatReverse]);
+
+#[derive(Clone, Copy)]
+enum ScrollSurface {
+    ChatList,
+    Search,
+    Messages,
+    ChatInfo,
+}
+
+/// Adds a short inertial tail to discrete mouse-wheel input. Precise pixel
+/// input is left alone because touchpads already provide their own gesture
+/// phases and momentum through the window system.
+#[derive(Default)]
+struct SmoothScrollState {
+    velocity_y: f32,
+    last_input: Option<Instant>,
+    running: bool,
+    generation: u64,
+}
+
+impl SmoothScrollState {
+    fn push_wheel(&mut self, delta_y: f32, now: Instant) -> Option<u64> {
+        let direction = delta_y.signum();
+        if direction == 0.0 {
+            return None;
+        }
+        let continues_gesture = self.velocity_y.signum() == direction
+            && self
+                .last_input
+                .is_some_and(|last| now.duration_since(last) <= SMOOTH_SCROLL_INPUT_RESET);
+        if !continues_gesture {
+            self.velocity_y = 0.0;
+        }
+        self.velocity_y = (self.velocity_y + direction * SMOOTH_SCROLL_IMPULSE)
+            .clamp(-SMOOTH_SCROLL_MAX_VELOCITY, SMOOTH_SCROLL_MAX_VELOCITY);
+        self.last_input = Some(now);
+        if self.running {
+            None
+        } else {
+            self.running = true;
+            self.generation = self.generation.wrapping_add(1);
+            Some(self.generation)
+        }
+    }
+
+    fn advance(&mut self, generation: u64, elapsed_seconds: f32) -> Option<f32> {
+        if !self.running || self.generation != generation {
+            return None;
+        }
+        if self.velocity_y.abs() < SMOOTH_SCROLL_STOP_VELOCITY {
+            self.finish();
+            return None;
+        }
+        let distance = self.velocity_y * elapsed_seconds;
+        self.velocity_y *= (-SMOOTH_SCROLL_FRICTION * elapsed_seconds).exp();
+        Some(distance)
+    }
+
+    fn finish(&mut self) {
+        self.velocity_y = 0.0;
+        self.running = false;
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
+fn is_safe_web_url(url: &str) -> bool {
+    let remainder = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    remainder.is_some_and(|value| {
+        !value.is_empty() && !value.starts_with('/') && !value.chars().any(char::is_whitespace)
+    })
+}
+
+/// Splits one whitespace-delimited token around its first HTTP(S) URL. Common
+/// sentence punctuation is kept outside the clickable target.
+fn split_url_token(token: &str) -> Option<(&str, &str, &str)> {
+    let start = match (token.find("https://"), token.find("http://")) {
+        (Some(https), Some(http)) => https.min(http),
+        (Some(https), None) => https,
+        (None, Some(http)) => http,
+        (None, None) => return None,
+    };
+    let candidate = &token[start..];
+    let url =
+        candidate.trim_end_matches(['.', ',', '!', '?', ';', ':', ')', ']', '}', '>', '"', '\'']);
+    if !is_safe_web_url(url) {
+        return None;
+    }
+    Some((&token[..start], url, &candidate[url.len()..]))
+}
+
+fn link_preview_host(url: &str) -> &str {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+}
 
 /// Returns the byte offset of the `@` opening an in-progress mention token
 /// that ends at `cursor`. The `@` must start the text or follow whitespace,
@@ -270,8 +377,8 @@ struct ChatInfoState {
     info: Option<proto::GetChatInfoResponse>,
 }
 
-/// Transient "peer is typing" state for one chat. Indicators also expire
-/// locally because the terminal "paused" update from WhatsApp can be lost.
+/// Transient state for one peer. Each chat keeps a sender-keyed collection so
+/// concurrent group participants do not overwrite one another.
 struct TypingIndicator {
     sender_name: String,
     recording: bool,
@@ -282,6 +389,48 @@ const TYPING_INDICATOR_TTL: Duration = Duration::from_secs(10);
 /// How often the composer re-broadcasts "still typing" while text keeps
 /// changing. WhatsApp peers expire remote composing state after ~10 seconds.
 const TYPING_RESIGNAL: Duration = Duration::from_secs(8);
+
+fn format_typing_label(
+    indicators: &HashMap<String, TypingIndicator>,
+    group: bool,
+    now: Instant,
+) -> Option<String> {
+    let mut indicators = indicators
+        .values()
+        .filter(|indicator| indicator.expires_at > now)
+        .collect::<Vec<_>>();
+    if indicators.is_empty() {
+        return None;
+    }
+    indicators.sort_by_key(|indicator| indicator.sender_name.to_lowercase());
+    let action = if indicators.iter().all(|indicator| indicator.recording) {
+        "recording audio…"
+    } else {
+        "typing…"
+    };
+    if !group {
+        return Some(action.to_string());
+    }
+    let names = indicators
+        .iter()
+        .map(|indicator| {
+            let name = indicator.sender_name.trim();
+            if name.is_empty() { "Someone" } else { name }
+        })
+        .collect::<Vec<_>>();
+    match names.as_slice() {
+        [name] => Some(format!("{name} is {action}")),
+        [first, second] => Some(format!("{first} and {second} are {action}")),
+        [first, second, rest @ ..] => {
+            let others = if rest.len() == 1 { "other" } else { "others" };
+            Some(format!(
+                "{first}, {second} and {} {others} are {action}",
+                rest.len()
+            ))
+        }
+        [] => None,
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 struct SearchResults {
@@ -497,6 +646,7 @@ struct RustMeow {
     search_highlighted: usize,
     search_error: Option<String>,
     search_scroll: VirtualListScrollHandle,
+    search_smooth_scroll: SmoothScrollState,
     search_target_message_id: Option<String>,
     pending_search_scroll_id: Option<String>,
     pending_top_scroll_id: Option<String>,
@@ -515,13 +665,18 @@ struct RustMeow {
     mention_picker: Option<MentionPicker>,
     mention_directories: HashMap<String, Vec<proto::ChatParticipant>>,
     mention_directory_pending: HashSet<String>,
-    typing_indicators: HashMap<String, TypingIndicator>,
+    typing_indicators: HashMap<String, HashMap<String, TypingIndicator>>,
     typing_signal: Option<(String, Instant)>,
     focus_handle: FocusHandle,
     settings_open: bool,
     ui_scale: f32,
     chat_view: ChatView,
+    chat_scroll: UniformListScrollHandle,
+    chat_smooth_scroll: SmoothScrollState,
     message_scroll: VirtualListScrollHandle,
+    message_smooth_scroll: SmoothScrollState,
+    chat_info_scroll: ScrollHandle,
+    chat_info_smooth_scroll: SmoothScrollState,
     scroll_to_bottom_generation: Option<u64>,
     last_event_sequence: u64,
     pending_prepend_anchor: Option<(String, Point<Pixels>)>,
@@ -651,6 +806,7 @@ impl RustMeow {
             search_highlighted: 0,
             search_error: None,
             search_scroll: VirtualListScrollHandle::new(),
+            search_smooth_scroll: SmoothScrollState::default(),
             search_target_message_id: None,
             pending_search_scroll_id: None,
             pending_top_scroll_id: None,
@@ -675,7 +831,12 @@ impl RustMeow {
             settings_open: false,
             ui_scale,
             chat_view: ChatView::Inbox,
+            chat_scroll: UniformListScrollHandle::new(),
+            chat_smooth_scroll: SmoothScrollState::default(),
             message_scroll: VirtualListScrollHandle::new(),
+            message_smooth_scroll: SmoothScrollState::default(),
+            chat_info_scroll: ScrollHandle::new(),
+            chat_info_smooth_scroll: SmoothScrollState::default(),
             scroll_to_bottom_generation: None,
             last_event_sequence: 0,
             pending_prepend_anchor: None,
@@ -709,6 +870,90 @@ impl RustMeow {
         this
     }
 
+    fn smooth_scroll_state_mut(&mut self, surface: ScrollSurface) -> &mut SmoothScrollState {
+        match surface {
+            ScrollSurface::ChatList => &mut self.chat_smooth_scroll,
+            ScrollSurface::Search => &mut self.search_smooth_scroll,
+            ScrollSurface::Messages => &mut self.message_smooth_scroll,
+            ScrollSurface::ChatInfo => &mut self.chat_info_smooth_scroll,
+        }
+    }
+
+    fn smooth_scroll_handle(&self, surface: ScrollSurface) -> ScrollHandle {
+        match surface {
+            ScrollSurface::ChatList => self.chat_scroll.0.borrow().base_handle.clone(),
+            ScrollSurface::Search => self.search_scroll.base_handle().clone(),
+            ScrollSurface::Messages => self.message_scroll.base_handle().clone(),
+            ScrollSurface::ChatInfo => self.chat_info_scroll.clone(),
+        }
+    }
+
+    fn stop_smooth_scroll(&mut self, surface: ScrollSurface) {
+        self.smooth_scroll_state_mut(surface).finish();
+    }
+
+    fn handle_smooth_scroll_input(
+        &mut self,
+        surface: ScrollSurface,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ScrollDelta::Lines(delta) = event.delta else {
+            // A touchpad gesture should take over immediately from any
+            // mouse-wheel animation still in flight.
+            self.stop_smooth_scroll(surface);
+            return;
+        };
+        let Some(generation) = self
+            .smooth_scroll_state_mut(surface)
+            .push_wheel(delta.y, Instant::now())
+        else {
+            return;
+        };
+
+        let view = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let mut last_frame = Instant::now();
+            loop {
+                Timer::after(SMOOTH_SCROLL_FRAME).await;
+                let now = Instant::now();
+                let elapsed = now
+                    .duration_since(last_frame)
+                    .as_secs_f32()
+                    .clamp(0.001, 0.05);
+                last_frame = now;
+                let keep_running = window
+                    .update(|_, cx| {
+                        view.update(cx, |this, cx| {
+                            let Some(distance) = this
+                                .smooth_scroll_state_mut(surface)
+                                .advance(generation, elapsed)
+                            else {
+                                return false;
+                            };
+                            let handle = this.smooth_scroll_handle(surface);
+                            let offset = handle.offset();
+                            let maximum = handle.max_offset().y;
+                            let target_y = (offset.y + px(distance)).clamp(-maximum, px(0.));
+                            if maximum <= px(0.) || target_y == offset.y {
+                                this.stop_smooth_scroll(surface);
+                                return false;
+                            }
+                            handle.set_offset(point(offset.x, target_y));
+                            cx.notify();
+                            true
+                        })
+                    })
+                    .unwrap_or(false);
+                if !keep_running {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn request(&mut self, request: rpc_request::Request, pending: PendingRequest) {
         if let Err(error) = self.rpc.send(request, pending) {
             self.store.screen = Screen::Fatal;
@@ -720,8 +965,10 @@ impl RustMeow {
         // Piggyback on the 1s sweep: typing indicators expire locally because
         // the peer's terminal "paused" update can be lost.
         let now = Instant::now();
-        self.typing_indicators
-            .retain(|_, indicator| indicator.expires_at > now);
+        self.typing_indicators.retain(|_, indicators| {
+            indicators.retain(|_, indicator| indicator.expires_at > now);
+            !indicators.is_empty()
+        });
         for (_, pending) in self.rpc.expire() {
             match pending {
                 PendingRequest::Hello | PendingRequest::Auth => {
@@ -856,6 +1103,7 @@ impl RustMeow {
         self.search_results = SearchResults::default();
         self.search_highlighted = 0;
         self.search_error = None;
+        self.stop_smooth_scroll(ScrollSurface::Search);
         self.search_scroll.scroll_to_item(0, ScrollStrategy::Top);
         let trimmed = self.search_query.trim().to_owned();
         let generation = self.search_generation;
@@ -904,6 +1152,7 @@ impl RustMeow {
         self.search_results = SearchResults::default();
         self.search_highlighted = 0;
         self.search_error = None;
+        self.stop_smooth_scroll(ScrollSurface::Search);
         self.search_scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -922,6 +1171,7 @@ impl RustMeow {
             .search_results
             .row_index_for_result(self.search_highlighted)
         {
+            self.stop_smooth_scroll(ScrollSurface::Search);
             self.search_scroll
                 .scroll_to_item(row_index, ScrollStrategy::Center);
         }
@@ -1646,8 +1896,13 @@ impl RustMeow {
                 if let Some(message) = upsert.message {
                     // The typed-out message arrived; drop the indicator now
                     // rather than waiting for the paused update or the TTL.
-                    if !message.from_me {
-                        self.typing_indicators.remove(&message.chat_id);
+                    if !message.from_me
+                        && let Some(indicators) = self.typing_indicators.get_mut(&message.chat_id)
+                    {
+                        indicators.remove(&message.sender_id);
+                        if indicators.is_empty() {
+                            self.typing_indicators.remove(&message.chat_id);
+                        }
                     }
                     if self.store.has_newer_messages
                         && self.store.selected_chat_id.as_deref() == Some(message.chat_id.as_str())
@@ -1660,17 +1915,28 @@ impl RustMeow {
                 }
             }
             Some(backend_event::Event::TypingChanged(update)) => {
-                if update.typing {
-                    self.typing_indicators.insert(
-                        update.chat_id,
-                        TypingIndicator {
-                            sender_name: update.sender_name,
-                            recording: update.recording,
-                            expires_at: Instant::now() + TYPING_INDICATOR_TTL,
-                        },
-                    );
+                let sender_key = if update.sender_id.is_empty() {
+                    update.sender_name.clone()
                 } else {
-                    self.typing_indicators.remove(&update.chat_id);
+                    update.sender_id.clone()
+                };
+                if update.typing {
+                    self.typing_indicators
+                        .entry(update.chat_id)
+                        .or_default()
+                        .insert(
+                            sender_key,
+                            TypingIndicator {
+                                sender_name: update.sender_name,
+                                recording: update.recording,
+                                expires_at: Instant::now() + TYPING_INDICATOR_TTL,
+                            },
+                        );
+                } else if let Some(indicators) = self.typing_indicators.get_mut(&update.chat_id) {
+                    indicators.remove(&sender_key);
+                    if indicators.is_empty() {
+                        self.typing_indicators.remove(&update.chat_id);
+                    }
                 }
             }
             Some(backend_event::Event::ReceiptUpdated(receipt)) => {
@@ -2066,6 +2332,7 @@ impl RustMeow {
             .iter()
             .position(|message| message.id == message_id)
         {
+            self.stop_smooth_scroll(ScrollSurface::Messages);
             self.message_scroll
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
@@ -2246,7 +2513,12 @@ impl RustMeow {
         // This unmounts the composer (and emoji popup); if either held focus
         // the root would fall off the key dispatch path, deadening shortcuts.
         // The sidebar search input is the only input that survives the toggle.
-        if !self.search_input.read(cx).focus_handle(cx).is_focused(window) {
+        if !self
+            .search_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
             self.focus_handle.focus(window, cx);
         }
     }
@@ -2288,24 +2560,7 @@ impl RustMeow {
     /// The "typing…" line for a chat, or None when nobody is typing there.
     /// `group` picks the phrasing that names the member.
     fn typing_label(&self, chat_id: &str, group: bool) -> Option<String> {
-        let indicator = self.typing_indicators.get(chat_id)?;
-        if indicator.expires_at <= Instant::now() {
-            return None;
-        }
-        let action = if indicator.recording {
-            "recording audio…"
-        } else {
-            "typing…"
-        };
-        if !group {
-            return Some(action.to_string());
-        }
-        let name = if indicator.sender_name.trim().is_empty() {
-            "Someone"
-        } else {
-            indicator.sender_name.trim()
-        };
-        Some(format!("{name} is {action}"))
+        format_typing_label(self.typing_indicators.get(chat_id)?, group, Instant::now())
     }
 
     /// Broadcasts the local composing state, re-signalling at most once per
@@ -2346,6 +2601,8 @@ impl RustMeow {
         self.reaction_details = None;
         self.image_viewer = None;
         self.chat_switcher = None;
+        self.stop_smooth_scroll(ScrollSurface::ChatInfo);
+        self.chat_info_scroll.set_offset(point(px(0.), px(0.)));
         self.chat_info = Some(ChatInfoState {
             chat_id: chat_id.clone(),
             loading: true,
@@ -2416,7 +2673,8 @@ impl RustMeow {
     fn cancel_chat_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.chat_switcher = None;
         if self.store.selected_chat_id.is_some() {
-            self.composer.update(cx, |input, cx| input.focus(window, cx));
+            self.composer
+                .update(cx, |input, cx| input.focus(window, cx));
         }
     }
 
@@ -2472,6 +2730,7 @@ impl RustMeow {
             );
         }
         self.message_generation = self.message_generation.wrapping_add(1);
+        self.stop_smooth_scroll(ScrollSurface::Messages);
         self.store.select_chat(chat_id.clone());
         self.emoji_target = None;
         self.reaction_details = None;
@@ -3125,32 +3384,24 @@ impl RustMeow {
                                             } else {
                                                 avatar.src(PathBuf::from(chat.avatar_path.clone()))
                                             };
-                                            let preview = if let Some(indicator) =
-                                                this.typing_indicators.get(&chat.id)
-                                            {
-                                                let action = if indicator.recording {
-                                                    "recording audio…"
-                                                } else {
-                                                    "typing…"
-                                                };
-                                                if indicator.sender_name.is_empty() {
-                                                    action.to_string()
+                                            let typing_preview = this.typing_label(
+                                                &chat.id,
+                                                chat.kind() == proto::ChatKind::Group,
+                                            );
+                                            let row_typing = typing_preview.is_some();
+                                            let preview = typing_preview.unwrap_or_else(|| {
+                                                if chat.phone_number.is_empty() {
+                                                    chat.last_message_preview.clone()
+                                                } else if chat.last_message_preview.is_empty() {
+                                                    chat.phone_number.clone()
                                                 } else {
                                                     format!(
-                                                        "{} is {action}",
-                                                        indicator.sender_name
+                                                        "{} · {}",
+                                                        chat.phone_number,
+                                                        chat.last_message_preview
                                                     )
                                                 }
-                                            } else if chat.phone_number.is_empty() {
-                                                chat.last_message_preview.clone()
-                                            } else if chat.last_message_preview.is_empty() {
-                                                chat.phone_number.clone()
-                                            } else {
-                                                format!(
-                                                    "{} · {}",
-                                                    chat.phone_number, chat.last_message_preview
-                                                )
-                                            };
+                                            });
                                             div()
                                             .id(("chat", index))
                                             .h(px(72. * ui_scale))
@@ -3201,7 +3452,17 @@ impl RustMeow {
                                                         div()
                                                             .truncate()
                                                             .text_sm()
-                                                            .text_color(cx.theme().muted_foreground)
+                                                            .text_color(if row_typing {
+                                                                if dark {
+                                                                    gpui::Hsla::from(rgb(0x25d366))
+                                                                } else {
+                                                                    gpui::Hsla::from(rgb(
+                                                                        DARK_GREEN,
+                                                                    ))
+                                                                }
+                                                            } else {
+                                                                cx.theme().muted_foreground
+                                                            })
                                                             .child(preview),
                                                     ),
                                             )
@@ -3209,7 +3470,18 @@ impl RustMeow {
                                         .collect::<Vec<_>>()
                                 }),
                             )
-                            .h_full(),
+                            .h_full()
+                            .track_scroll(&self.chat_scroll)
+                            .on_scroll_wheel(cx.listener(
+                                |this, event, window, cx| {
+                                    this.handle_smooth_scroll_input(
+                                        ScrollSurface::ChatList,
+                                        event,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
                         )
                     })
                     .when(!search_active && visible_count == 0 && !has_more, |list| {
@@ -3288,6 +3560,9 @@ impl RustMeow {
                 .relative()
                 .flex_1()
                 .min_h_0()
+                .on_scroll_wheel(cx.listener(|this, event, window, cx| {
+                    this.handle_smooth_scroll_input(ScrollSurface::Search, event, window, cx);
+                }))
                 .child(
                     v_virtual_list(
                         cx.entity().clone(),
@@ -3545,6 +3820,7 @@ impl RustMeow {
         self.measure_message_heights(wrap_width, cx.theme().font_size, window);
         let sizes = self.store.message_sizes();
         if let Some(generation) = self.scroll_to_bottom_generation.take() {
+            self.stop_smooth_scroll(ScrollSurface::Messages);
             let item_count = sizes.len();
             cx.on_next_frame(window, move |this, _, cx| {
                 if item_count > 0
@@ -3564,6 +3840,7 @@ impl RustMeow {
                 .iter()
                 .position(|message| message.id == anchor_id)
         {
+            self.stop_smooth_scroll(ScrollSurface::Messages);
             let inserted_height = sizes[..anchor_index]
                 .iter()
                 .fold(px(0.), |height, size| height + size.height + px(8.));
@@ -3577,6 +3854,7 @@ impl RustMeow {
                 .iter()
                 .position(|message| message.id == target_id)
         {
+            self.stop_smooth_scroll(ScrollSurface::Messages);
             self.message_scroll
                 .scroll_to_item(index, ScrollStrategy::Center);
         }
@@ -3587,6 +3865,7 @@ impl RustMeow {
                 .iter()
                 .position(|message| message.id == target_id)
         {
+            self.stop_smooth_scroll(ScrollSurface::Messages);
             self.message_scroll
                 .scroll_to_item(index, ScrollStrategy::Top);
         }
@@ -3616,6 +3895,7 @@ impl RustMeow {
         identity_parts.push(connection_detail);
         let typing_line = self.typing_label(&chat.id, chat.kind() == proto::ChatKind::Group);
         let header_typing = typing_line.is_some();
+        let composer_typing_line = typing_line.clone();
         let identity_line = typing_line.unwrap_or_else(|| identity_parts.join(" · "));
         let reply_context = self.replying_to_message_id.as_deref().map(|message_id| {
             self.store.message(message_id).map_or_else(
@@ -3711,67 +3991,74 @@ impl RustMeow {
                     ),
             )
             .child(
-                div().flex_1().min_h_0().bg(conversation_background).child(
-                    v_virtual_list(
-                        cx.entity().clone(),
-                        "messages",
-                        sizes,
-                        |this, range: Range<usize>, window, cx| {
-                            let visible_images = range
-                                .clone()
-                                .filter_map(|index| this.store.messages.get(index))
-                                .filter_map(|message| match message.content.as_ref() {
-                                    Some(proto::message::Content::Image(image))
-                                        if image.thumbnail_path.is_empty()
-                                            && image.downloadable =>
-                                    {
-                                        Some((message.chat_id.clone(), message.id.clone()))
-                                    }
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>();
-                            for (chat_id, message_id) in visible_images {
-                                this.load_message_image(chat_id, message_id);
-                            }
-                            if this
-                                .store
-                                .selected_chat()
-                                .is_some_and(|chat| chat.kind() == proto::ChatKind::Group)
-                            {
-                                let participants = range
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(conversation_background)
+                    .on_scroll_wheel(cx.listener(|this, event, window, cx| {
+                        this.handle_smooth_scroll_input(ScrollSurface::Messages, event, window, cx);
+                    }))
+                    .child(
+                        v_virtual_list(
+                            cx.entity().clone(),
+                            "messages",
+                            sizes,
+                            |this, range: Range<usize>, window, cx| {
+                                let visible_images = range
                                     .clone()
                                     .filter_map(|index| this.store.messages.get(index))
-                                    .filter(|message| {
-                                        !message.from_me
-                                            && message.sender_avatar_path.is_empty()
-                                            && this
-                                                .store
-                                                .participant_avatar_path(&message.sender_id)
-                                                .is_none()
-                                            && !message.sender_id.is_empty()
+                                    .filter_map(|message| match message.content.as_ref() {
+                                        Some(proto::message::Content::Image(image))
+                                            if image.thumbnail_path.is_empty()
+                                                && image.downloadable =>
+                                        {
+                                            Some((message.chat_id.clone(), message.id.clone()))
+                                        }
+                                        _ => None,
                                     })
-                                    .map(|message| message.sender_id.clone())
-                                    .collect::<HashSet<_>>();
-                                for participant_id in participants {
-                                    this.load_participant_avatar(participant_id);
+                                    .collect::<Vec<_>>();
+                                for (chat_id, message_id) in visible_images {
+                                    this.load_message_image(chat_id, message_id);
                                 }
-                            }
-                            if range.end == this.store.messages.len()
-                                && (this.store.has_newer_messages || this.store.newer_activity)
-                            {
-                                this.load_newer_messages();
-                            } else if window.is_window_active()
-                                && range.end == this.store.messages.len()
-                            {
-                                this.mark_read();
-                            }
-                            range.map(|index| this.render_message(index, cx)).collect()
-                        },
-                    )
-                    .track_scroll(&self.message_scroll)
-                    .p_4()
-                    .gap_2(),
-                ),
+                                if this
+                                    .store
+                                    .selected_chat()
+                                    .is_some_and(|chat| chat.kind() == proto::ChatKind::Group)
+                                {
+                                    let participants = range
+                                        .clone()
+                                        .filter_map(|index| this.store.messages.get(index))
+                                        .filter(|message| {
+                                            !message.from_me
+                                                && message.sender_avatar_path.is_empty()
+                                                && this
+                                                    .store
+                                                    .participant_avatar_path(&message.sender_id)
+                                                    .is_none()
+                                                && !message.sender_id.is_empty()
+                                        })
+                                        .map(|message| message.sender_id.clone())
+                                        .collect::<HashSet<_>>();
+                                    for participant_id in participants {
+                                        this.load_participant_avatar(participant_id);
+                                    }
+                                }
+                                if range.end == this.store.messages.len()
+                                    && (this.store.has_newer_messages || this.store.newer_activity)
+                                {
+                                    this.load_newer_messages();
+                                } else if window.is_window_active()
+                                    && range.end == this.store.messages.len()
+                                {
+                                    this.mark_read();
+                                }
+                                range.map(|index| this.render_message(index, cx)).collect()
+                            },
+                        )
+                        .track_scroll(&self.message_scroll)
+                        .p_4()
+                        .gap_2(),
+                    ),
             )
             .when(has_older, |column| {
                 column.child(Button::new("older").label("Load older messages").on_click(
@@ -3811,6 +4098,21 @@ impl RustMeow {
                 v_flex()
                     .border_t_1()
                     .border_color(cx.theme().border)
+                    .when_some(composer_typing_line, |composer, typing| {
+                        composer.child(
+                            div()
+                                .h(px(24. * self.ui_scale))
+                                .px_4()
+                                .pt_1()
+                                .text_xs()
+                                .text_color(if dark {
+                                    gpui::Hsla::from(rgb(0x25d366))
+                                } else {
+                                    gpui::Hsla::from(rgb(DARK_GREEN))
+                                })
+                                .child(typing),
+                        )
+                    })
                     .when_some(reply_context, |composer, (sender, preview)| {
                         composer.child(
                             h_flex()
@@ -4395,6 +4697,10 @@ impl RustMeow {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.chat_info_scroll)
+            .on_scroll_wheel(cx.listener(|this, event, window, cx| {
+                this.handle_smooth_scroll_input(ScrollSurface::ChatInfo, event, window, cx);
+            }))
             .p_4()
             .gap_4()
             .child(
@@ -4434,15 +4740,18 @@ impl RustMeow {
                     .items_center()
                     .gap_2()
                     .child(div().text_sm().text_color(rgb(0xef4444)).child(error))
-                    .child(Button::new("chat-info-retry").small().label("Retry").on_click(
-                        cx.listener({
-                            let chat_id = chat_id.clone();
-                            move |this, _, _, cx| {
-                                this.open_chat_info(chat_id.clone());
-                                cx.notify();
-                            }
-                        }),
-                    )),
+                    .child(
+                        Button::new("chat-info-retry")
+                            .small()
+                            .label("Retry")
+                            .on_click(cx.listener({
+                                let chat_id = chat_id.clone();
+                                move |this, _, _, cx| {
+                                    this.open_chat_info(chat_id.clone());
+                                    cx.notify();
+                                }
+                            })),
+                    ),
             );
         }
         if let Some(info) = info {
@@ -4455,8 +4764,7 @@ impl RustMeow {
                         body = body.child(section("Phone", chat.phone_number.clone()));
                     }
                     if !info.verified_name.is_empty() {
-                        body =
-                            body.child(section("Verified business", info.verified_name.clone()));
+                        body = body.child(section("Verified business", info.verified_name.clone()));
                     }
                     if !chat.business_name.is_empty() && chat.business_name != chat.title {
                         body = body.child(section("Business name", chat.business_name.clone()));
@@ -4499,9 +4807,10 @@ impl RustMeow {
                     notes.push("Admins approve new members");
                 }
                 if !notes.is_empty() {
-                    body = body.child(v_flex().gap_1().children(notes.into_iter().map(|note| {
-                        div().text_xs().text_color(muted).child(format!("• {note}"))
-                    })));
+                    body =
+                        body.child(v_flex().gap_1().children(notes.into_iter().map(|note| {
+                            div().text_xs().text_color(muted).child(format!("• {note}"))
+                        })));
                 }
                 if !info.participants.is_empty() {
                     const MAX_MEMBER_ROWS: usize = 200;
@@ -4521,9 +4830,8 @@ impl RustMeow {
                         } else {
                             participant.display_name.clone()
                         };
-                        let member_avatar = Avatar::new()
-                            .name(display_name.clone())
-                            .with_size(px(32.));
+                        let member_avatar =
+                            Avatar::new().name(display_name.clone()).with_size(px(32.));
                         let member_avatar = match self
                             .store
                             .participant_avatar_path(&participant.participant_id)
@@ -4556,8 +4864,7 @@ impl RustMeow {
                                     .min_w_0()
                                     .child(div().text_sm().truncate().child(display_name))
                                     .when(
-                                        !participant.phone_number.is_empty()
-                                            && !participant.is_me,
+                                        !participant.phone_number.is_empty() && !participant.is_me,
                                         |details| {
                                             details.child(
                                                 div()
@@ -4605,9 +4912,10 @@ impl RustMeow {
                         members = members.child(row);
                     }
                     if info.participants.len() > MAX_MEMBER_ROWS {
-                        members = members.child(div().text_xs().text_color(muted).child(
-                            format!("…and {} more", info.participants.len() - MAX_MEMBER_ROWS),
-                        ));
+                        members = members.child(div().text_xs().text_color(muted).child(format!(
+                            "…and {} more",
+                            info.participants.len() - MAX_MEMBER_ROWS
+                        )));
                     }
                     body = body.child(members);
                 }
@@ -4675,11 +4983,13 @@ impl RustMeow {
                             .justify_between()
                             .border_b_1()
                             .border_color(border)
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(if is_group { "Group info" } else { "Contact info" }),
-                            )
+                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(
+                                if is_group {
+                                    "Group info"
+                                } else {
+                                    "Contact info"
+                                },
+                            ))
                             .child(Button::new("close-chat-info").label("×").on_click(
                                 cx.listener(|this, _, _, cx| {
                                     this.chat_info = None;
@@ -4915,8 +5225,121 @@ impl RustMeow {
             })
     }
 
+    fn render_linkified_text(
+        &self,
+        message_id: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut lines = Vec::new();
+        for (line_index, line) in text.split('\n').enumerate() {
+            let mut row = h_flex().flex_wrap();
+            if line.is_empty() {
+                row = row.child(div().child(" "));
+            }
+            for (token_index, token) in line.split_whitespace().enumerate() {
+                if let Some((prefix, url, suffix)) = split_url_token(token) {
+                    if !prefix.is_empty() {
+                        row = row.child(div().child(prefix.to_string()));
+                    }
+                    let target = url.to_string();
+                    row = row.child(
+                        div()
+                            .id(format!(
+                                "message-link-{message_id}-{line_index}-{token_index}"
+                            ))
+                            .cursor_pointer()
+                            .text_color(rgb(0x0b57d0))
+                            .underline()
+                            .child(url.to_string())
+                            .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&target))),
+                    );
+                    row = row.child(div().child(format!("{suffix} ")));
+                } else {
+                    row = row.child(div().child(format!("{token} ")));
+                }
+            }
+            lines.push(row.into_any_element());
+        }
+        div().child(v_flex().children(lines))
+    }
+
+    fn render_link_preview(
+        &self,
+        index: usize,
+        preview: proto::LinkPreview,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let target = is_safe_web_url(&preview.url).then(|| preview.url.clone());
+        let host = link_preview_host(&preview.url).to_string();
+        let title = if preview.title.trim().is_empty() {
+            host.clone()
+        } else {
+            preview.title.clone()
+        };
+        let thumbnail = (!preview.jpeg_thumbnail.is_empty()).then(|| {
+            Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Jpeg,
+                preview.jpeg_thumbnail,
+            ))
+        });
+        v_flex()
+            .id(("link-preview", index))
+            .w(px(320.))
+            .max_w_full()
+            .overflow_hidden()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .when_some(thumbnail, |card, thumbnail| {
+                card.child(
+                    img(thumbnail)
+                        .w_full()
+                        .h(px(144.))
+                        .object_fit(ObjectFit::Cover),
+                )
+            })
+            .child(
+                v_flex()
+                    .p_2()
+                    .gap_1()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .when(!preview.description.trim().is_empty(), |details| {
+                        details.child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(preview.description),
+                        )
+                    })
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(host),
+                    ),
+            )
+            .when_some(target, |card, target| {
+                card.cursor_pointer()
+                    .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&target)))
+            })
+    }
+
     fn render_message(&self, index: usize, cx: &mut Context<Self>) -> gpui::Div {
         let message = &self.store.messages[index];
+        let text_content = match message.content.as_ref() {
+            Some(proto::message::Content::Text(text)) => Some(text.clone()),
+            _ => None,
+        };
         let image_content = match message.content.as_ref() {
             Some(proto::message::Content::Image(image)) => Some(image.clone()),
             _ => None,
@@ -4934,6 +5357,7 @@ impl RustMeow {
         let first_reply_id = self.store.first_reply_id(&message.id).map(str::to_owned);
         let chat_id = message.chat_id.clone();
         let message_id = message.id.clone();
+        let body_message_id = message.id.clone();
         let search_target = self.search_target_message_id.as_deref() == Some(message.id.as_str());
         let reply_action_message_id = message_id.clone();
         let message_image_chat_id = chat_id.clone();
@@ -5177,7 +5601,15 @@ impl RustMeow {
                                 }),
                         )
                     })
-                    .when(!text.is_empty(), |bubble| bubble.child(div().child(text)))
+                    .when_some(
+                        text_content.and_then(|text| text.link_preview),
+                        |bubble, preview| {
+                            bubble.child(self.render_link_preview(index, preview, cx))
+                        },
+                    )
+                    .when(!text.is_empty(), |bubble| {
+                        bubble.child(self.render_linkified_text(&body_message_id, &text, cx))
+                    })
                     .when(!reaction_chips.is_empty(), |bubble| {
                         bubble.child(
                             h_flex()
@@ -5328,6 +5760,16 @@ impl RustMeow {
                     }
                     _ => px(0.),
                 };
+                let link_preview_height = match self.store.messages[index].content.as_ref() {
+                    Some(proto::message::Content::Text(text)) if text.link_preview.is_some() => {
+                        let thumbnail = text
+                            .link_preview
+                            .as_ref()
+                            .is_some_and(|preview| !preview.jpeg_thumbnail.is_empty());
+                        px(if thumbnail { 210. } else { 70. } * self.ui_scale)
+                    }
+                    _ => px(0.),
+                };
                 let reaction_height = if reaction_counts(&self.store.messages[index]).is_empty() {
                     px(0.)
                 } else {
@@ -5340,6 +5782,7 @@ impl RustMeow {
                 };
                 let height = text_height
                     + image_height
+                    + link_preview_height
                     + px(40. * self.ui_scale)
                     + reaction_height
                     + reply_height;
@@ -5688,6 +6131,89 @@ mod reaction_details_ui_tests {
     use super::*;
 
     #[test]
+    fn discrete_scroll_accelerates_then_resets_when_direction_changes() {
+        let now = Instant::now();
+        let mut scroll = SmoothScrollState::default();
+        let generation = scroll.push_wheel(-3.0, now).unwrap();
+        assert_eq!(scroll.velocity_y, -SMOOTH_SCROLL_IMPULSE);
+
+        assert!(
+            scroll
+                .push_wheel(-3.0, now + Duration::from_millis(50))
+                .is_none()
+        );
+        assert_eq!(scroll.velocity_y, -2.0 * SMOOTH_SCROLL_IMPULSE);
+        let distance = scroll.advance(generation, 0.016).unwrap();
+        assert!(distance < 0.0);
+        assert!(scroll.velocity_y.abs() < 2.0 * SMOOTH_SCROLL_IMPULSE);
+
+        assert!(
+            scroll
+                .push_wheel(3.0, now + Duration::from_millis(100))
+                .is_none()
+        );
+        assert_eq!(scroll.velocity_y, SMOOTH_SCROLL_IMPULSE);
+    }
+
+    #[test]
+    fn stopping_scroll_invalidates_the_running_animation() {
+        let mut scroll = SmoothScrollState::default();
+        let generation = scroll.push_wheel(3.0, Instant::now()).unwrap();
+        scroll.finish();
+        assert!(scroll.advance(generation, 0.016).is_none());
+        assert!(!scroll.running);
+    }
+
+    #[test]
+    fn url_tokens_keep_sentence_punctuation_outside_the_target() {
+        assert_eq!(
+            split_url_token("(https://example.com/docs?q=meow)."),
+            Some(("(", "https://example.com/docs?q=meow", ")."))
+        );
+        assert_eq!(
+            split_url_token("see:https://example.com"),
+            Some(("see:", "https://example.com", ""))
+        );
+        assert!(split_url_token("javascript:alert(1)").is_none());
+        assert!(split_url_token("https://").is_none());
+    }
+
+    #[test]
+    fn group_typing_summary_names_multiple_active_people() {
+        let now = Instant::now();
+        let indicators = HashMap::from([
+            (
+                "alice".into(),
+                TypingIndicator {
+                    sender_name: "Alice".into(),
+                    recording: false,
+                    expires_at: now + Duration::from_secs(5),
+                },
+            ),
+            (
+                "bob".into(),
+                TypingIndicator {
+                    sender_name: "Bob".into(),
+                    recording: false,
+                    expires_at: now + Duration::from_secs(5),
+                },
+            ),
+            (
+                "expired".into(),
+                TypingIndicator {
+                    sender_name: "Old".into(),
+                    recording: false,
+                    expires_at: now - Duration::from_secs(1),
+                },
+            ),
+        ]);
+        assert_eq!(
+            format_typing_label(&indicators, true, now).as_deref(),
+            Some("Alice and Bob are typing…")
+        );
+    }
+
+    #[test]
     fn search_results_keep_contacts_groups_and_messages_in_priority_order() {
         let results = SearchResults {
             contacts: vec![proto::ContactSearchResult {
@@ -5902,7 +6428,10 @@ mod reaction_details_ui_tests {
         assert_eq!(mention_token_start("hi @al ", 7), None); // token closed by space
         assert_eq!(mention_token_start("email@host", 10), None); // mid-word @
         assert_eq!(mention_token_start("no tag here", 11), None);
-        assert_eq!(mention_token_start("héllo @ñam", "héllo @ñam".len()), Some(7));
+        assert_eq!(
+            mention_token_start("héllo @ñam", "héllo @ñam".len()),
+            Some(7)
+        );
     }
 
     #[test]

@@ -4898,6 +4898,7 @@ func (x *ChatMerged) GetNewChatId() string {
 type TextContent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	LinkPreview   *LinkPreview           `protobuf:"bytes,2,opt,name=link_preview,json=linkPreview,proto3" json:"link_preview,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4939,6 +4940,99 @@ func (x *TextContent) GetText() string {
 	return ""
 }
 
+func (x *TextContent) GetLinkPreview() *LinkPreview {
+	if x != nil {
+		return x.LinkPreview
+	}
+	return nil
+}
+
+// OpenGraph-style metadata already attached by WhatsApp to an extended text
+// message. The desktop never fetches arbitrary message URLs on its own.
+type LinkPreview struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Url             string                 `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
+	Title           string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Description     string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	JpegThumbnail   []byte                 `protobuf:"bytes,4,opt,name=jpeg_thumbnail,json=jpegThumbnail,proto3" json:"jpeg_thumbnail,omitempty"`
+	ThumbnailWidth  uint32                 `protobuf:"varint,5,opt,name=thumbnail_width,json=thumbnailWidth,proto3" json:"thumbnail_width,omitempty"`
+	ThumbnailHeight uint32                 `protobuf:"varint,6,opt,name=thumbnail_height,json=thumbnailHeight,proto3" json:"thumbnail_height,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *LinkPreview) Reset() {
+	*x = LinkPreview{}
+	mi := &file_bridge_proto_msgTypes[60]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LinkPreview) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LinkPreview) ProtoMessage() {}
+
+func (x *LinkPreview) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[60]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LinkPreview.ProtoReflect.Descriptor instead.
+func (*LinkPreview) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{60}
+}
+
+func (x *LinkPreview) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *LinkPreview) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *LinkPreview) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *LinkPreview) GetJpegThumbnail() []byte {
+	if x != nil {
+		return x.JpegThumbnail
+	}
+	return nil
+}
+
+func (x *LinkPreview) GetThumbnailWidth() uint32 {
+	if x != nil {
+		return x.ThumbnailWidth
+	}
+	return 0
+}
+
+func (x *LinkPreview) GetThumbnailHeight() uint32 {
+	if x != nil {
+		return x.ThumbnailHeight
+	}
+	return 0
+}
+
 type ImageContent struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Caption  string                 `protobuf:"bytes,1,opt,name=caption,proto3" json:"caption,omitempty"`
@@ -4959,7 +5053,7 @@ type ImageContent struct {
 
 func (x *ImageContent) Reset() {
 	*x = ImageContent{}
-	mi := &file_bridge_proto_msgTypes[60]
+	mi := &file_bridge_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4971,7 +5065,7 @@ func (x *ImageContent) String() string {
 func (*ImageContent) ProtoMessage() {}
 
 func (x *ImageContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[60]
+	mi := &file_bridge_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4984,7 +5078,7 @@ func (x *ImageContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImageContent.ProtoReflect.Descriptor instead.
 func (*ImageContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{60}
+	return file_bridge_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ImageContent) GetCaption() string {
@@ -5077,7 +5171,7 @@ type AttachmentContent struct {
 
 func (x *AttachmentContent) Reset() {
 	*x = AttachmentContent{}
-	mi := &file_bridge_proto_msgTypes[61]
+	mi := &file_bridge_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5089,7 +5183,7 @@ func (x *AttachmentContent) String() string {
 func (*AttachmentContent) ProtoMessage() {}
 
 func (x *AttachmentContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[61]
+	mi := &file_bridge_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5102,7 +5196,7 @@ func (x *AttachmentContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachmentContent.ProtoReflect.Descriptor instead.
 func (*AttachmentContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{61}
+	return file_bridge_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *AttachmentContent) GetKind() string {
@@ -5199,7 +5293,7 @@ type ContactContent struct {
 
 func (x *ContactContent) Reset() {
 	*x = ContactContent{}
-	mi := &file_bridge_proto_msgTypes[62]
+	mi := &file_bridge_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5211,7 +5305,7 @@ func (x *ContactContent) String() string {
 func (*ContactContent) ProtoMessage() {}
 
 func (x *ContactContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[62]
+	mi := &file_bridge_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5224,7 +5318,7 @@ func (x *ContactContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContactContent.ProtoReflect.Descriptor instead.
 func (*ContactContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{62}
+	return file_bridge_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *ContactContent) GetDisplayName() string {
@@ -5250,7 +5344,7 @@ type ContactsContent struct {
 
 func (x *ContactsContent) Reset() {
 	*x = ContactsContent{}
-	mi := &file_bridge_proto_msgTypes[63]
+	mi := &file_bridge_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5262,7 +5356,7 @@ func (x *ContactsContent) String() string {
 func (*ContactsContent) ProtoMessage() {}
 
 func (x *ContactsContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[63]
+	mi := &file_bridge_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5275,7 +5369,7 @@ func (x *ContactsContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContactsContent.ProtoReflect.Descriptor instead.
 func (*ContactsContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{63}
+	return file_bridge_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *ContactsContent) GetContacts() []*ContactContent {
@@ -5299,7 +5393,7 @@ type LocationContent struct {
 
 func (x *LocationContent) Reset() {
 	*x = LocationContent{}
-	mi := &file_bridge_proto_msgTypes[64]
+	mi := &file_bridge_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5311,7 +5405,7 @@ func (x *LocationContent) String() string {
 func (*LocationContent) ProtoMessage() {}
 
 func (x *LocationContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[64]
+	mi := &file_bridge_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5324,7 +5418,7 @@ func (x *LocationContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LocationContent.ProtoReflect.Descriptor instead.
 func (*LocationContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{64}
+	return file_bridge_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *LocationContent) GetLatitude() float64 {
@@ -5379,7 +5473,7 @@ type UnsupportedContent struct {
 
 func (x *UnsupportedContent) Reset() {
 	*x = UnsupportedContent{}
-	mi := &file_bridge_proto_msgTypes[65]
+	mi := &file_bridge_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5391,7 +5485,7 @@ func (x *UnsupportedContent) String() string {
 func (*UnsupportedContent) ProtoMessage() {}
 
 func (x *UnsupportedContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[65]
+	mi := &file_bridge_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5404,7 +5498,7 @@ func (x *UnsupportedContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsupportedContent.ProtoReflect.Descriptor instead.
 func (*UnsupportedContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{65}
+	return file_bridge_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *UnsupportedContent) GetTypeName() string {
@@ -5431,7 +5525,7 @@ type ConnectionChanged struct {
 
 func (x *ConnectionChanged) Reset() {
 	*x = ConnectionChanged{}
-	mi := &file_bridge_proto_msgTypes[66]
+	mi := &file_bridge_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5443,7 +5537,7 @@ func (x *ConnectionChanged) String() string {
 func (*ConnectionChanged) ProtoMessage() {}
 
 func (x *ConnectionChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[66]
+	mi := &file_bridge_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5456,7 +5550,7 @@ func (x *ConnectionChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionChanged.ProtoReflect.Descriptor instead.
 func (*ConnectionChanged) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{66}
+	return file_bridge_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *ConnectionChanged) GetState() ConnectionState {
@@ -5483,7 +5577,7 @@ type PairingQr struct {
 
 func (x *PairingQr) Reset() {
 	*x = PairingQr{}
-	mi := &file_bridge_proto_msgTypes[67]
+	mi := &file_bridge_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5495,7 +5589,7 @@ func (x *PairingQr) String() string {
 func (*PairingQr) ProtoMessage() {}
 
 func (x *PairingQr) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[67]
+	mi := &file_bridge_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5508,7 +5602,7 @@ func (x *PairingQr) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PairingQr.ProtoReflect.Descriptor instead.
 func (*PairingQr) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{67}
+	return file_bridge_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *PairingQr) GetCode() string {
@@ -5536,7 +5630,7 @@ type SyncProgress struct {
 
 func (x *SyncProgress) Reset() {
 	*x = SyncProgress{}
-	mi := &file_bridge_proto_msgTypes[68]
+	mi := &file_bridge_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5548,7 +5642,7 @@ func (x *SyncProgress) String() string {
 func (*SyncProgress) ProtoMessage() {}
 
 func (x *SyncProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[68]
+	mi := &file_bridge_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5561,7 +5655,7 @@ func (x *SyncProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncProgress.ProtoReflect.Descriptor instead.
 func (*SyncProgress) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{68}
+	return file_bridge_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *SyncProgress) GetChatsProcessed() uint64 {
@@ -5594,7 +5688,7 @@ type ChatUpserted struct {
 
 func (x *ChatUpserted) Reset() {
 	*x = ChatUpserted{}
-	mi := &file_bridge_proto_msgTypes[69]
+	mi := &file_bridge_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5606,7 +5700,7 @@ func (x *ChatUpserted) String() string {
 func (*ChatUpserted) ProtoMessage() {}
 
 func (x *ChatUpserted) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[69]
+	mi := &file_bridge_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5619,7 +5713,7 @@ func (x *ChatUpserted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatUpserted.ProtoReflect.Descriptor instead.
 func (*ChatUpserted) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{69}
+	return file_bridge_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *ChatUpserted) GetChat() *Chat {
@@ -5638,7 +5732,7 @@ type MessageUpserted struct {
 
 func (x *MessageUpserted) Reset() {
 	*x = MessageUpserted{}
-	mi := &file_bridge_proto_msgTypes[70]
+	mi := &file_bridge_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5650,7 +5744,7 @@ func (x *MessageUpserted) String() string {
 func (*MessageUpserted) ProtoMessage() {}
 
 func (x *MessageUpserted) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[70]
+	mi := &file_bridge_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5663,7 +5757,7 @@ func (x *MessageUpserted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageUpserted.ProtoReflect.Descriptor instead.
 func (*MessageUpserted) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{70}
+	return file_bridge_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *MessageUpserted) GetMessage() *Message {
@@ -5685,7 +5779,7 @@ type ReceiptUpdated struct {
 
 func (x *ReceiptUpdated) Reset() {
 	*x = ReceiptUpdated{}
-	mi := &file_bridge_proto_msgTypes[71]
+	mi := &file_bridge_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5697,7 +5791,7 @@ func (x *ReceiptUpdated) String() string {
 func (*ReceiptUpdated) ProtoMessage() {}
 
 func (x *ReceiptUpdated) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[71]
+	mi := &file_bridge_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5710,7 +5804,7 @@ func (x *ReceiptUpdated) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReceiptUpdated.ProtoReflect.Descriptor instead.
 func (*ReceiptUpdated) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{71}
+	return file_bridge_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *ReceiptUpdated) GetChatId() string {
@@ -5752,7 +5846,7 @@ type BackendProblem struct {
 
 func (x *BackendProblem) Reset() {
 	*x = BackendProblem{}
-	mi := &file_bridge_proto_msgTypes[72]
+	mi := &file_bridge_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5764,7 +5858,7 @@ func (x *BackendProblem) String() string {
 func (*BackendProblem) ProtoMessage() {}
 
 func (x *BackendProblem) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[72]
+	mi := &file_bridge_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5777,7 +5871,7 @@ func (x *BackendProblem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackendProblem.ProtoReflect.Descriptor instead.
 func (*BackendProblem) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{72}
+	return file_bridge_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *BackendProblem) GetCode() string {
@@ -5815,7 +5909,7 @@ type SendStickerRequest struct {
 
 func (x *SendStickerRequest) Reset() {
 	*x = SendStickerRequest{}
-	mi := &file_bridge_proto_msgTypes[73]
+	mi := &file_bridge_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5827,7 +5921,7 @@ func (x *SendStickerRequest) String() string {
 func (*SendStickerRequest) ProtoMessage() {}
 
 func (x *SendStickerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[73]
+	mi := &file_bridge_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5840,7 +5934,7 @@ func (x *SendStickerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendStickerRequest.ProtoReflect.Descriptor instead.
 func (*SendStickerRequest) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{73}
+	return file_bridge_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *SendStickerRequest) GetClientMessageId() string {
@@ -5880,7 +5974,7 @@ type SendStickerResponse struct {
 
 func (x *SendStickerResponse) Reset() {
 	*x = SendStickerResponse{}
-	mi := &file_bridge_proto_msgTypes[74]
+	mi := &file_bridge_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5892,7 +5986,7 @@ func (x *SendStickerResponse) String() string {
 func (*SendStickerResponse) ProtoMessage() {}
 
 func (x *SendStickerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[74]
+	mi := &file_bridge_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5905,7 +5999,7 @@ func (x *SendStickerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendStickerResponse.ProtoReflect.Descriptor instead.
 func (*SendStickerResponse) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{74}
+	return file_bridge_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *SendStickerResponse) GetMessage() *Message {
@@ -6264,9 +6358,17 @@ const file_bridge_proto_rawDesc = "" +
 	"\n" +
 	"ChatMerged\x12\x1e\n" +
 	"\vold_chat_id\x18\x01 \x01(\tR\toldChatId\x12\x1e\n" +
-	"\vnew_chat_id\x18\x02 \x01(\tR\tnewChatId\"!\n" +
+	"\vnew_chat_id\x18\x02 \x01(\tR\tnewChatId\"e\n" +
 	"\vTextContent\x12\x12\n" +
-	"\x04text\x18\x01 \x01(\tR\x04text\"\xb0\x02\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\x12B\n" +
+	"\flink_preview\x18\x02 \x01(\v2\x1f.rustmeow.bridge.v1.LinkPreviewR\vlinkPreview\"\xd2\x01\n" +
+	"\vLinkPreview\x12\x10\n" +
+	"\x03url\x18\x01 \x01(\tR\x03url\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12%\n" +
+	"\x0ejpeg_thumbnail\x18\x04 \x01(\fR\rjpegThumbnail\x12'\n" +
+	"\x0fthumbnail_width\x18\x05 \x01(\rR\x0ethumbnailWidth\x12)\n" +
+	"\x10thumbnail_height\x18\x06 \x01(\rR\x0fthumbnailHeight\"\xb0\x02\n" +
 	"\fImageContent\x12\x18\n" +
 	"\acaption\x18\x01 \x01(\tR\acaption\x12\x1b\n" +
 	"\tmime_type\x18\x02 \x01(\tR\bmimeType\x12\x1d\n" +
@@ -6378,7 +6480,7 @@ func file_bridge_proto_rawDescGZIP() []byte {
 }
 
 var file_bridge_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 75)
+var file_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 76)
 var file_bridge_proto_goTypes = []any{
 	(ConnectionState)(0),                  // 0: rustmeow.bridge.v1.ConnectionState
 	(ChatKind)(0),                         // 1: rustmeow.bridge.v1.ChatKind
@@ -6443,21 +6545,22 @@ var file_bridge_proto_goTypes = []any{
 	(*RecentReactionsRepaired)(nil),       // 60: rustmeow.bridge.v1.RecentReactionsRepaired
 	(*ChatMerged)(nil),                    // 61: rustmeow.bridge.v1.ChatMerged
 	(*TextContent)(nil),                   // 62: rustmeow.bridge.v1.TextContent
-	(*ImageContent)(nil),                  // 63: rustmeow.bridge.v1.ImageContent
-	(*AttachmentContent)(nil),             // 64: rustmeow.bridge.v1.AttachmentContent
-	(*ContactContent)(nil),                // 65: rustmeow.bridge.v1.ContactContent
-	(*ContactsContent)(nil),               // 66: rustmeow.bridge.v1.ContactsContent
-	(*LocationContent)(nil),               // 67: rustmeow.bridge.v1.LocationContent
-	(*UnsupportedContent)(nil),            // 68: rustmeow.bridge.v1.UnsupportedContent
-	(*ConnectionChanged)(nil),             // 69: rustmeow.bridge.v1.ConnectionChanged
-	(*PairingQr)(nil),                     // 70: rustmeow.bridge.v1.PairingQr
-	(*SyncProgress)(nil),                  // 71: rustmeow.bridge.v1.SyncProgress
-	(*ChatUpserted)(nil),                  // 72: rustmeow.bridge.v1.ChatUpserted
-	(*MessageUpserted)(nil),               // 73: rustmeow.bridge.v1.MessageUpserted
-	(*ReceiptUpdated)(nil),                // 74: rustmeow.bridge.v1.ReceiptUpdated
-	(*BackendProblem)(nil),                // 75: rustmeow.bridge.v1.BackendProblem
-	(*SendStickerRequest)(nil),            // 76: rustmeow.bridge.v1.SendStickerRequest
-	(*SendStickerResponse)(nil),           // 77: rustmeow.bridge.v1.SendStickerResponse
+	(*LinkPreview)(nil),                   // 63: rustmeow.bridge.v1.LinkPreview
+	(*ImageContent)(nil),                  // 64: rustmeow.bridge.v1.ImageContent
+	(*AttachmentContent)(nil),             // 65: rustmeow.bridge.v1.AttachmentContent
+	(*ContactContent)(nil),                // 66: rustmeow.bridge.v1.ContactContent
+	(*ContactsContent)(nil),               // 67: rustmeow.bridge.v1.ContactsContent
+	(*LocationContent)(nil),               // 68: rustmeow.bridge.v1.LocationContent
+	(*UnsupportedContent)(nil),            // 69: rustmeow.bridge.v1.UnsupportedContent
+	(*ConnectionChanged)(nil),             // 70: rustmeow.bridge.v1.ConnectionChanged
+	(*PairingQr)(nil),                     // 71: rustmeow.bridge.v1.PairingQr
+	(*SyncProgress)(nil),                  // 72: rustmeow.bridge.v1.SyncProgress
+	(*ChatUpserted)(nil),                  // 73: rustmeow.bridge.v1.ChatUpserted
+	(*MessageUpserted)(nil),               // 74: rustmeow.bridge.v1.MessageUpserted
+	(*ReceiptUpdated)(nil),                // 75: rustmeow.bridge.v1.ReceiptUpdated
+	(*BackendProblem)(nil),                // 76: rustmeow.bridge.v1.BackendProblem
+	(*SendStickerRequest)(nil),            // 77: rustmeow.bridge.v1.SendStickerRequest
+	(*SendStickerResponse)(nil),           // 78: rustmeow.bridge.v1.SendStickerResponse
 }
 var file_bridge_proto_depIdxs = []int32{
 	4,  // 0: rustmeow.bridge.v1.Envelope.request:type_name -> rustmeow.bridge.v1.RpcRequest
@@ -6481,7 +6584,7 @@ var file_bridge_proto_depIdxs = []int32{
 	22, // 18: rustmeow.bridge.v1.RpcRequest.search_local:type_name -> rustmeow.bridge.v1.SearchLocalRequest
 	26, // 19: rustmeow.bridge.v1.RpcRequest.open_contact:type_name -> rustmeow.bridge.v1.OpenContactRequest
 	28, // 20: rustmeow.bridge.v1.RpcRequest.list_messages_around:type_name -> rustmeow.bridge.v1.ListMessagesAroundRequest
-	76, // 21: rustmeow.bridge.v1.RpcRequest.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerRequest
+	77, // 21: rustmeow.bridge.v1.RpcRequest.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerRequest
 	18, // 22: rustmeow.bridge.v1.RpcRequest.open_message_window:type_name -> rustmeow.bridge.v1.OpenMessageWindowRequest
 	20, // 23: rustmeow.bridge.v1.RpcRequest.list_messages_after:type_name -> rustmeow.bridge.v1.ListMessagesAfterRequest
 	46, // 24: rustmeow.bridge.v1.RpcRequest.get_chat_info:type_name -> rustmeow.bridge.v1.GetChatInfoRequest
@@ -6505,18 +6608,18 @@ var file_bridge_proto_depIdxs = []int32{
 	25, // 42: rustmeow.bridge.v1.RpcResponse.search_local:type_name -> rustmeow.bridge.v1.SearchLocalResponse
 	27, // 43: rustmeow.bridge.v1.RpcResponse.open_contact:type_name -> rustmeow.bridge.v1.OpenContactResponse
 	29, // 44: rustmeow.bridge.v1.RpcResponse.list_messages_around:type_name -> rustmeow.bridge.v1.ListMessagesAroundResponse
-	77, // 45: rustmeow.bridge.v1.RpcResponse.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerResponse
+	78, // 45: rustmeow.bridge.v1.RpcResponse.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerResponse
 	19, // 46: rustmeow.bridge.v1.RpcResponse.open_message_window:type_name -> rustmeow.bridge.v1.OpenMessageWindowResponse
 	21, // 47: rustmeow.bridge.v1.RpcResponse.list_messages_after:type_name -> rustmeow.bridge.v1.ListMessagesAfterResponse
 	48, // 48: rustmeow.bridge.v1.RpcResponse.get_chat_info:type_name -> rustmeow.bridge.v1.GetChatInfoResponse
 	50, // 49: rustmeow.bridge.v1.RpcResponse.set_typing:type_name -> rustmeow.bridge.v1.SetTypingResponse
-	69, // 50: rustmeow.bridge.v1.BackendEvent.connection_changed:type_name -> rustmeow.bridge.v1.ConnectionChanged
-	70, // 51: rustmeow.bridge.v1.BackendEvent.pairing_qr:type_name -> rustmeow.bridge.v1.PairingQr
-	71, // 52: rustmeow.bridge.v1.BackendEvent.sync_progress:type_name -> rustmeow.bridge.v1.SyncProgress
-	72, // 53: rustmeow.bridge.v1.BackendEvent.chat_upserted:type_name -> rustmeow.bridge.v1.ChatUpserted
-	73, // 54: rustmeow.bridge.v1.BackendEvent.message_upserted:type_name -> rustmeow.bridge.v1.MessageUpserted
-	74, // 55: rustmeow.bridge.v1.BackendEvent.receipt_updated:type_name -> rustmeow.bridge.v1.ReceiptUpdated
-	75, // 56: rustmeow.bridge.v1.BackendEvent.problem:type_name -> rustmeow.bridge.v1.BackendProblem
+	70, // 50: rustmeow.bridge.v1.BackendEvent.connection_changed:type_name -> rustmeow.bridge.v1.ConnectionChanged
+	71, // 51: rustmeow.bridge.v1.BackendEvent.pairing_qr:type_name -> rustmeow.bridge.v1.PairingQr
+	72, // 52: rustmeow.bridge.v1.BackendEvent.sync_progress:type_name -> rustmeow.bridge.v1.SyncProgress
+	73, // 53: rustmeow.bridge.v1.BackendEvent.chat_upserted:type_name -> rustmeow.bridge.v1.ChatUpserted
+	74, // 54: rustmeow.bridge.v1.BackendEvent.message_upserted:type_name -> rustmeow.bridge.v1.MessageUpserted
+	75, // 55: rustmeow.bridge.v1.BackendEvent.receipt_updated:type_name -> rustmeow.bridge.v1.ReceiptUpdated
+	76, // 56: rustmeow.bridge.v1.BackendEvent.problem:type_name -> rustmeow.bridge.v1.BackendProblem
 	59, // 57: rustmeow.bridge.v1.BackendEvent.reaction_updated:type_name -> rustmeow.bridge.v1.ReactionUpdated
 	60, // 58: rustmeow.bridge.v1.BackendEvent.recent_reactions_repaired:type_name -> rustmeow.bridge.v1.RecentReactionsRepaired
 	61, // 59: rustmeow.bridge.v1.BackendEvent.chat_merged:type_name -> rustmeow.bridge.v1.ChatMerged
@@ -6541,23 +6644,24 @@ var file_bridge_proto_depIdxs = []int32{
 	2,  // 78: rustmeow.bridge.v1.Message.status:type_name -> rustmeow.bridge.v1.MessageStatus
 	58, // 79: rustmeow.bridge.v1.Message.reactions:type_name -> rustmeow.bridge.v1.Reaction
 	62, // 80: rustmeow.bridge.v1.Message.text:type_name -> rustmeow.bridge.v1.TextContent
-	68, // 81: rustmeow.bridge.v1.Message.unsupported:type_name -> rustmeow.bridge.v1.UnsupportedContent
-	63, // 82: rustmeow.bridge.v1.Message.image:type_name -> rustmeow.bridge.v1.ImageContent
-	64, // 83: rustmeow.bridge.v1.Message.attachment:type_name -> rustmeow.bridge.v1.AttachmentContent
-	66, // 84: rustmeow.bridge.v1.Message.contacts:type_name -> rustmeow.bridge.v1.ContactsContent
-	67, // 85: rustmeow.bridge.v1.Message.location:type_name -> rustmeow.bridge.v1.LocationContent
+	69, // 81: rustmeow.bridge.v1.Message.unsupported:type_name -> rustmeow.bridge.v1.UnsupportedContent
+	64, // 82: rustmeow.bridge.v1.Message.image:type_name -> rustmeow.bridge.v1.ImageContent
+	65, // 83: rustmeow.bridge.v1.Message.attachment:type_name -> rustmeow.bridge.v1.AttachmentContent
+	67, // 84: rustmeow.bridge.v1.Message.contacts:type_name -> rustmeow.bridge.v1.ContactsContent
+	68, // 85: rustmeow.bridge.v1.Message.location:type_name -> rustmeow.bridge.v1.LocationContent
 	58, // 86: rustmeow.bridge.v1.ReactionUpdated.reaction:type_name -> rustmeow.bridge.v1.Reaction
-	65, // 87: rustmeow.bridge.v1.ContactsContent.contacts:type_name -> rustmeow.bridge.v1.ContactContent
-	0,  // 88: rustmeow.bridge.v1.ConnectionChanged.state:type_name -> rustmeow.bridge.v1.ConnectionState
-	56, // 89: rustmeow.bridge.v1.ChatUpserted.chat:type_name -> rustmeow.bridge.v1.Chat
-	57, // 90: rustmeow.bridge.v1.MessageUpserted.message:type_name -> rustmeow.bridge.v1.Message
-	2,  // 91: rustmeow.bridge.v1.ReceiptUpdated.status:type_name -> rustmeow.bridge.v1.MessageStatus
-	57, // 92: rustmeow.bridge.v1.SendStickerResponse.message:type_name -> rustmeow.bridge.v1.Message
-	93, // [93:93] is the sub-list for method output_type
-	93, // [93:93] is the sub-list for method input_type
-	93, // [93:93] is the sub-list for extension type_name
-	93, // [93:93] is the sub-list for extension extendee
-	0,  // [0:93] is the sub-list for field type_name
+	63, // 87: rustmeow.bridge.v1.TextContent.link_preview:type_name -> rustmeow.bridge.v1.LinkPreview
+	66, // 88: rustmeow.bridge.v1.ContactsContent.contacts:type_name -> rustmeow.bridge.v1.ContactContent
+	0,  // 89: rustmeow.bridge.v1.ConnectionChanged.state:type_name -> rustmeow.bridge.v1.ConnectionState
+	56, // 90: rustmeow.bridge.v1.ChatUpserted.chat:type_name -> rustmeow.bridge.v1.Chat
+	57, // 91: rustmeow.bridge.v1.MessageUpserted.message:type_name -> rustmeow.bridge.v1.Message
+	2,  // 92: rustmeow.bridge.v1.ReceiptUpdated.status:type_name -> rustmeow.bridge.v1.MessageStatus
+	57, // 93: rustmeow.bridge.v1.SendStickerResponse.message:type_name -> rustmeow.bridge.v1.Message
+	94, // [94:94] is the sub-list for method output_type
+	94, // [94:94] is the sub-list for method input_type
+	94, // [94:94] is the sub-list for extension type_name
+	94, // [94:94] is the sub-list for extension extendee
+	0,  // [0:94] is the sub-list for field type_name
 }
 
 func init() { file_bridge_proto_init() }
@@ -6648,7 +6752,7 @@ func file_bridge_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bridge_proto_rawDesc), len(file_bridge_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   75,
+			NumMessages:   76,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

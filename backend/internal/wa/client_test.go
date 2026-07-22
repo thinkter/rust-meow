@@ -244,6 +244,27 @@ func TestDomainMessagePreservesNativeReplyTarget(t *testing.T) {
 	}
 }
 
+func TestDomainMessagePreservesExtendedTextLinkPreview(t *testing.T) {
+	chat, _ := types.ParseJID("123@g.us")
+	sender, _ := types.ParseJID("456@s.whatsapp.net")
+	evt := &events.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender}, ID: "link-1", Timestamp: time.UnixMilli(1234)},
+		Message: &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:            proto.String("read https://example.com/meow"),
+			MatchedText:     proto.String("https://example.com/meow"),
+			Title:           proto.String("Meow article"),
+			Description:     proto.String("All about native cats"),
+			JPEGThumbnail:   []byte{1, 2, 3},
+			ThumbnailWidth:  proto.Uint32(320),
+			ThumbnailHeight: proto.Uint32(180),
+		}},
+	}
+	got := domainMessage(evt, chat.String(), chat.String())
+	if got.LinkPreview == nil || got.LinkPreview.URL != "https://example.com/meow" || got.LinkPreview.Title != "Meow article" || string(got.LinkPreview.JPEGThumbnail) != "\x01\x02\x03" {
+		t.Fatalf("preview=%+v", got.LinkPreview)
+	}
+}
+
 func TestMessageContextInfoSupportsMediaReplies(t *testing.T) {
 	message := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
 		ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("photo-target")},

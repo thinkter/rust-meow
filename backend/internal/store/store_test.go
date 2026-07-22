@@ -42,7 +42,7 @@ CREATE TABLE messages(id TEXT NOT NULL,chat_jid TEXT NOT NULL,sender_jid TEXT NO
 	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 10 {
+	if version != supportedSchemaVersion {
 		t.Fatalf("version=%d", version)
 	}
 	var indexCount int
@@ -75,6 +75,9 @@ func TestRichMessageContentRoundTrips(t *testing.T) {
 		{ID: "location", ChatJID: "123@g.us", Timestamp: now.Add(3 * time.Millisecond), Kind: "location", Text: "Office", Location: &domain.Location{
 			Latitude: 12.9716, Longitude: 77.5946, Name: "Office", Address: "Bengaluru", URL: "https://maps.example/office", Live: true,
 		}},
+		{ID: "link", ChatJID: "123@g.us", Timestamp: now.Add(4 * time.Millisecond), Kind: "text", Text: "https://example.com/meow", LinkPreview: &domain.LinkPreview{
+			URL: "https://example.com/meow", Title: "Meow", Description: "A link preview", JPEGThumbnail: []byte{7, 8, 9}, ThumbnailWidth: 320, ThumbnailHeight: 180,
+		}},
 	}
 	if err = s.ApplyMessages(ctx, messages, false); err != nil {
 		t.Fatal(err)
@@ -101,6 +104,9 @@ func TestRichMessageContentRoundTrips(t *testing.T) {
 	}
 	if got := byID["location"].Location; got == nil || got.Latitude != 12.9716 || got.Longitude != 77.5946 || !got.Live {
 		t.Fatalf("location=%+v", got)
+	}
+	if got := byID["link"].LinkPreview; got == nil || got.Title != "Meow" || got.ThumbnailWidth != 320 || string(got.JPEGThumbnail) != "\x07\x08\x09" {
+		t.Fatalf("link preview=%+v", got)
 	}
 }
 
@@ -195,7 +201,7 @@ func TestV8CacheMigratesInPlaceToRichContentSchema(t *testing.T) {
 	if _, err = db.ExecContext(ctx, `DROP TRIGGER message_search_ai; DROP TRIGGER message_search_ad; DROP TRIGGER message_search_au; DROP TABLE message_search`); err != nil {
 		t.Fatal(err)
 	}
-	for _, column := range []string{"image_animated", "media_file_name", "media_duration", "media_voice", "contacts_json", "location_lat", "location_lng", "location_name", "location_address", "location_url", "location_live"} {
+	for _, column := range []string{"image_animated", "media_file_name", "media_duration", "media_voice", "contacts_json", "location_lat", "location_lng", "location_name", "location_address", "location_url", "location_live", "link_preview_url", "link_preview_title", "link_preview_description", "link_preview_thumbnail", "link_preview_width", "link_preview_height"} {
 		if _, err = db.ExecContext(ctx, `ALTER TABLE messages DROP COLUMN `+column); err != nil {
 			t.Fatalf("drop %s: %v", column, err)
 		}
@@ -220,7 +226,7 @@ func TestV8CacheMigratesInPlaceToRichContentSchema(t *testing.T) {
 		t.Fatalf("migrated search index was not backfilled: hits=%+v err=%v", hits, err)
 	}
 	var version int
-	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil || version != 10 {
+	if err = s.db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil || version != supportedSchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 }

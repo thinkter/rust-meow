@@ -51,6 +51,16 @@ type Message struct {
 	Attachment   *Attachment
 	Contacts     []Contact
 	Location     *Location
+	LinkPreview  *LinkPreview
+}
+
+type LinkPreview struct {
+	URL             string
+	Title           string
+	Description     string
+	JPEGThumbnail   []byte
+	ThumbnailWidth  uint32
+	ThumbnailHeight uint32
 }
 
 type Image struct {

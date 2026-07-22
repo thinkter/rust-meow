@@ -25,7 +25,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 12
+const ProtocolVersion uint32 = 13
 const maxTextBytes = 65_536
 
 type Server struct {
@@ -713,7 +713,12 @@ func wireMessage(m domain.Message) *bridgev1.Message {
 		message.Content = &bridgev1.Message_Location{Location: &bridgev1.LocationContent{Latitude: m.Location.Latitude, Longitude: m.Location.Longitude,
 			Name: m.Location.Name, Address: m.Location.Address, Url: m.Location.URL, Live: m.Location.Live}}
 	} else if m.Kind == "text" {
-		message.Content = &bridgev1.Message_Text{Text: &bridgev1.TextContent{Text: m.Text}}
+		text := &bridgev1.TextContent{Text: m.Text}
+		if preview := m.LinkPreview; preview != nil {
+			text.LinkPreview = &bridgev1.LinkPreview{Url: preview.URL, Title: preview.Title, Description: preview.Description,
+				JpegThumbnail: preview.JPEGThumbnail, ThumbnailWidth: preview.ThumbnailWidth, ThumbnailHeight: preview.ThumbnailHeight}
+		}
+		message.Content = &bridgev1.Message_Text{Text: text}
 	} else {
 		message.Content = &bridgev1.Message_Unsupported{Unsupported: &bridgev1.UnsupportedContent{TypeName: m.Kind, FallbackText: m.Text}}
 	}
