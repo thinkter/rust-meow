@@ -3,6 +3,7 @@ package wa
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -1153,6 +1154,47 @@ func TestPassiveMessageFiltersSignalOnlyPayloads(t *testing.T) {
 	}
 }
 
+func TestPollSelectedNamesReportsUnknownHashes(t *testing.T) {
+	pizza := sha256.Sum256([]byte("Pizza"))
+	unknownHash := sha256.Sum256([]byte("Option added on a newer client"))
+	selected, unknown := pollSelectedNames(&domain.Poll{Options: []domain.PollOption{{Name: "Pizza"}, {Name: "Sushi"}}}, [][]byte{pizza[:], unknownHash[:]})
+	if len(selected) != 1 || selected[0] != "Pizza" || unknown != 1 {
+		t.Fatalf("selected=%v unknown=%d", selected, unknown)
+	}
+}
+
+func TestMetadataOnlyLivePinIsReducedWithoutBubble(t *testing.T) {
+	ctx := context.Background()
+	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	chat, _ := types.ParseJID("123@g.us")
+	sender, _ := types.ParseJID("456@s.whatsapp.net")
+	if err = productStore.ApplyMessage(ctx, domain.Message{ID: "target", ChatJID: chat.String(), TransportJID: chat.String(), SenderJID: sender.String(), Kind: "text", Text: "important", Timestamp: time.UnixMilli(100)}, false); err != nil {
+		t.Fatal(err)
+	}
+	var emitted []Event
+	c := &Client{ctx: ctx, store: productStore, sink: func(event Event) { emitted = append(emitted, event) }, log: slog.Default()}
+	c.reduceMessage(&events.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender}, ID: "pin-metadata", Timestamp: time.UnixMilli(200)},
+		SourceWebMsg: &waWeb.WebMessageInfo{PinInChat: &waWeb.PinInChat{
+			Type: waWeb.PinInChat_PIN_FOR_ALL.Enum(), Key: &waCommon.MessageKey{ID: proto.String("target")}, SenderTimestampMS: proto.Int64(200),
+		}},
+	}, true)
+	pins, err := productStore.PinnedMessages(ctx, chat.String())
+	if err != nil || len(pins) != 1 || pins[0].MessageID != "target" {
+		t.Fatalf("pins=%+v err=%v", pins, err)
+	}
+	if len(emitted) != 1 || emitted[0].Kind != "pins" {
+		t.Fatalf("emitted=%+v", emitted)
+	}
+	if _, err = productStore.Message(ctx, chat.String(), "pin-metadata"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("metadata-only pin created a bubble: err=%v", err)
+	}
+}
+
 func TestHistoryAggregateReactionsTargetContainingMessage(t *testing.T) {
 	chat, _ := types.ParseJID("123@g.us")
 	sender, _ := types.ParseJID("456@s.whatsapp.net")
@@ -1291,6 +1333,86 @@ func TestHistorySyncDoesNotFloodChatEvents(t *testing.T) {
 	}
 	if !chat.Archived {
 		t.Fatal("history archive metadata was not persisted")
+	}
+}
+
+func TestHistorySyncReducesPollOptionsSnapshotsAndPins(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	var emitted []Event
+	client, err := New(ctx, directory, productStore, func(event Event) { emitted = append(emitted, event) }, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	chatID := "123@g.us"
+	sender := "456@s.whatsapp.net"
+	webMessage := func(id string, timestamp uint64, message *waE2E.Message) *waHistorySync.HistorySyncMsg {
+		return &waHistorySync.HistorySyncMsg{Message: &waWeb.WebMessageInfo{
+			Key:              &waCommon.MessageKey{RemoteJID: proto.String(chatID), Participant: proto.String(sender), ID: proto.String(id)},
+			MessageTimestamp: proto.Uint64(timestamp),
+			Message:          message,
+		}}
+	}
+	addPoll := &waE2E.PollCreationMessage{Name: proto.String("Lunch?"), SelectableOptionsCount: proto.Uint32(2), Options: []*waE2E.PollCreationMessage_Option{{OptionName: proto.String("Pizza")}, {OptionName: proto.String("Sushi")}}}
+	finalPoll := &waE2E.PollCreationMessage{Name: proto.String("Venue?"), SelectableOptionsCount: proto.Uint32(1), Options: []*waE2E.PollCreationMessage_Option{{OptionName: proto.String("Hall")}, {OptionName: proto.String("Lawn")}}}
+	messages := []*waHistorySync.HistorySyncMsg{
+		webMessage("poll-add", 100, &waE2E.Message{PollCreationMessage: addPoll}),
+		webMessage("add-event", 101, &waE2E.Message{PollAddOptionMessage: &waE2E.PollAddOptionMessage{PollCreationMessageKey: &waCommon.MessageKey{ID: proto.String("poll-add")}, AddOption: &waE2E.PollCreationMessage_Option{OptionName: proto.String("Tacos")}}}),
+		webMessage("poll-final", 102, &waE2E.Message{PollCreationMessage: finalPoll}),
+		webMessage("snapshot-event", 103, &waE2E.Message{PollResultSnapshotMessage: &waE2E.PollResultSnapshotMessage{
+			Name: proto.String("Venue?"), ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("poll-final")},
+			PollVotes: []*waE2E.PollResultSnapshotMessage_PollVote{{OptionName: proto.String("Hall"), OptionVoteCount: proto.Int64(4)}, {OptionName: proto.String("Lawn"), OptionVoteCount: proto.Int64(2)}},
+		}}),
+		webMessage("target", 104, &waE2E.Message{Conversation: proto.String("important")}),
+		webMessage("orphan-snapshot", 105, &waE2E.Message{PollResultSnapshotMessage: &waE2E.PollResultSnapshotMessage{
+			Name: proto.String("Old poll"), ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("missing-poll")},
+			PollVotes: []*waE2E.PollResultSnapshotMessage_PollVote{{OptionName: proto.String("Yes"), OptionVoteCount: proto.Int64(3)}},
+		}}),
+	}
+	tacosHash := sha256.Sum256([]byte("Tacos"))
+	messages[0].Message.PollUpdates = []*waWeb.PollUpdate{{
+		PollUpdateMessageKey: &waCommon.MessageKey{Participant: proto.String(sender)},
+		Vote:                 &waE2E.PollVoteMessage{SelectedOptions: [][]byte{tacosHash[:]}},
+		SenderTimestampMS:    proto.Int64(101_500),
+	}}
+	messages[4].Message.PinInChat = &waWeb.PinInChat{Type: waWeb.PinInChat_PIN_FOR_ALL.Enum(), Key: &waCommon.MessageKey{ID: proto.String("target")}, SenderTimestampMS: proto.Int64(104_000)}
+	client.reduceHistory(&events.HistorySync{Data: &waHistorySync.HistorySync{Conversations: []*waHistorySync.Conversation{{ID: proto.String(chatID), Messages: messages}}, Progress: proto.Uint32(100)}})
+
+	added, err := productStore.Message(ctx, chatID, "poll-add")
+	if err != nil || added.Poll == nil || len(added.Poll.Options) != 3 || added.Poll.Options[2].Name != "Tacos" || added.Poll.Options[2].VoteCount != 1 {
+		t.Fatalf("dynamic poll after history: poll=%+v err=%v", added.Poll, err)
+	}
+	final, err := productStore.Message(ctx, chatID, "poll-final")
+	if err != nil || final.Poll == nil || final.Poll.TotalVoters != 4 || final.Poll.Options[0].VoteCount != 4 {
+		t.Fatalf("snapshot poll after history: poll=%+v err=%v", final.Poll, err)
+	}
+	for _, passiveID := range []string{"add-event", "snapshot-event"} {
+		if _, err = productStore.Message(ctx, chatID, passiveID); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("passive history message %q persisted: err=%v", passiveID, err)
+		}
+	}
+	orphan, err := productStore.Message(ctx, chatID, "orphan-snapshot")
+	if err != nil || orphan.Poll == nil || orphan.Poll.Options[0].VoteCount != 3 {
+		t.Fatalf("standalone snapshot fallback: poll=%+v err=%v", orphan.Poll, err)
+	}
+	pins, err := productStore.PinnedMessages(ctx, chatID)
+	if err != nil || len(pins) != 1 || pins[0].MessageID != "target" || pins[0].Message == nil {
+		t.Fatalf("history pins=%+v err=%v", pins, err)
+	}
+	var pinEvents int
+	for _, event := range emitted {
+		if event.Kind == "pins" {
+			pinEvents++
+		}
+	}
+	if pinEvents != 1 {
+		t.Fatalf("pin events=%d emitted=%+v", pinEvents, emitted)
 	}
 }
 

@@ -28,7 +28,7 @@ type Store struct{ db *sql.DB }
 const (
 	reactionReplaySchemaVersion = 9
 	searchSchemaVersion         = 10
-	supportedSchemaVersion      = 12
+	supportedSchemaVersion      = 13
 )
 
 type ChatMerge struct {
@@ -228,6 +228,7 @@ CREATE INDEX IF NOT EXISTS reactions_message_idx ON reactions(chat_jid,message_i
 CREATE TABLE IF NOT EXISTS polls(
   chat_jid TEXT NOT NULL, message_id TEXT NOT NULL, question TEXT NOT NULL,
   selectable_count INTEGER NOT NULL DEFAULT 1, total_voters INTEGER NOT NULL DEFAULT 0, options_json TEXT NOT NULL,
+  snapshot_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(chat_jid,message_id),
   FOREIGN KEY(chat_jid,message_id) REFERENCES messages(chat_jid,id) ON DELETE CASCADE
 );
@@ -313,6 +314,15 @@ CREATE INDEX IF NOT EXISTS sticker_favorites_updated_idx ON sticker_favorites(up
 	}
 	if _, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_unread_cursor_idx ON messages(chat_jid,unread,timestamp,id)`); err != nil {
 		return fmt.Errorf("create unread cursor index: %w", err)
+	}
+	hasPollSnapshotAt, err := hasColumn(ctx, db, "polls", "snapshot_at")
+	if err != nil {
+		return fmt.Errorf("inspect poll snapshot schema: %w", err)
+	}
+	if !hasPollSnapshotAt {
+		if _, err = db.ExecContext(ctx, `ALTER TABLE polls ADD COLUMN snapshot_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add poll snapshot timestamp: %w", err)
+		}
 	}
 	mediaColumns := []struct{ name, definition string }{
 		{"image_mime", "TEXT NOT NULL DEFAULT ''"},
@@ -831,10 +841,13 @@ link_preview_thumbnail=CASE WHEN length(excluded.link_preview_thumbnail)>0 THEN 
 link_preview_width=max(messages.link_preview_width,excluded.link_preview_width),link_preview_height=max(messages.link_preview_height,excluded.link_preview_height)`, winner, loser); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO polls(chat_jid,message_id,question,selectable_count,total_voters,options_json) SELECT ?,message_id,question,selectable_count,total_voters,options_json FROM polls WHERE chat_jid=? ON CONFLICT(chat_jid,message_id) DO UPDATE SET question=excluded.question,selectable_count=excluded.selectable_count,total_voters=excluded.total_voters,options_json=excluded.options_json`, winner, loser); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO polls(chat_jid,message_id,question,selectable_count,total_voters,options_json,snapshot_at) SELECT ?,message_id,question,selectable_count,total_voters,options_json,snapshot_at FROM polls WHERE chat_jid=? ON CONFLICT(chat_jid,message_id) DO UPDATE SET question=excluded.question,selectable_count=excluded.selectable_count,total_voters=excluded.total_voters,options_json=excluded.options_json,snapshot_at=excluded.snapshot_at WHERE excluded.snapshot_at>=polls.snapshot_at`, winner, loser); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO poll_votes(chat_jid,poll_message_id,voter_jid,selected_json,timestamp,from_me) SELECT ?,poll_message_id,voter_jid,selected_json,timestamp,from_me FROM poll_votes WHERE chat_jid=? ON CONFLICT(chat_jid,poll_message_id,voter_jid) DO UPDATE SET selected_json=excluded.selected_json,timestamp=excluded.timestamp,from_me=excluded.from_me WHERE excluded.timestamp>=poll_votes.timestamp`, winner, loser); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO poll_votes(chat_jid,poll_message_id,voter_jid,selected_json,timestamp,from_me)
+SELECT ?,v.poll_message_id,v.voter_jid,v.selected_json,v.timestamp,v.from_me FROM poll_votes v
+WHERE v.chat_jid=? AND v.timestamp>COALESCE((SELECT p.snapshot_at FROM polls p WHERE p.chat_jid=? AND p.message_id=v.poll_message_id),0)
+ON CONFLICT(chat_jid,poll_message_id,voter_jid) DO UPDATE SET selected_json=excluded.selected_json,timestamp=excluded.timestamp,from_me=excluded.from_me WHERE excluded.timestamp>=poll_votes.timestamp`, winner, loser, winner); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO pinned_messages(chat_jid,message_id,pinned_at,pinned_by,pinned) SELECT ?,message_id,pinned_at,pinned_by,pinned FROM pinned_messages WHERE chat_jid=? ON CONFLICT(chat_jid,message_id) DO UPDATE SET pinned_at=excluded.pinned_at,pinned_by=excluded.pinned_by,pinned=excluded.pinned WHERE excluded.pinned_at>=pinned_messages.pinned_at`, winner, loser); err != nil {
@@ -1619,7 +1632,7 @@ link_preview_thumbnail=excluded.link_preview_thumbnail,link_preview_width=exclud
 			return fmt.Errorf("encode poll options: %w", marshalErr)
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO polls(chat_jid,message_id,question,selectable_count,total_voters,options_json) VALUES(?,?,?,?,?,?)
-ON CONFLICT(chat_jid,message_id) DO UPDATE SET question=excluded.question,selectable_count=excluded.selectable_count,total_voters=excluded.total_voters,options_json=excluded.options_json`,
+ON CONFLICT(chat_jid,message_id) DO UPDATE SET question=excluded.question,selectable_count=excluded.selectable_count,total_voters=excluded.total_voters,options_json=excluded.options_json WHERE polls.snapshot_at=0`,
 			message.ChatJID, message.ID, message.Poll.Question, message.Poll.SelectableOptionsCount, message.Poll.TotalVoters, string(encoded)); err != nil {
 			return err
 		}
@@ -1677,14 +1690,9 @@ func (s *Store) Poll(ctx context.Context, chatJID, messageID string) (*domain.Po
 		return nil, err
 	}
 	poll := &domain.Poll{Question: question, SelectableOptionsCount: selectable, TotalVoters: totalVoters}
-	if err = json.Unmarshal([]byte(optionsJSON), &poll.Options); err != nil {
-		var legacy []string
-		if legacyErr := json.Unmarshal([]byte(optionsJSON), &legacy); legacyErr != nil {
-			return nil, err
-		}
-		for _, name := range legacy {
-			poll.Options = append(poll.Options, domain.PollOption{Name: name})
-		}
+	poll.Options, err = decodePollOptions(optionsJSON)
+	if err != nil {
+		return nil, err
 	}
 	byName := make(map[string]int, len(poll.Options))
 	for i, option := range poll.Options {
@@ -1720,6 +1728,116 @@ func (s *Store) Poll(ctx context.Context, chatJID, messageID string) (*domain.Po
 	return poll, rows.Err()
 }
 
+func decodePollOptions(raw string) ([]domain.PollOption, error) {
+	var options []domain.PollOption
+	if err := json.Unmarshal([]byte(raw), &options); err == nil {
+		return options, nil
+	}
+	var legacy []string
+	if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
+		return nil, err
+	}
+	options = make([]domain.PollOption, 0, len(legacy))
+	for _, name := range legacy {
+		options = append(options, domain.PollOption{Name: name})
+	}
+	return options, nil
+}
+
+// AddPollOption applies WhatsApp's incremental PollAddOption signal without
+// re-saving aggregate vote counts into the poll definition. The latter would
+// be counted again when Poll joins the durable per-voter rows.
+func (s *Store) AddPollOption(ctx context.Context, chatJID, messageID, name string) (domain.Message, bool, error) {
+	resolved, err := s.ResolveChat(ctx, chatJID)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return domain.Message{}, false, fmt.Errorf("poll option is empty")
+	}
+	var raw string
+	if err = s.db.QueryRowContext(ctx, `SELECT options_json FROM polls WHERE chat_jid=? AND message_id=?`, resolved, messageID).Scan(&raw); err != nil {
+		return domain.Message{}, false, err
+	}
+	options, err := decodePollOptions(raw)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	for _, option := range options {
+		if option.Name == name {
+			message, messageErr := s.Message(ctx, resolved, messageID)
+			return message, false, messageErr
+		}
+	}
+	options = append(options, domain.PollOption{Name: name})
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	if _, err = s.db.ExecContext(ctx, `UPDATE polls SET options_json=? WHERE chat_jid=? AND message_id=?`, string(encoded), resolved, messageID); err != nil {
+		return domain.Message{}, false, err
+	}
+	message, err := s.Message(ctx, resolved, messageID)
+	return message, err == nil, err
+}
+
+// ApplyPollSnapshot replaces voter rows covered by WhatsApp's aggregate while
+// retaining any vote that arrived after it. A stale/replayed snapshot is a
+// no-op, so it cannot erase newer reducer state.
+func (s *Store) ApplyPollSnapshot(ctx context.Context, chatJID, messageID string, poll *domain.Poll, at time.Time) (domain.Message, bool, error) {
+	resolved, err := s.ResolveChat(ctx, chatJID)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	if poll == nil {
+		return domain.Message{}, false, fmt.Errorf("poll snapshot is empty")
+	}
+	snapshotAt := at.UnixMilli()
+	if snapshotAt <= 0 {
+		snapshotAt = 1
+	}
+	encoded, err := json.Marshal(poll.Options)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE polls SET question=?,selectable_count=?,total_voters=?,options_json=?,snapshot_at=? WHERE chat_jid=? AND message_id=? AND snapshot_at<?`, poll.Question, poll.SelectableOptionsCount, poll.TotalVoters, string(encoded), snapshotAt, resolved, messageID, snapshotAt)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	if updated == 0 {
+		var exists bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM polls WHERE chat_jid=? AND message_id=?)`, resolved, messageID).Scan(&exists); err != nil {
+			return domain.Message{}, false, err
+		}
+		if !exists {
+			return domain.Message{}, false, sql.ErrNoRows
+		}
+		if err = tx.Commit(); err != nil {
+			return domain.Message{}, false, err
+		}
+		message, messageErr := s.Message(ctx, resolved, messageID)
+		return message, false, messageErr
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM poll_votes WHERE chat_jid=? AND poll_message_id=? AND timestamp<=?`, resolved, messageID, snapshotAt); err != nil {
+		return domain.Message{}, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.Message{}, false, err
+	}
+	message, err := s.Message(ctx, resolved, messageID)
+	return message, err == nil, err
+}
+
 func (s *Store) attachPolls(ctx context.Context, chatID string, messages []domain.Message) error {
 	for i := range messages {
 		if messages[i].Kind != "poll" {
@@ -1751,8 +1869,9 @@ func (s *Store) ApplyPollVote(ctx context.Context, vote domain.PollVote) (domain
 	if ts <= 0 {
 		ts = time.Now().UnixMilli()
 	}
-	result, err := s.db.ExecContext(ctx, `INSERT INTO poll_votes(chat_jid,poll_message_id,voter_jid,selected_json,timestamp,from_me) VALUES(?,?,?,?,?,?)
-ON CONFLICT(chat_jid,poll_message_id,voter_jid) DO UPDATE SET selected_json=excluded.selected_json,timestamp=excluded.timestamp,from_me=excluded.from_me WHERE excluded.timestamp>=poll_votes.timestamp`, resolved, vote.PollMessageID, vote.VoterJID, string(encoded), ts, vote.FromMe)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO poll_votes(chat_jid,poll_message_id,voter_jid,selected_json,timestamp,from_me)
+SELECT ?,?,?,?,?,? WHERE ?>COALESCE((SELECT snapshot_at FROM polls WHERE chat_jid=? AND message_id=?),0)
+ON CONFLICT(chat_jid,poll_message_id,voter_jid) DO UPDATE SET selected_json=excluded.selected_json,timestamp=excluded.timestamp,from_me=excluded.from_me WHERE excluded.timestamp>=poll_votes.timestamp`, resolved, vote.PollMessageID, vote.VoterJID, string(encoded), ts, vote.FromMe, ts, resolved, vote.PollMessageID)
 	if err != nil {
 		return domain.Message{}, false, err
 	}

@@ -41,6 +41,7 @@ import (
 	waCommon "go.mau.fi/whatsmeow/proto/waCommon"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	waWeb "go.mau.fi/whatsmeow/proto/waWeb"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -1572,18 +1573,26 @@ func (c *Client) SendPoll(ctx context.Context, clientID, chatID, question string
 	return pending, err
 }
 
-func pollSelectedNames(poll *domain.Poll, hashes [][]byte) []string {
+func pollSelectedNames(poll *domain.Poll, hashes [][]byte) ([]string, int) {
 	selected := make([]string, 0, len(hashes))
+	matched := make(map[string]bool, len(hashes))
 	for _, option := range poll.Options {
 		sum := sha256.Sum256([]byte(option.Name))
 		for _, hash := range hashes {
 			if bytes.Equal(sum[:], hash) {
 				selected = append(selected, option.Name)
+				matched[string(hash)] = true
 				break
 			}
 		}
 	}
-	return selected
+	unknown := 0
+	for _, hash := range hashes {
+		if !matched[string(hash)] {
+			unknown++
+		}
+	}
+	return selected, unknown
 }
 
 func (c *Client) VotePoll(ctx context.Context, chatID, pollMessageID string, selected []string) (domain.Message, error) {
@@ -3924,7 +3933,12 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 			c.log.Error("load poll for vote", "error", err)
 			return
 		}
-		applied, changed, err := c.store.ApplyPollVote(c.ctx, domain.PollVote{ChatJID: chatID, PollMessageID: targetID, VoterJID: evt.Info.Sender.ToNonAD().String(), SelectedOptions: pollSelectedNames(poll, vote.GetSelectedOptions()), Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe})
+		selected, unknown := pollSelectedNames(poll, vote.GetSelectedOptions())
+		if unknown > 0 {
+			c.sink(Event{Kind: "problem", Detail: fmt.Sprintf("A poll vote referenced %d unknown option(s); refresh chat history to recover newer poll options", unknown)})
+			return
+		}
+		applied, changed, err := c.store.ApplyPollVote(c.ctx, domain.PollVote{ChatJID: chatID, PollMessageID: targetID, VoterJID: evt.Info.Sender.ToNonAD().String(), SelectedOptions: selected, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe})
 		if err != nil {
 			c.log.Error("persist poll vote", "error", err)
 			return
@@ -3934,13 +3948,77 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 		}
 		return
 	}
+	if add := evt.Message.GetPollAddOptionMessage(); add != nil {
+		targetID, option := add.GetPollCreationMessageKey().GetID(), strings.TrimSpace(add.GetAddOption().GetOptionName())
+		if targetID == "" || option == "" {
+			c.sink(Event{Kind: "problem", Detail: "WhatsApp sent an unsupported poll option update without a target or option name"})
+			return
+		}
+		applied, changed, err := c.store.AddPollOption(c.ctx, chatID, targetID, option)
+		if err != nil {
+			c.log.Error("persist poll option", "chat_id", chatID, "poll_message_id", targetID, "error", err)
+			return
+		}
+		if changed {
+			c.sink(Event{Kind: "message", Message: applied})
+		}
+		return
+	}
+	if snapshot := messagePollResultSnapshot(evt.Message); snapshot != nil && snapshot.GetContextInfo().GetStanzaID() != "" {
+		targetID := snapshot.GetContextInfo().GetStanzaID()
+		applied, changed, err := c.store.ApplyPollSnapshot(c.ctx, chatID, targetID, domainPollSnapshot(snapshot), evt.Info.Timestamp)
+		if err == nil {
+			if !changed {
+				return
+			}
+			c.sink(Event{Kind: "message", Message: applied})
+			return
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			c.log.Error("persist poll result snapshot", "chat_id", chatID, "poll_message_id", targetID, "error", err)
+			return
+		}
+		// If the original poll is outside local history, retain the snapshot as
+		// its own readable bubble instead of discarding the only available data.
+	}
 	if passiveMessage(evt.Message) {
+		if pin := evt.SourceWebMsg.GetPinInChat(); pin != nil && pin.GetKey().GetID() != "" {
+			atMS := pin.GetSenderTimestampMS()
+			if atMS <= 0 {
+				atMS = pin.GetServerTimestampMS()
+			}
+			at := time.UnixMilli(atMS)
+			if atMS <= 0 {
+				at = evt.Info.Timestamp
+			}
+			if err := c.store.SetMessagePinned(c.ctx, chatID, pin.GetKey().GetID(), "", at, pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL); err != nil {
+				c.log.Error("persist passive web pin metadata", "error", err)
+			} else {
+				c.sink(Event{Kind: "pins", ChatJID: chatID})
+			}
+		}
 		return
 	}
 	m := domainMessage(evt, chatID, transportJID)
 	if err := c.store.ApplyMessage(c.ctx, m, unread); err != nil {
 		c.log.Error("persist message", "error", err)
 		return
+	}
+	pinsChanged := false
+	if pin := evt.SourceWebMsg.GetPinInChat(); pin != nil && pin.GetKey().GetID() != "" {
+		atMS := pin.GetSenderTimestampMS()
+		if atMS <= 0 {
+			atMS = pin.GetServerTimestampMS()
+		}
+		at := time.UnixMilli(atMS)
+		if atMS <= 0 {
+			at = evt.Info.Timestamp
+		}
+		if err := c.store.SetMessagePinned(c.ctx, chatID, pin.GetKey().GetID(), "", at, pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL); err != nil {
+			c.log.Error("persist web pin metadata", "error", err)
+		} else {
+			pinsChanged = true
+		}
 	}
 	if pin := evt.Message.GetPinInChatMessage(); pin != nil && pin.GetKey().GetID() != "" {
 		pinned := pin.GetType() == waE2E.PinInChatMessage_PIN_FOR_ALL
@@ -3951,8 +4029,11 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 		if err := c.store.SetMessagePinned(c.ctx, chatID, pin.GetKey().GetID(), evt.Info.Sender.ToNonAD().String(), at, pinned); err != nil {
 			c.log.Error("persist pin", "error", err)
 		} else {
-			c.sink(Event{Kind: "pins", ChatJID: chatID})
+			pinsChanged = true
 		}
+	}
+	if pinsChanged {
+		c.sink(Event{Kind: "pins", ChatJID: chatID})
 	}
 	if unread {
 		c.sink(Event{Kind: "message", Message: m})
@@ -4518,6 +4599,8 @@ func messageContextInfo(message *waE2E.Message) *waE2E.ContextInfo {
 		return message.GetLiveLocationMessage().GetContextInfo()
 	case messagePoll(message) != nil:
 		return messagePoll(message).GetContextInfo()
+	case messagePollResultSnapshot(message) != nil:
+		return messagePollResultSnapshot(message).GetContextInfo()
 	case message.GetGroupInviteMessage() != nil:
 		return message.GetGroupInviteMessage().GetContextInfo()
 	case message.GetEventMessage() != nil:
@@ -4846,7 +4929,28 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 			continue
 		}
 		batch := make([]domain.Message, 0, len(conversation.GetMessages()))
-		var historyPollVotes []domain.PollVote
+		type historyPollVote struct {
+			vote   domain.PollVote
+			hashes [][]byte
+		}
+		type historyPollOption struct{ messageID, name string }
+		type historyPollSnapshot struct {
+			messageID string
+			poll      *domain.Poll
+			at        time.Time
+			fallback  domain.Message
+		}
+		var historyPollVotes []historyPollVote
+		var historyPollOptions []historyPollOption
+		var historyPollSnapshots []historyPollSnapshot
+		unknownHistoryPollOption := false
+		type historyPin struct {
+			messageID string
+			pinnedBy  string
+			at        time.Time
+			pinned    bool
+		}
+		var historyPins []historyPin
 		reactions := make([]domain.Reaction, 0)
 		for _, raw := range conversation.GetMessages() {
 			parsed, err := c.wa.ParseWebMessage(jid, raw.GetMessage())
@@ -4870,8 +4974,7 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 				aggregates[i].ChatJID = chatID
 			}
 			reactions = append(reactions, aggregates...)
-			if poll := messagePoll(parsed.Message); poll != nil {
-				materialized := domainPoll(poll)
+			if messagePoll(parsed.Message) != nil {
 				for _, update := range raw.GetMessage().GetPollUpdates() {
 					key := update.GetPollUpdateMessageKey()
 					voter := key.GetParticipant()
@@ -4886,10 +4989,47 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 					if update.GetSenderTimestampMS() <= 0 {
 						at = parsed.Info.Timestamp
 					}
-					historyPollVotes = append(historyPollVotes, domain.PollVote{ChatJID: chatID, PollMessageID: string(parsed.Info.ID), VoterJID: voter, SelectedOptions: pollSelectedNames(materialized, update.GetVote().GetSelectedOptions()), Timestamp: at, FromMe: key.GetFromMe()})
+					historyPollVotes = append(historyPollVotes, historyPollVote{
+						vote:   domain.PollVote{ChatJID: chatID, PollMessageID: string(parsed.Info.ID), VoterJID: voter, Timestamp: at, FromMe: key.GetFromMe()},
+						hashes: update.GetVote().GetSelectedOptions(),
+					})
 				}
 			}
+			if add := parsed.Message.GetPollAddOptionMessage(); add != nil {
+				targetID, option := add.GetPollCreationMessageKey().GetID(), strings.TrimSpace(add.GetAddOption().GetOptionName())
+				if targetID == "" || option == "" {
+					unknownHistoryPollOption = true
+				} else {
+					historyPollOptions = append(historyPollOptions, historyPollOption{messageID: targetID, name: option})
+				}
+			}
+			if snapshot := messagePollResultSnapshot(parsed.Message); snapshot != nil && snapshot.GetContextInfo().GetStanzaID() != "" {
+				historyPollSnapshots = append(historyPollSnapshots, historyPollSnapshot{messageID: snapshot.GetContextInfo().GetStanzaID(), poll: domainPollSnapshot(snapshot), at: parsed.Info.Timestamp, fallback: domainMessage(parsed, chatID, transportJID)})
+			}
+			if pin := raw.GetMessage().GetPinInChat(); pin != nil && pin.GetKey().GetID() != "" {
+				atMS := pin.GetSenderTimestampMS()
+				if atMS <= 0 {
+					atMS = pin.GetServerTimestampMS()
+				}
+				at := time.UnixMilli(atMS)
+				if atMS <= 0 {
+					at = parsed.Info.Timestamp
+				}
+				historyPins = append(historyPins, historyPin{messageID: pin.GetKey().GetID(), at: at, pinned: pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL})
+			}
+			if pin := parsed.Message.GetPinInChatMessage(); pin != nil && pin.GetKey().GetID() != "" {
+				at := time.UnixMilli(pin.GetSenderTimestampMS())
+				if pin.GetSenderTimestampMS() <= 0 {
+					at = parsed.Info.Timestamp
+				}
+				historyPins = append(historyPins, historyPin{messageID: pin.GetKey().GetID(), pinnedBy: parsed.Info.Sender.ToNonAD().String(), at: at, pinned: pin.GetType() == waE2E.PinInChatMessage_PIN_FOR_ALL})
+			}
 			if passiveMessage(parsed.Message) {
+				continue
+			}
+			if snapshot := messagePollResultSnapshot(parsed.Message); snapshot != nil && snapshot.GetContextInfo().GetStanzaID() != "" {
+				// The aggregate belongs to the original poll, not a new timeline
+				// bubble. Apply it after the history batch creates that target.
 				continue
 			}
 			batch = append(batch, domainMessage(parsed, chatID, transportJID))
@@ -4898,10 +5038,51 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 			c.log.Error("persist history batch", "chat_id", chatID, "count", len(batch), "error", err)
 			continue
 		}
-		for _, vote := range historyPollVotes {
-			if _, _, voteErr := c.store.ApplyPollVote(c.ctx, vote); voteErr != nil {
-				c.log.Error("persist history poll vote", "chat_id", chatID, "poll_message_id", vote.PollMessageID, "error", voteErr)
+		for _, option := range historyPollOptions {
+			if _, _, optionErr := c.store.AddPollOption(c.ctx, chatID, option.messageID, option.name); optionErr != nil {
+				c.log.Error("persist history poll option", "chat_id", chatID, "poll_message_id", option.messageID, "error", optionErr)
 			}
+		}
+		for _, historyVote := range historyPollVotes {
+			poll, pollErr := c.store.Poll(c.ctx, chatID, historyVote.vote.PollMessageID)
+			if pollErr != nil {
+				c.log.Error("load history poll for vote", "chat_id", chatID, "poll_message_id", historyVote.vote.PollMessageID, "error", pollErr)
+				continue
+			}
+			selected, unknown := pollSelectedNames(poll, historyVote.hashes)
+			if unknown > 0 {
+				unknownHistoryPollOption = true
+				continue
+			}
+			historyVote.vote.SelectedOptions = selected
+			if _, _, voteErr := c.store.ApplyPollVote(c.ctx, historyVote.vote); voteErr != nil {
+				c.log.Error("persist history poll vote", "chat_id", chatID, "poll_message_id", historyVote.vote.PollMessageID, "error", voteErr)
+			}
+		}
+		for _, snapshot := range historyPollSnapshots {
+			if _, _, snapshotErr := c.store.ApplyPollSnapshot(c.ctx, chatID, snapshot.messageID, snapshot.poll, snapshot.at); errors.Is(snapshotErr, sql.ErrNoRows) {
+				if fallbackErr := c.store.ApplyMessage(c.ctx, snapshot.fallback, false); fallbackErr != nil {
+					c.log.Error("persist standalone history poll snapshot", "chat_id", chatID, "message_id", snapshot.fallback.ID, "error", fallbackErr)
+				} else {
+					messages++
+				}
+			} else if snapshotErr != nil {
+				c.log.Error("persist history poll snapshot", "chat_id", chatID, "poll_message_id", snapshot.messageID, "error", snapshotErr)
+			}
+		}
+		if unknownHistoryPollOption {
+			c.sink(Event{Kind: "problem", Detail: "Some poll updates referenced unsupported or unknown options; refresh chat history after all poll options have synced"})
+		}
+		historyPinsChanged := false
+		for _, pin := range historyPins {
+			if pinErr := c.store.SetMessagePinned(c.ctx, chatID, pin.messageID, pin.pinnedBy, pin.at, pin.pinned); pinErr != nil {
+				c.log.Error("persist history pin", "chat_id", chatID, "message_id", pin.messageID, "error", pinErr)
+			} else {
+				historyPinsChanged = true
+			}
+		}
+		if historyPinsChanged {
+			c.sink(Event{Kind: "pins", ChatJID: chatID})
 		}
 		messages += uint64(len(batch))
 		recovered := len(reactions)

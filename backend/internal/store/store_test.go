@@ -1536,6 +1536,31 @@ func TestPollVotesAndPinsConvergeAndSurviveRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if message, changed, addErr := s.AddPollOption(ctx, "group@g.us", "poll-1", "Tacos"); addErr != nil || !changed || message.Poll == nil || len(message.Poll.Options) != 3 || message.Poll.Options[0].VoteCount != 1 {
+		t.Fatalf("add poll option: changed=%v message=%+v err=%v", changed, message.Poll, addErr)
+	}
+	if _, changed, addErr := s.AddPollOption(ctx, "group@g.us", "poll-1", "Tacos"); addErr != nil || changed {
+		t.Fatalf("duplicate poll option: changed=%v err=%v", changed, addErr)
+	}
+	if _, _, err = s.ApplyPollVote(ctx, domain.PollVote{ChatJID: "group@g.us", PollMessageID: "snapshot", VoterJID: "late", SelectedOptions: []string{"Pizza"}, Timestamp: time.UnixMilli(210)}); err != nil {
+		t.Fatal(err)
+	}
+	finalSnapshot := &domain.Poll{Question: "Final lunch result", Options: []domain.PollOption{{Name: "Pizza", VoteCount: 4}, {Name: "Sushi", VoteCount: 2}}, TotalVoters: 4}
+	if message, changed, snapshotErr := s.ApplyPollSnapshot(ctx, "group@g.us", "snapshot", finalSnapshot, time.UnixMilli(211)); snapshotErr != nil || !changed || message.Poll == nil || message.Poll.TotalVoters != 4 || message.Poll.Options[0].VoteCount != 4 {
+		t.Fatalf("apply poll snapshot: changed=%v message=%+v err=%v", changed, message.Poll, snapshotErr)
+	}
+	if _, _, err = s.ApplyPollVote(ctx, domain.PollVote{ChatJID: "group@g.us", PollMessageID: "snapshot", VoterJID: "newer", SelectedOptions: []string{"Sushi"}, Timestamp: time.UnixMilli(220)}); err != nil {
+		t.Fatal(err)
+	}
+	if message, changed, snapshotErr := s.ApplyPollSnapshot(ctx, "group@g.us", "snapshot", &domain.Poll{Question: "stale", TotalVoters: 0}, time.UnixMilli(205)); snapshotErr != nil || changed || message.Poll == nil || message.Poll.TotalVoters != 5 || message.Poll.Options[1].VoteCount != 3 {
+		t.Fatalf("stale poll snapshot: changed=%v message=%+v err=%v", changed, message.Poll, snapshotErr)
+	}
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "snapshot", ChatJID: "group@g.us", TransportJID: "group@g.us", Kind: "poll", Timestamp: time.UnixMilli(100), Poll: &domain.Poll{Question: "Venue?", SelectableOptionsCount: 1, Options: []domain.PollOption{{Name: "Pizza"}, {Name: "Sushi"}}}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if message, replayErr := s.Message(ctx, "group@g.us", "snapshot"); replayErr != nil || message.Poll == nil || message.Poll.TotalVoters != 5 || message.Poll.Options[1].VoteCount != 3 {
+		t.Fatalf("creation replay after snapshot: poll=%+v err=%v", message.Poll, replayErr)
+	}
 	if err = s.SetMessagePinned(ctx, "group@g.us", "target", "admin", time.UnixMilli(300), true); err != nil {
 		t.Fatal(err)
 	}
@@ -1558,14 +1583,14 @@ func TestPollVotesAndPinsConvergeAndSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message.Poll == nil || message.Poll.TotalVoters != 1 || message.Poll.Options[0].VoteCount != 1 || message.Poll.Options[1].VoteCount != 0 || message.Poll.Options[1].SelectedByMe {
+	if message.Poll == nil || message.Poll.TotalVoters != 1 || len(message.Poll.Options) != 3 || message.Poll.Options[0].VoteCount != 1 || message.Poll.Options[1].VoteCount != 0 || message.Poll.Options[1].SelectedByMe {
 		t.Fatalf("poll after replay = %+v", message.Poll)
 	}
 	snapshot, err := s.Message(ctx, "group@g.us", "snapshot")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Poll == nil || snapshot.Poll.TotalVoters != 4 || snapshot.Poll.Options[0].VoteCount != 4 {
+	if snapshot.Poll == nil || snapshot.Poll.TotalVoters != 5 || snapshot.Poll.Options[0].VoteCount != 4 || snapshot.Poll.Options[1].VoteCount != 3 {
 		t.Fatalf("snapshot after restart = %+v", snapshot.Poll)
 	}
 	pins, err := s.PinnedMessages(ctx, "group@g.us")
