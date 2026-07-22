@@ -323,8 +323,8 @@ executable target was missed.
 | Date | Git commit | OS/arch | Artifact/format | Exact bytes | gzip/download bytes | Cold p95 | Idle RSS/CPU | Scroll result | Evidence link |
 | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |
 | 2026-07-22 | source baseline | Linux x86-64 | GPUI + Go executables | 55,320,882 | 20,859,133 | not recorded | not recorded | fake fixture existed; not recorded | local measurement above |
-| 2026-07-22 | `d7e65ca` + UI worktree | Linux x86-64 | Tauri executable + Go sidecar | 29,213,962 | 10,343,277 | pending | pending | pending | local build, unpack, and startup smoke |
-| 2026-07-22 | `d7e65ca` + UI worktree | Linux x86-64 | `.deb` | 10,641,102 | 10,641,102 download | pending | pending | pending | local build, unpack, and startup smoke |
+| 2026-07-22 | `3f78ab4` | Linux x86-64 | Tauri executable + Go sidecar | 29,214,218 | 10,344,683 | pending | pending | pending | local build, unpack, and startup smoke |
+| 2026-07-22 | `3f78ab4` | Linux x86-64 | `.deb` | 10,640,910 | 10,640,910 download | pending | pending | pending | local build, unpack, and startup smoke |
 | pending | pending | Linux x86-64 | AppImage | pending | pending | pending | pending | pending | pending |
 | pending | pending | Windows x86-64 | NSIS/MSI | pending | pending | pending | pending | pending | pending |
 | pending | pending | macOS arm64 | `.app`/DMG | pending | pending | pending | pending | pending | pending |

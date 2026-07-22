@@ -190,15 +190,18 @@ Measured from the 2026-07-22 integration worktree:
 
 | Artifact | Exact bytes | gzip -9 reference |
 | --- | ---: | ---: |
-| Tauri executable | 7,054,440 | 2,530,899 |
+| Tauri executable | 7,054,696 | 2,532,305 |
 | stripped static Go sidecar | 22,159,522 | 7,812,378 |
-| combined executable payload | 29,213,962 | 10,343,277 |
-| `.deb` | 10,641,102 | package size |
+| combined executable payload | 29,214,218 | 10,344,683 |
+| `.deb` | 10,640,910 | package size |
 
-The frontend JavaScript plus CSS is 60,353 bytes with per-file gzip -9. The
+The measured `.deb` SHA-256 is
+`4ccdb67990a9a0139aa96d5ae981a6bc312812230359cd4d06dffe6b5c12107e`.
+
+The frontend JavaScript plus CSS is 60,744 bytes with per-file gzip -9. The
 combined executable payload is 47.19% smaller than the measured
 55,320,882-byte GPUI-plus-sidecar baseline; the Tauri executable alone is
-78.81% smaller than the 33,284,240-byte GPUI executable. The Go sidecar grew
+78.80% smaller than the 33,284,240-byte GPUI executable. The Go sidecar grew
 122,880 bytes (0.56%) with attachment transport and media-cache hardening.
 
 The `.deb` was unpacked and contained both mode-755 executables under

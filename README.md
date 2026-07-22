@@ -95,10 +95,10 @@ The 2026-07-22 Linux x86-64 release measurement is:
 
 | Artifact | Exact bytes |
 | --- | ---: |
-| Tauri executable | 7,054,440 |
+| Tauri executable | 7,054,696 |
 | stripped static Go sidecar | 22,159,522 |
-| combined executable payload | 29,213,962 |
-| `.deb` package | 10,641,102 |
+| combined executable payload | 29,214,218 |
+| `.deb` package | 10,640,910 |
 
 That combined payload is 47.19% smaller than the measured 55,320,882-byte
 GPUI-plus-sidecar baseline. The packaged-layout smoke reached pairing after
