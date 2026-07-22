@@ -1953,6 +1953,9 @@ impl RustMeow {
                 self.refresh_latest();
             }
             Some(backend_event::Event::RecentReactionsRepaired(_)) => {}
+            // The sticker tray lives only in the Tauri desktop shell; this
+            // legacy GPUI reference has nothing to refresh in response.
+            Some(backend_event::Event::StickersChanged(_)) => {}
             Some(backend_event::Event::Problem(problem)) => {
                 if problem.fatal {
                     self.store.screen = Screen::Fatal;

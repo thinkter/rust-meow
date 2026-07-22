@@ -553,6 +553,49 @@ fn fake_loop(
                 })
             }
             Some(rpc_request::Request::SendAttachment(request)) => fake_send_attachment(request),
+            Some(rpc_request::Request::ListStickers(_)) => {
+                rpc_response::Result::ListStickers(proto::ListStickersResponse {
+                    packs: vec![
+                        proto::StickerPack {
+                            id: "favorites".into(),
+                            name: "Favourites".into(),
+                            stickers: vec![
+                                fake_sticker("fav-1", true),
+                                fake_sticker("fav-2", true),
+                            ],
+                        },
+                        proto::StickerPack {
+                            id: "recent".into(),
+                            name: "Recently used".into(),
+                            stickers: vec![fake_sticker("recent-1", false)],
+                        },
+                    ],
+                })
+            }
+            Some(rpc_request::Request::SendStickerFromLibrary(request)) => {
+                rpc_response::Result::SendStickerFromLibrary(
+                    proto::SendStickerFromLibraryResponse {
+                        message: Some(proto::Message {
+                            id: request.client_message_id,
+                            chat_id: request.chat_id,
+                            sender_id: "me@s.whatsapp.net".into(),
+                            sender_name: "You".into(),
+                            from_me: true,
+                            timestamp_ms: 1_900_000_000_000,
+                            status: proto::MessageStatus::Sent as i32,
+                            content: Some(proto::message::Content::Image(proto::ImageContent {
+                                mime_type: "image/webp".into(),
+                                sticker: true,
+                                width: 512,
+                                height: 512,
+                                ..Default::default()
+                            })),
+                            reply_to_message_id: request.reply_to_message_id,
+                            ..Default::default()
+                        }),
+                    },
+                )
+            }
             Some(rpc_request::Request::SendReaction(request)) => {
                 let removed = request.emoji.is_empty();
                 rpc_response::Result::SendReaction(proto::SendReactionResponse {
@@ -617,6 +660,21 @@ fn fake_invalid_argument(message: impl Into<String>) -> rpc_response::Result {
         message: message.into(),
         retryable: false,
     })
+}
+
+fn fake_sticker(id: &str, favorite: bool) -> proto::Sticker {
+    proto::Sticker {
+        id: id.into(),
+        local_path: String::new(),
+        mime_type: "image/webp".into(),
+        animated: false,
+        width: 512,
+        height: 512,
+        favorite,
+        last_used_ms: 1_900_000_000_000,
+        source_chat_id: String::new(),
+        source_message_id: String::new(),
+    }
 }
 
 fn fake_send_attachment(request: proto::SendAttachmentRequest) -> rpc_response::Result {
