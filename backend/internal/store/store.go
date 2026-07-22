@@ -2177,6 +2177,22 @@ func (s *Store) UpsertChatMetadata(ctx context.Context, jid, name string, archiv
 	return err
 }
 
+// SetChatMute records a chat's WhatsApp mute-until instant as Unix
+// milliseconds; zero clears the mute. The chat is created if a mute mutation
+// arrives before its first message, mirroring UpsertChatMetadata, so a mute
+// synced from the phone for an otherwise-silent chat is not lost.
+func (s *Store) SetChatMute(ctx context.Context, jid string, mutedUntilMillis int64) error {
+	resolved, err := s.ResolveChat(ctx, jid)
+	if errors.Is(err, sql.ErrNoRows) {
+		resolved, _, err = s.EnsureConversation(ctx, jid)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE chats SET muted_until=? WHERE jid=?`, mutedUntilMillis, resolved)
+	return err
+}
+
 func (s *Store) ReserveOutgoing(ctx context.Context, clientRequestID, chatJID, text, messageID string) (string, bool, error) {
 	resolved, resolveErr := s.ResolveChat(ctx, chatJID)
 	if errors.Is(resolveErr, sql.ErrNoRows) {
