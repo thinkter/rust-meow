@@ -3079,6 +3079,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "image",
+ "notify-rust",
  "prost",
  "prost-build",
  "protoc-bin-vendored",

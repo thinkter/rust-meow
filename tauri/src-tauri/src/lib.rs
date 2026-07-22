@@ -1,3 +1,4 @@
+mod native_notifications;
 mod proto;
 
 #[allow(dead_code)]
@@ -21,7 +22,7 @@ use std::{
 
 use proto::{rpc_request, rpc_response};
 use serde::Serialize;
-use tauri::{Manager as _, ipc::Channel};
+use tauri::{Emitter as _, Manager as _, ipc::Channel};
 use tauri_plugin_opener::OpenerExt as _;
 use tokio::sync::{Mutex, oneshot};
 
@@ -553,6 +554,36 @@ fn restart_app_command(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+async fn show_message_notification(
+    app: tauri::AppHandle,
+    service: tauri::State<'_, native_notifications::NativeNotificationService>,
+    title: String,
+    body: String,
+    chat_id: String,
+    message_id: String,
+) -> Result<(), CommandError> {
+    service
+        .show(
+            app,
+            title,
+            body,
+            native_notifications::NotificationTarget {
+                chat_id,
+                message_id,
+            },
+        )
+        .await
+        .map_err(CommandError::open_failed)
+}
+
+#[tauri::command]
+fn take_notification_activations(
+    store: tauri::State<'_, native_notifications::NotificationActivationStore>,
+) -> Vec<native_notifications::NotificationTarget> {
+    store.take()
+}
+
+#[tauri::command]
 async fn hello(
     state: tauri::State<'_, BridgeService>,
 ) -> Result<proto::HelloResponse, CommandError> {
@@ -992,10 +1023,18 @@ async fn logout(
 }
 
 pub fn run() {
+    let args = std::env::args().collect::<Vec<_>>();
     tauri::Builder::default()
+        .manage(native_notifications::NotificationActivationStore::from_args(&args))
+        .manage(native_notifications::NativeNotificationService::default())
         // This must be the first plugin: a second process must exit before the
         // setup hook starts another sidecar against the same data directory.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if let Some(target) = native_notifications::target_from_args(&args) {
+                app.state::<native_notifications::NotificationActivationStore>()
+                    .push(target.clone());
+                let _ = app.emit("notification-activated", target);
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -1014,6 +1053,8 @@ pub fn run() {
             subscribe_backend,
             open_media_path,
             save_media_as,
+            show_message_notification,
+            take_notification_activations,
             restart_app_command,
             hello,
             get_auth_state,

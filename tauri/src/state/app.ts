@@ -7,6 +7,10 @@ import {
   listenForNotificationActions,
   sendMessageNotification,
 } from "../lib/notifications";
+import {
+  NotificationActivationQueue,
+  notificationTargetAvailability,
+} from "../lib/notification-routing";
 import { isChatActuallyVisible, shouldNotify } from "../lib/notification-policy";
 import {
   AttachmentKind,
@@ -252,13 +256,14 @@ export function createAppModel() {
   const pendingNotifications = new Map<string, Message>();
   const notifiedMessages = new Set<string>();
   let disposeNotificationActions: (() => void) | undefined;
+  const notificationActivations = new NotificationActivationQueue(openNotificationTarget);
 
   async function bootstrap() {
     try {
       try {
-        disposeNotificationActions = await listenForNotificationActions(({ chatId, messageId }) =>
-          selectChat(chatId, messageId),
-        );
+        disposeNotificationActions = await listenForNotificationActions((target) => {
+          notificationActivations.enqueue(target);
+        });
       } catch (error) {
         // Notifications are optional desktop integration. A missing or broken
         // platform service must not prevent the messaging bridge from starting.
@@ -285,6 +290,7 @@ export function createAppModel() {
       }
       await loadChats(true);
       await restoreWorkspaceConversations();
+      notificationActivations.markReady();
     } catch (error) {
       fatal(normalizeBridgeError(error).message);
     }
@@ -1261,7 +1267,7 @@ export function createAppModel() {
       return;
     }
     try {
-      if (await ensureNotificationPermission()) {
+      if (await ensureNotificationPermission(true)) {
         prefActions.update("notificationsEnabled", true);
       } else {
         prefActions.update("notificationsEnabled", false);
@@ -1386,6 +1392,7 @@ export function createAppModel() {
         if (event.payload.reaction) applyReaction(event.payload.reaction, event.payload.removed);
         break;
       case "chatMerged":
+        notificationActivations.mergeChatId(event.payload.oldChatId, event.payload.newChatId);
         mergeChatId(event.payload.oldChatId, event.payload.newChatId);
         break;
       case "typingChanged":
@@ -1441,6 +1448,22 @@ export function createAppModel() {
       // A desktop notification failure must never interrupt event reduction.
       console.warn("Could not show incoming message notification", error);
     }
+  }
+
+  async function openNotificationTarget({ chatId, messageId }: { chatId: string; messageId: string }) {
+    const chat = state.chats.find((candidate) => candidate.id === chatId);
+    if (notificationTargetAvailability(Boolean(chat), false) === "missing-chat") {
+      toast("This conversation is no longer available");
+      return;
+    }
+    await selectChat(chatId, messageId);
+    const available = notificationTargetAvailability(
+      true,
+      Boolean(state.conversations[chatId]?.messages.some((message) => message.id === messageId)),
+    );
+    if (available === "available") return;
+    toast("That message is no longer available. Showing the latest messages instead.", "info");
+    await loadConversation(chatId);
   }
 
   async function resyncAfterEventGap() {
