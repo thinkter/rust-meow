@@ -82,11 +82,13 @@ Known foundation blockers at this snapshot:
   passes on the current host, but a clean-machine install is still required;
 - backend event `sequence` is preserved and gaps surface a problem event, but
   there is no process epoch, automatic resync, or restart/backoff supervisor;
-- the asset protocol has an empty static scope and dynamically grants only the
-  active profile's media directory, but cross-platform escape tests are still
-  required;
-- packaged-layout double-launch passes on the current Linux host, but the
-  cross-platform focus/profile-lock failure matrix is not yet proven;
+- the asset protocol has an empty static scope and dynamically grants the
+  active profile's media tree plus direct managed avatar files; Rust escape
+  tests pass, but cross-platform proof is still required;
+- the backend repairs Unix profile directories to mode 0700 and sensitive
+  files to 0600, and takes a cross-process advisory profile lock; Linux lock
+  tests and an earlier packaged double-launch pass, while cross-platform focus
+  and failure behavior remain unproven;
 - the reused bridge locates an adjacent binary or `RUST_MEOW_BACKEND`; adjacent
   lookup is verified for the unpacked `.deb`, not every installer format;
 - the release profile uses `panic = "abort"`; crash-diagnostic implications
@@ -112,10 +114,10 @@ Known foundation blockers at this snapshot:
 | Graceful shutdown and forced reap | GPUI | Core via reused bridge | **TR-09:** normal quit observes Shutdown; hung backend is killed after the grace period; no backend PID remains. |
 | Crash/orphan containment | Partial | Missing | **TR-10:** force-crash the Tauri core on Linux, Windows, and macOS and prove the sidecar cannot remain indefinitely against the profile. |
 | Automatic restart/backoff | Missing | Missing | **TR-11:** retry transient exits with bounded exponential backoff; protocol/data-corruption exits do not loop forever. |
-| Single app/profile instance | Documented requirement | Linux package smoke passed; other targets pending | **TR-12:** start two packaged apps against one profile; the second focuses the first and no second sidecar opens the DB. |
+| Single app/profile instance | Documented requirement | Backend profile lock proven on Linux; earlier package smoke passed | **TR-12:** start two packaged apps on every target; no second sidecar opens the DB, and the second either focuses the first or exits with an explicit product decision. |
 | Stable data-directory resolution | GPUI | Core via reused paths | **TR-13:** upgrade a copied paired profile on all OSes without QR re-pair; custom `RUST_MEOW_DATA_DIR` remains isolated. |
 | Product DB migration safety | GPUI | Backend-owned | **TR-14:** backup a populated DB, migrate, run `PRAGMA integrity_check`, verify counts/identities/media, and test rollback on injected failure. |
-| Logout and fail-closed wipe | GPUI | Core command | **TR-15:** confirm cancel does nothing; confirm logout disconnects and transactionally removes account data; injected wipe failure does not re-pair or report success. |
+| Logout and fail-closed wipe | GPUI | Backend physical purge and lifecycle isolation proven; live UI pending | **TR-15:** confirm cancel does nothing in the packaged UI; automated tests already prove injected failure is fail-closed, active/queued work is isolated, SQLite/FTS/WAL bytes are purged, caches are removed, and a fresh pairing store remains usable. |
 | Diagnostics never corrupt stdout | GPUI | Backend-owned | **TR-16:** backend diagnostics go to `backend.log`/stderr only; a log storm cannot corrupt framed stdout. |
 | Fake 10,000-chat fixture | GPUI | Core (`--fake-backend`) | **TR-17:** packaged/debug Tauri starts with `--fake-backend`, renders 10,000 virtual chats, and exercises pairing plus paging deterministically. |
 | Self-contained backend bundle | Manual adjacent copy | Linux `.deb` unpack/startup smoke passed; other targets pending | **TR-18:** unpack every installer, find the correct target sidecar, launch without environment overrides, and complete Hello. |
@@ -126,8 +128,8 @@ Known foundation blockers at this snapshot:
 | User-visible behavior | GPUI baseline | Tauri state | Proof gate |
 | --- | --- | --- | --- |
 | Launch into paired/unpaired state | GPUI | Core command | **AU-01:** test clean, paired-disconnected, paired-connected, logged-out, and corrupt-profile starts. |
-| QR pairing display and expiry | GPUI | Core/event | **AU-02:** fresh profile renders scannable QR, replaces expired codes, handles cancellation, and reaches connected state after a real scan. |
-| Pairing retry and readable errors | GPUI | Core/event | **AU-03:** offline, QR channel failure, expired QR, and backend exit expose actionable retry without blank UI. |
+| QR pairing display and expiry | GPUI | Core/event; real isolated-profile scan reached connected | **AU-02:** retain packaged clean-profile proof for code replacement, expiry, cancellation, and connected state; automated lifecycle tests and a real development scan pass. |
+| Pairing retry and readable errors | GPUI | Core/event; stale-handler retry regression proven | **AU-03:** packaged offline, QR channel failure, expired QR, and backend exit must expose actionable retry without blank UI. |
 | Connection state and reconnect status | GPUI | Core/event | **AU-04:** toggle network and sleep/resume; header moves through connecting/connected/disconnected without stale state. |
 | History-sync progress | GPUI | Core/event | **AU-05:** real initial sync reports progress, remains interactive, and converges to persisted chat/message counts after restart. |
 | PN/LID conversation identity merge | Backend/GPUI | Backend/Core event | **AU-06:** history and live messages using both aliases render in one conversation; merge remaps selected chat and draft. |
@@ -265,7 +267,7 @@ silently excluded when declaring the migration complete.
 | RTL/bidi/localization/time formats | Partial message bidi | Missing proof | **DS-13:** Arabic/Hebrew mixed content, locale strings, 12/24-hour time, pluralization, and layout direction. |
 | CSP and local-only frontend | N/A native | Configured, proof pending | **DS-14:** release CSP has no remote/CDN/script escape; message content cannot execute JS or invoke unintended commands. |
 | Least-privilege capabilities | N/A native | Partial | **DS-15:** main local window only; explicit app commands; no frontend shell/database; plugin permissions limited to exact operations. |
-| Media-only asset scope | N/A native | Dynamically scoped; proof pending | **DS-16:** attempts to load DB, log, config, arbitrary temp/home files fail; cached media and thumbnails succeed. |
+| Managed media/avatar asset scope | N/A native | Rust scope/escape tests pass; target proof pending | **DS-16:** attempts to load DB, log, config, nested avatar, symlink-escape, and arbitrary temp/home files fail; cached media, thumbnails, and direct managed avatars succeed. |
 | Secrets excluded from webview/logs | GPUI boundary | Architecture invariant | **DS-17:** inspect IPC/devtools/logs/crash output; session keys, media keys, tokens, and private paths are absent unless strictly required. |
 | Code signing/notarization | Missing | Missing | **DS-18:** verify app, sidecar, installers, notarization/timestamp, and clean-machine launch on each platform. |
 
@@ -284,7 +286,9 @@ checkout on 2026-07-22:
 
 The current Linux x86-64 Tauri release and `.deb` were measured from the
 integration worktree on 2026-07-22. AppImage and non-Linux formats remain
-unmeasured.
+unmeasured. The final `.deb` SHA-256 is
+`f69724eb32eef434a7df2cf47d340d1797eacc61ef2e1c99369455ff0b48b7cd`;
+the built JavaScript and CSS total 61,418 bytes with per-file gzip -9.
 
 ### Initial Tauri acceptance targets
 
@@ -294,8 +298,9 @@ in the evidence table below.
 - Tauri Rust executable plus bundled frontend assets: **at most 8 MiB**
   unpacked on Linux x86-64.
 - Go sidecar: do not exceed the measured **22,036,642-byte** baseline without a
-  reviewed reason. The current attachment-enabled, media-cache-hardened sidecar
-  is 122,880 bytes (0.56%) above that baseline and requires explicit acceptance.
+  reviewed reason. The current attachment-enabled, media-bounded,
+  profile-locked, secure-logout sidecar is 192,512 bytes (0.87%) above that
+  baseline and requires explicit acceptance.
 - Combined unpacked executable payload: **at most 32 MiB**, a material reduction
   from 52.76 MiB.
 - Built frontend JavaScript plus CSS: **at most 500 KiB gzip**; emoji/media-heavy
@@ -323,8 +328,8 @@ executable target was missed.
 | Date | Git commit | OS/arch | Artifact/format | Exact bytes | gzip/download bytes | Cold p95 | Idle RSS/CPU | Scroll result | Evidence link |
 | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |
 | 2026-07-22 | source baseline | Linux x86-64 | GPUI + Go executables | 55,320,882 | 20,859,133 | not recorded | not recorded | fake fixture existed; not recorded | local measurement above |
-| 2026-07-22 | `6a6e256` | Linux x86-64 | Tauri executable + Go sidecar | 29,214,218 | 10,344,650 | pending | pending | pending | final build/unpack; prior adjacent-layout startup smoke |
-| 2026-07-22 | `6a6e256` | Linux x86-64 | `.deb` | 10,640,954 | 10,640,954 download | pending | pending | pending | final build/unpack; prior adjacent-layout startup smoke |
+| 2026-07-22 | `49e70ef` | Linux x86-64 | Tauri executable + Go sidecar | 28,245,258 | 10,361,182 | pending | pending | pending | final build/unpack; prior adjacent-layout startup smoke |
+| 2026-07-22 | `49e70ef` | Linux x86-64 | `.deb` | 10,673,232 | 10,673,232 download | pending | pending | pending | md5 manifest, ELF types, desktop entry, and launcher icons verified after unpacking |
 | pending | pending | Linux x86-64 | AppImage | pending | pending | pending | pending | pending | pending |
 | pending | pending | Windows x86-64 | NSIS/MSI | pending | pending | pending | pending | pending | pending |
 | pending | pending | macOS arm64 | `.app`/DMG | pending | pending | pending | pending | pending | pending |
@@ -373,7 +378,7 @@ true:
 4. **Lifecycle:** single-instance, graceful quit, forced reap, crash cleanup,
    restart/epoch/resync, sleep/resume, offline recovery, and update lifecycle
    pass on Linux, Windows, and macOS.
-5. **Security:** explicit command/capability review, media-only asset access,
+5. **Security:** explicit command/capability review, managed media/avatar asset access,
    production CSP, dependency audit, URL/path validation, secret/log review,
    signed binaries, and installer clean-machine tests pass.
 6. **Performance:** every target in the evidence table has a current measured

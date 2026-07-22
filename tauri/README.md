@@ -186,30 +186,32 @@ tradeoff explicitly.
 
 ### Measured Linux x86-64 package
 
-Measured from the 2026-07-22 integration worktree:
+Measured from commit `49e70ef` in the 2026-07-22 integration worktree:
 
 | Artifact | Exact bytes | gzip -9 reference |
 | --- | ---: | ---: |
-| Tauri executable | 7,054,696 | 2,532,272 |
-| stripped static Go sidecar | 22,159,522 | 7,812,378 |
-| combined executable payload | 29,214,218 | 10,344,650 |
-| `.deb` | 10,640,954 | package size |
+| Tauri executable | 6,016,104 | 2,521,560 |
+| stripped static Go sidecar | 22,229,154 | 7,839,622 |
+| combined executable payload | 28,245,258 | 10,361,182 |
+| `.deb` | 10,673,232 | package size |
 
 The measured `.deb` SHA-256 is
-`efdb44d6f4e45e50f04b71bab40356853cba1705f15df9a688f174fec9f2e4f8`.
+`f69724eb32eef434a7df2cf47d340d1797eacc61ef2e1c99369455ff0b48b7cd`.
 
-The frontend JavaScript plus CSS is 60,744 bytes with per-file gzip -9. The
-combined executable payload is 47.19% smaller than the measured
+The frontend JavaScript plus CSS is 61,418 bytes with per-file gzip -9. The
+combined executable payload is 48.94% smaller than the measured
 55,320,882-byte GPUI-plus-sidecar baseline; the Tauri executable alone is
-78.80% smaller than the 33,284,240-byte GPUI executable. The Go sidecar grew
-122,880 bytes (0.56%) with attachment transport and media-cache hardening.
+81.93% smaller than the 33,284,240-byte GPUI executable. The Go sidecar grew
+192,512 bytes (0.87%) with attachment transport, media-cache limits, profile
+locking, and secure logout erasure.
 
-The `.deb` was unpacked and contained both mode-755 executables under
-`/usr/bin`. Launching that adjacent layout with a fresh profile and no
-`RUST_MEOW_BACKEND` reached the pairing screen after Hello/auth, normal window
-close reaped the sidecar, and a second launch exited without spawning a second
-backend. This is current-host package evidence, not cross-platform signing or
-clean-machine proof.
+The final `.deb` was unpacked, its md5 manifest passed, and it contained both
+mode-755 executables under `/usr/bin`, a desktop entry, and 32/128/256-pixel
+launcher icons. An earlier adjacent-layout smoke with a fresh profile and no
+`RUST_MEOW_BACKEND` reached the pairing screen after Hello/auth, reaped the
+sidecar on normal close, and rejected a second launch without spawning another
+backend. A current-artifact launch plus cross-platform signing and clean-machine
+tests remain open gates.
 
 ## Security boundaries
 
@@ -222,11 +224,19 @@ no direct opener path permission. Downloaded documents go through the Rust
 anything outside the active profile's `media` directory before asking the OS
 to open it.
 
-The asset protocol has an empty static scope. During setup, Rust grants only
-the resolved active profile's `media` directory, so custom
-`RUST_MEOW_DATA_DIR` profiles work without exposing their databases or logs.
-Prove symlink escapes and unrelated files remain inaccessible on every target.
-Never return WhatsApp media keys or session secrets to JavaScript.
+The asset protocol has an empty static scope. During setup, Rust grants the
+resolved active profile's `media` tree and direct files in its managed `avatars`
+directory, so custom `RUST_MEOW_DATA_DIR` profiles work without exposing their
+databases or logs. Rust tests reject database files, nested avatar paths,
+symlink escapes, and unrelated files; repeat the proof on every target. Never
+return WhatsApp media keys or session secrets to JavaScript.
+
+Logout blocks new account work, joins active and queued media operations,
+invalidates old event/pairing/reconciliation generations, clears the product
+and WhatsMeow tables, removes FTS5 terms with its secure-delete mode, then
+checkpoints and vacuums both databases before publishing a fresh pairing
+client. Managed avatar and media caches are removed too. This cannot erase
+copies retained by backups, filesystem snapshots, or storage wear levelling.
 
 ## Troubleshooting
 
