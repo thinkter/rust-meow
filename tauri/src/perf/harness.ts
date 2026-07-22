@@ -56,10 +56,19 @@ export function installPerformanceHarness(
     JSON.stringify({
       ...stored,
       batterySaver: config.powerMode === "battery",
+      density: "comfortable",
       memberPanelOpen: true,
       notificationsEnabled: false,
+      showTabBar: true,
+      sidebarCollapsed: false,
+      splitView: false,
+      uiScale: 1,
     }),
   );
+  // Tauri's webview storage is app-scoped rather than profile-directory
+  // scoped. A benchmark must not inherit the user's active tabs/panes from a
+  // previous normal launch or from the preceding trial.
+  sessionStorage.removeItem("rust-meow-workspace");
 
   let usableAt = 0;
   let usableAtEpochMs = 0;
