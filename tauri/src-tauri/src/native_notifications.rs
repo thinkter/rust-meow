@@ -4,6 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    thread,
 };
 
 use serde::{Deserialize, Serialize};
@@ -89,47 +90,53 @@ impl NativeNotificationService {
 
         let active_waiters = self.active_waiters.clone();
         let (shown_tx, shown_rx) = tokio::sync::oneshot::channel();
-        tauri::async_runtime::spawn_blocking(move || {
-            #[cfg(target_os = "macos")]
-            let _ = notify_rust::set_application(if tauri::is_dev() {
-                "com.apple.Terminal"
-            } else {
-                &app.config().identifier
-            });
-            let mut notification = notify_rust::Notification::new();
-            notification
-                .summary(&title)
-                .body(&body)
-                .id(stable_chat_id(&target.chat_id));
-            #[cfg(all(unix, not(target_os = "macos")))]
-            notification.appname("Rust Meow").action("default", "Open");
-            #[cfg(target_os = "macos")]
-            notification.action("default", "Open");
-            #[cfg(target_os = "windows")]
-            notification.app_id(&app.config().identifier);
+        let worker = thread::Builder::new()
+            .name("notification-action".into())
+            .spawn(move || {
+                #[cfg(target_os = "macos")]
+                let _ = notify_rust::set_application(if tauri::is_dev() {
+                    "com.apple.Terminal"
+                } else {
+                    &app.config().identifier
+                });
+                let mut notification = notify_rust::Notification::new();
+                notification
+                    .summary(&title)
+                    .body(&body)
+                    .id(stable_chat_id(&target.chat_id));
+                #[cfg(all(unix, not(target_os = "macos")))]
+                notification.appname("Rust Meow").action("default", "Open");
+                #[cfg(target_os = "macos")]
+                notification.action("default", "Open");
+                #[cfg(target_os = "windows")]
+                notification.app_id(&app.config().identifier);
 
-            match notification.show() {
-                Ok(handle) => {
-                    let _ = shown_tx.send(Ok(()));
-                    handle.wait_for_action(|action| {
-                        if action == "__closed" {
-                            return;
-                        }
-                        let store = app.state::<NotificationActivationStore>();
-                        store.push(target.clone());
-                        let _ = app.emit("notification-activated", &target);
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    });
+                match notification.show() {
+                    Ok(handle) => {
+                        let _ = shown_tx.send(Ok(()));
+                        handle.wait_for_action(|action| {
+                            if action == "__closed" {
+                                return;
+                            }
+                            let store = app.state::<NotificationActivationStore>();
+                            store.push(target.clone());
+                            let _ = app.emit("notification-activated", &target);
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        let _ = shown_tx.send(Err(error.to_string()));
+                    }
                 }
-                Err(error) => {
-                    let _ = shown_tx.send(Err(error.to_string()));
-                }
-            }
-            active_waiters.fetch_sub(1, Ordering::AcqRel);
-        });
+                active_waiters.fetch_sub(1, Ordering::AcqRel);
+            });
+        if let Err(error) = worker {
+            self.active_waiters.fetch_sub(1, Ordering::AcqRel);
+            return Err(format!("start native notification worker: {error}"));
+        }
 
         shown_rx
             .await
