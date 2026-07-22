@@ -19,7 +19,6 @@ test("captures a stable first-visible message anchor instead of a raw scroll off
   );
   assert.deepEqual(snapshot, { anchorMessageId: "b", anchorOffset: -35, atLatest: false });
 });
-
 test("marks a viewport near the bottom as following latest", () => {
   const snapshot = captureScrollSnapshot(
     ["a"],
@@ -70,4 +69,3 @@ test("a trimmed-away anchor falls back to the unread boundary", () => {
     { kind: "unread", index: 0 },
   );
 });
-

@@ -11,7 +11,6 @@ export interface ScrollSnapshot {
   anchorOffset: number;
   atLatest: boolean;
 }
-
 export interface VirtualRow {
   index: number;
   start: number;
@@ -58,4 +57,3 @@ export function resolveScrollRestore(
   if (unreadIndex >= 0) return { kind: "unread", index: unreadIndex };
   return { kind: "latest", index: messageIds.length - 1 };
 }
-
