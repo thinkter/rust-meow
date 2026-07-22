@@ -294,8 +294,8 @@ in the evidence table below.
 - Tauri Rust executable plus bundled frontend assets: **at most 8 MiB**
   unpacked on Linux x86-64.
 - Go sidecar: do not exceed the measured **22,036,642-byte** baseline without a
-  reviewed reason. The current attachment-enabled sidecar is 106,496 bytes
-  (0.48%) above that baseline and requires explicit acceptance.
+  reviewed reason. The current attachment-enabled, media-cache-hardened sidecar
+  is 122,880 bytes (0.56%) above that baseline and requires explicit acceptance.
 - Combined unpacked executable payload: **at most 32 MiB**, a material reduction
   from 52.76 MiB.
 - Built frontend JavaScript plus CSS: **at most 500 KiB gzip**; emoji/media-heavy
@@ -323,8 +323,8 @@ executable target was missed.
 | Date | Git commit | OS/arch | Artifact/format | Exact bytes | gzip/download bytes | Cold p95 | Idle RSS/CPU | Scroll result | Evidence link |
 | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |
 | 2026-07-22 | source baseline | Linux x86-64 | GPUI + Go executables | 55,320,882 | 20,859,133 | not recorded | not recorded | fake fixture existed; not recorded | local measurement above |
-| 2026-07-22 | `0e5618e` + integration worktree | Linux x86-64 | Tauri executable + Go sidecar | 29,197,322 | 10,339,018 | pending | pending | pending | local build, unpack, and startup smoke |
-| 2026-07-22 | `0e5618e` + integration worktree | Linux x86-64 | `.deb` | 10,637,890 | 10,637,890 download | pending | pending | pending | local build, unpack, and startup smoke |
+| 2026-07-22 | `d7e65ca` + UI worktree | Linux x86-64 | Tauri executable + Go sidecar | 29,213,962 | 10,343,277 | pending | pending | pending | local build, unpack, and startup smoke |
+| 2026-07-22 | `d7e65ca` + UI worktree | Linux x86-64 | `.deb` | 10,641,102 | 10,641,102 download | pending | pending | pending | local build, unpack, and startup smoke |
 | pending | pending | Linux x86-64 | AppImage | pending | pending | pending | pending | pending | pending |
 | pending | pending | Windows x86-64 | NSIS/MSI | pending | pending | pending | pending | pending | pending |
 | pending | pending | macOS arm64 | `.app`/DMG | pending | pending | pending | pending | pending | pending |
