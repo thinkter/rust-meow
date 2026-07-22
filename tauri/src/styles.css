@@ -270,7 +270,7 @@ a:focus-visible,
   background: transparent;
 }
 
-.titlebar > .tab-strip .tab {
+.titlebar > .tab-strip .tab-slot {
   min-width: calc(112px * var(--scale));
 }
 
@@ -282,14 +282,22 @@ a:focus-visible,
   display: none;
 }
 
-.tab {
+.tab-slot {
   display: flex;
+  position: relative;
   min-width: calc(120px * var(--scale));
   max-width: calc(200px * var(--scale));
   flex: 1;
+  align-items: stretch;
+}
+
+.tab {
+  display: flex;
+  min-width: 0;
+  width: 100%;
   align-items: center;
   gap: calc(7px * var(--scale));
-  padding: 0 calc(9px * var(--scale));
+  padding: 0 calc(30px * var(--scale)) 0 calc(9px * var(--scale));
   border: 1px solid transparent;
   border-bottom: 0;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
@@ -338,7 +346,11 @@ a:focus-visible,
 }
 
 .tab-close {
-  display: none;
+  display: grid;
+  position: absolute;
+  top: 50%;
+  right: calc(6px * var(--scale));
+  z-index: 1;
   flex: none;
   width: calc(18px * var(--scale));
   height: calc(18px * var(--scale));
@@ -348,12 +360,15 @@ a:focus-visible,
   background: transparent;
   color: inherit;
   cursor: pointer;
+  opacity: 0.55;
+  transform: translateY(-50%);
 }
 .poll-option:disabled { cursor: default; opacity: 0.82; }
 
-.tab:hover .tab-close,
-.tab.active .tab-close {
-  display: grid;
+.tab-slot:hover .tab-close,
+.tab-slot:focus-within .tab-close,
+.tab-slot.active .tab-close {
+  opacity: 1;
 }
 
 .tab-close:hover {
@@ -2970,7 +2985,7 @@ html[data-battery-saver="true"] .modal-backdrop {
 }
 
 @media (max-width: 520px) {
-  .titlebar > .tab-strip .tab {
+  .titlebar > .tab-strip .tab-slot {
     min-width: calc(96px * var(--scale));
   }
 

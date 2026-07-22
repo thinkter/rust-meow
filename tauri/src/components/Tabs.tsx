@@ -6,7 +6,6 @@ import { samePaneDropIndex } from "../state/workspace";
 import { ChatKind } from "../lib/types";
 import { Avatar } from "./Avatar";
 
-/** Drag payload for reordering a tab within a pane or moving it across panes. */
 interface TabDragPayload {
   chatId: string;
   fromPaneId: string;
@@ -15,17 +14,10 @@ interface TabDragPayload {
 const DRAG_MIME = "application/x-rust-meow-tab";
 
 function focusSidebarSearch() {
-  // Mirrors `Sidebar.tsx`'s own `focusSearch` helper — there is no ref path
-  // from a tab strip up to the sidebar, so both reach for the same DOM node.
   document.querySelector<HTMLInputElement>(".search-field input")?.focus();
 }
 
-/**
- * One pane's tab strip (goal G9). Lives inside `.pane`, at the top, above
- * that pane's `Conversation` — see `App.tsx`. Tabs can be reordered within
- * the strip and dragged into the other pane via HTML5 drag-and-drop, both
- * landing on `actions.moveTab`.
- */
+/** One accessible tab strip with pointer and keyboard movement parity. */
 export function Tabs(props: { model: AppModel; pane: Pane }) {
   const { state, preferences, actions } = props.model;
 
@@ -33,12 +25,15 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
     return state.chats.find((candidate) => candidate.id === chatId);
   }
 
+  function chatName(chatId: string) {
+    const chat = chatFor(chatId);
+    return chat?.title || chat?.phoneNumber || "Chat";
+  }
+
   function dropIndexFor(event: DragEvent, targetChatId: string): number {
-    const ids = props.pane.tabChatIds;
-    const targetIndex = ids.indexOf(targetChatId);
+    const targetIndex = props.pane.tabChatIds.indexOf(targetChatId);
     const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    const droppedOnRightHalf = event.clientX - bounds.left > bounds.width / 2;
-    return droppedOnRightHalf ? targetIndex + 1 : targetIndex;
+    return event.clientX - bounds.left > bounds.width / 2 ? targetIndex + 1 : targetIndex;
   }
 
   function readDragPayload(event: DragEvent): TabDragPayload | undefined {
@@ -55,7 +50,7 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
         return parsed as TabDragPayload;
       }
     } catch {
-      // Not a tab drag (e.g. a stray file drop) — ignore it.
+      // Ignore non-tab drops.
     }
     return undefined;
   }
@@ -70,29 +65,68 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
     actions.moveTab(payload.chatId, payload.fromPaneId, props.pane.id, index);
   }
 
-  function moveKeyboardFocus(event: KeyboardEvent, currentChatId: string) {
+  function focusTab(paneId: string, chatId: string) {
+    requestAnimationFrame(() => document.getElementById(`tab-${paneId}-${chatId}`)?.focus());
+  }
+
+  function closeAndRestoreFocus(chatId: string) {
+    const title = chatName(chatId);
+    actions.closeTab(chatId, props.pane.id);
+    const remainingPane = state.panes.find((candidate) => candidate.id === props.pane.id)
+      ?? state.panes.find((candidate) => candidate.id === state.focusedPaneId)
+      ?? state.panes[0];
+    if (remainingPane?.activeChatId) focusTab(remainingPane.id, remainingPane.activeChatId);
+    else requestAnimationFrame(focusSidebarSearch);
+    actions.announceTabAction(`${title} closed`);
+  }
+
+  function moveSelection(event: KeyboardEvent, currentChatId: string) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return false;
     const tabs = props.pane.tabChatIds;
     if (tabs.length === 0) return true;
     const current = Math.max(0, tabs.indexOf(currentChatId));
-    const nextIndex =
-      event.key === "Home"
-        ? 0
-        : event.key === "End"
-          ? tabs.length - 1
-          : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
     const nextChatId = tabs[nextIndex];
     if (nextChatId) {
       void actions.selectChat(nextChatId, "", props.pane.id);
-      requestAnimationFrame(() => {
-        (event.currentTarget as HTMLElement)
-          .closest(".tab-strip")
-          ?.querySelectorAll<HTMLElement>("[role=tab]")
-          .item(nextIndex)
-          ?.focus();
-      });
+      focusTab(props.pane.id, nextChatId);
     }
     event.preventDefault();
+    return true;
+  }
+
+  function handleAccessibleCommand(event: KeyboardEvent, chatId: string) {
+    const command = tabKeyboardCommand(
+      {
+        key: event.key,
+        altKey: event.altKey,
+        shiftKey: event.shiftKey,
+        platformModifier: event.ctrlKey || event.metaKey,
+      },
+      state.panes,
+      props.pane.id,
+      chatId,
+    );
+    if (!command) return false;
+    event.preventDefault();
+    const title = chatName(chatId);
+    if (command.kind === "close") {
+      closeAndRestoreFocus(chatId);
+    } else if (command.kind === "boundary") {
+      actions.announceTabAction(command.message);
+    } else if (command.kind === "reorder") {
+      actions.moveTab(chatId, props.pane.id, props.pane.id, command.index);
+      focusTab(props.pane.id, chatId);
+      actions.announceTabAction(`${title} moved ${command.direction} to position ${command.index + 1}`);
+    } else {
+      actions.moveTab(chatId, props.pane.id, command.paneId, command.index);
+      focusTab(command.paneId, chatId);
+      actions.announceTabAction(`${title} moved to the ${command.direction} pane, position ${command.index + 1}`);
+    }
     return true;
   }
 
@@ -109,15 +143,10 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
           {(chatId) => {
             const chat = () => chatFor(chatId);
             const active = () => chatId === props.pane.activeChatId;
-            // A `<div role="tab">` rather than a `<button>` — the close
-            // control inside it is a real button, and buttons cannot nest.
             return (
               <div
-                class={`tab ${active() ? "active" : ""}`}
-                role="tab"
-                tabIndex={active() ? 0 : -1}
+                class={`tab-slot ${active() ? "active" : ""}`}
                 data-chat-id={chatId}
-                aria-selected={active()}
                 draggable
                 onDragStart={(event) => {
                   event.dataTransfer?.setData(
@@ -134,38 +163,46 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
                   event.stopPropagation();
                   handleDrop(event, dropIndexFor(event, chatId));
                 }}
-                onClick={() => void actions.selectChat(chatId, "", props.pane.id)}
-                onKeyDown={(event) => {
-                  if (moveKeyboardFocus(event, chatId)) return;
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    void actions.selectChat(chatId, "", props.pane.id);
-                  }
-                }}
                 onAuxClick={(event) => {
                   if (event.button !== 1) return;
                   event.preventDefault();
-                  actions.closeTab(chatId, props.pane.id);
+                  closeAndRestoreFocus(chatId);
                 }}
               >
-                <Avatar
-                  class="tab-avatar"
-                  name={chat()?.title || chat()?.phoneNumber || "Chat"}
-                  path={chat()?.avatarPath}
-                  size={16 * preferences.uiScale}
-                  group={chat()?.kind === ChatKind.Group}
-                />
-                <span class="tab-title">{chat()?.title || chat()?.phoneNumber || "Chat"}</span>
-                <Show when={(chat()?.unreadCount ?? 0) > 0}>
-                  <span class="tab-badge">{Math.min(chat()!.unreadCount, 99)}</span>
-                </Show>
+                <button
+                  type="button"
+                  id={`tab-${props.pane.id}-${chatId}`}
+                  class={`tab ${active() ? "active" : ""}`}
+                  role="tab"
+                  tabIndex={active() ? 0 : -1}
+                  aria-selected={active()}
+                  aria-controls={`tabpanel-${props.pane.id}-${chatId}`}
+                  aria-label={`${chatName(chatId)}${(chat()?.unreadCount ?? 0) > 0 ? `, ${chat()!.unreadCount} unread` : ""}`}
+                  aria-keyshortcuts="Delete Alt+Shift+ArrowLeft Alt+Shift+ArrowRight Control+Shift+ArrowLeft Control+Shift+ArrowRight"
+                  onClick={() => void actions.selectChat(chatId, "", props.pane.id)}
+                  onKeyDown={(event) => {
+                    if (!handleAccessibleCommand(event, chatId)) moveSelection(event, chatId);
+                  }}
+                >
+                  <Avatar
+                    class="tab-avatar"
+                    name={chatName(chatId)}
+                    path={chat()?.avatarPath}
+                    size={16 * preferences.uiScale}
+                    group={chat()?.kind === ChatKind.Group}
+                  />
+                  <span class="tab-title">{chatName(chatId)}</span>
+                  <Show when={(chat()?.unreadCount ?? 0) > 0}>
+                    <span class="tab-badge" aria-hidden="true">{Math.min(chat()!.unreadCount, 99)}</span>
+                  </Show>
+                </button>
                 <button
                   type="button"
                   class="tab-close"
-                  aria-label="Close tab"
+                  aria-label={`Close ${chatName(chatId)}`}
                   onClick={(event) => {
                     event.stopPropagation();
-                    actions.closeTab(chatId, props.pane.id);
+                    closeAndRestoreFocus(chatId);
                   }}
                 >
                   <X size={13} />

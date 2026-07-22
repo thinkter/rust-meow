@@ -195,7 +195,13 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
   );
 
   return (
-    <section class="conversation-shell" aria-label={chat()?.title || "Conversation"}>
+    <section
+      class="conversation-shell"
+      id={`tabpanel-${props.paneId}-${props.chatId}`}
+      role="tabpanel"
+      aria-labelledby={preferences.showTabBar ? `tab-${props.paneId}-${props.chatId}` : undefined}
+      aria-label={preferences.showTabBar ? undefined : (chat()?.title || "Conversation")}
+    >
       <header class="conversation-header">
         <IconButton
           label="Back to chats"

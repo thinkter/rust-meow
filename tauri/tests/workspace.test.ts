@@ -73,6 +73,24 @@ test("closing the last tab of the only pane leaves an empty pane, not zero panes
   assert.deepEqual(result.panes[0], { id: "pane-1", tabChatIds: [], activeChatId: "" });
 });
 
+test("every close boundary leaves a deterministic selected tab for focus restoration", () => {
+  const first = closeTabInWorkspace([pane("pane-1", ["a", "b", "c"], "a")], "a", "pane-1");
+  assert.equal(first.panes[0]!.activeChatId, "b");
+
+  const middle = closeTabInWorkspace([pane("pane-1", ["a", "b", "c"], "b")], "b", "pane-1");
+  assert.equal(middle.panes[0]!.activeChatId, "c");
+
+  const last = closeTabInWorkspace([pane("pane-1", ["a", "b", "c"], "c")], "c", "pane-1");
+  assert.equal(last.panes[0]!.activeChatId, "b");
+
+  const removed = closeTabInWorkspace(
+    [pane("pane-1", ["a"], "a"), pane("pane-2", ["b"], "b")],
+    "b",
+    "pane-2",
+  );
+  assert.equal(removed.panes[0]!.activeChatId, "a");
+});
+
 test("moving a tab to another pane removes it from the source and appends it to the destination", () => {
   const panes = [pane("pane-1", ["a", "b"], "a"), pane("pane-2", ["c"], "c")];
   const moved = moveTabBetweenPanes(panes, "b", "pane-1", "pane-2", 1);

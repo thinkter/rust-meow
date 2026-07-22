@@ -140,6 +140,9 @@ export default function App() {
         </main>
       </Show>
       <ChatSwitcher model={model} />
+      <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {state.tabAnnouncement}
+      </p>
       <ImageViewer model={model} />
       <LogoutDialog model={model} />
       <Toasts model={model} />

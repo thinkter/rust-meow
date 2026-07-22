@@ -168,6 +168,7 @@ export interface AppState {
   settingsOpen: boolean;
   stickers: StickersState;
   logoutConfirmation: boolean;
+  tabAnnouncement: string;
   toasts: Toast[];
   fatalError: string;
 }
@@ -249,6 +250,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     settingsOpen: false,
     stickers: { packs: [], loading: false, error: "" },
     logoutConfirmation: false,
+    tabAnnouncement: "",
     toasts: [],
     fatalError: "",
   });
@@ -734,6 +736,11 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     touchConversationFocus(chatId);
     pruneConversations();
     persistWorkspace();
+  }
+
+  function announceTabAction(message: string) {
+    setState("tabAnnouncement", "");
+    queueMicrotask(() => setState("tabAnnouncement", message));
   }
 
   function focusPane(paneId: string) {
@@ -1958,6 +1965,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       openInNewTab,
       closeTab,
       moveTab,
+      announceTabAction,
       focusPane,
       splitPane,
       closePane,
