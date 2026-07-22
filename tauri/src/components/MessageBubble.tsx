@@ -55,6 +55,9 @@ interface MessageBubbleProps {
    * hides the repeated sender-name line so only the avatar row's spacing
    * changes, not the bubble's own layout. */
   suppressSender?: boolean;
+  quotedMessage?: Message;
+  replyCount?: number;
+  firstReplyMessageId?: string;
   onScrollToMessage: (messageId: string) => void;
 }
 
@@ -65,15 +68,8 @@ export function MessageBubble(props: MessageBubbleProps) {
   const [popoverAbove, setPopoverAbove] = createSignal(true);
   let popoverRef: HTMLDivElement | undefined;
 
-  const conversationMessages = () => actions.conversation(props.chatId).messages;
-  const quoted = createMemo(() =>
-    props.message.replyToMessageId
-      ? conversationMessages().find((message) => message.id === props.message.replyToMessageId)
-      : undefined,
-  );
-  const replyCount = createMemo(
-    () => conversationMessages().filter((message) => message.replyToMessageId === props.message.id).length,
-  );
+  const quoted = () => props.quotedMessage;
+  const replyCount = () => props.replyCount ?? 0;
   const reactionGroups = createMemo(() => groupReactions(props.message.reactions));
   const savableMedia = createMemo(() => savableMediaInfo(props.message));
 
@@ -174,8 +170,7 @@ export function MessageBubble(props: MessageBubbleProps) {
           type="button"
           class="reply-count"
           onClick={() => {
-            const reply = conversationMessages().find((message) => message.replyToMessageId === props.message.id);
-            if (reply) props.onScrollToMessage(reply.id);
+            if (props.firstReplyMessageId) props.onScrollToMessage(props.firstReplyMessageId);
           }}
         >
           {replyCount()} {replyCount() === 1 ? "reply" : "replies"}

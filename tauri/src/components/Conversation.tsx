@@ -23,6 +23,7 @@ import type { AppModel } from "../state/app";
 import type { Density } from "../state/preferences";
 import { ChatKind, ConnectionState, type Message } from "../lib/types";
 import { connectionLabel, dayKey, formatDay, messageText } from "../lib/format";
+import { indexMessages } from "../lib/performance";
 import {
   captureScrollSnapshot,
   resolveScrollRestore,
@@ -62,6 +63,7 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
   const chat = () => state.chats.find((candidate) => candidate.id === props.chatId);
   const messages = () => conversation().messages;
   const isGroup = () => chat()?.kind === ChatKind.Group;
+  const messageIndex = createMemo(() => indexMessages(messages()));
 
   const searchMatches = createMemo(() => {
     const query = searchQuery().trim().toLocaleLowerCase();
@@ -86,7 +88,9 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
         isGroup(),
         preferences.density,
       ),
-    overscan: 10,
+    get overscan() {
+      return preferences.batterySaver ? 4 : 10;
+    },
     getItemKey: (index) => messages()[index]?.id ?? index,
     measureElement: (element) => element.getBoundingClientRect().height,
     onChange: (instance, sync) => {
@@ -167,7 +171,7 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
         const distance = scrollRef.scrollHeight - scrollRef.scrollTop - scrollRef.clientHeight;
         const latest = messages().at(-1);
         if (latest?.fromMe || distance < 180) {
-          requestAnimationFrame(() => scrollToLatest("smooth"));
+          requestAnimationFrame(() => scrollToLatest(preferredScrollBehavior()));
           setNewMessages(0);
         } else {
           setNewMessages((count) => count + 1);
@@ -264,13 +268,7 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
         ref={scrollRef}
         class="message-scroller"
         aria-live="polite"
-        onScroll={() => {
-          if (!scrollRef) return;
-          const distance = scrollRef.scrollHeight - scrollRef.scrollTop - scrollRef.clientHeight;
-          if (distance < 80) setNewMessages(0);
-          setFarFromBottom(distance > scrollRef.clientHeight * 1.5);
-          scheduleViewportCapture();
-        }}
+        onScroll={scheduleScrollStateUpdate}
       >
         <Show when={conversation().loading}>
           <div class="empty-state"><Spinner label="Loading messages" /></div>
@@ -329,6 +327,13 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
                             searchHighlight() === value().id
                           }
                           suppressSender={grouped()}
+                          quotedMessage={
+                            value().replyToMessageId
+                              ? messageIndex().byId.get(value().replyToMessageId)
+                              : undefined
+                          }
+                          replyCount={messageIndex().replyCountById.get(value().id) ?? 0}
+                          firstReplyMessageId={messageIndex().firstReplyIdById.get(value().id)}
                           onScrollToMessage={scrollToMessage}
                         />
                       )}
@@ -353,9 +358,9 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
           onClick={() => {
             if (conversation().hasNewer) {
               void actions.jumpToLatest(props.chatId).then(() => {
-                requestAnimationFrame(() => scrollToLatest("smooth"));
+                requestAnimationFrame(() => scrollToLatest(preferredScrollBehavior()));
               });
-            } else scrollToLatest("smooth");
+            } else scrollToLatest(preferredScrollBehavior());
             setNewMessages(0);
             setFarFromBottom(false);
           }}
@@ -385,11 +390,19 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
     scrollRef.scrollTo({ top: scrollRef.scrollHeight, behavior });
   }
 
-  function scheduleViewportCapture() {
-    if (!scrollRef || restoringViewport || captureFrame !== undefined) return;
-    captureFrame = requestAnimationFrame(() => {
+  function preferredScrollBehavior(): ScrollBehavior {
+    return preferences.batterySaver ? "auto" : "smooth";
+  }
+
+  function scheduleScrollStateUpdate() {
+    if (captureFrame !== undefined) return;
+    captureFrame = window.requestAnimationFrame(() => {
       captureFrame = undefined;
-      if (!scrollRef || restoringViewport) return;
+      if (!scrollRef) return;
+      const distance = scrollRef.scrollHeight - scrollRef.scrollTop - scrollRef.clientHeight;
+      if (distance < 80) setNewMessages(0);
+      setFarFromBottom(distance > scrollRef.clientHeight * 1.5);
+      if (restoringViewport) return;
       const snapshot = captureScrollSnapshot(
         messages().map((message) => message.id),
         virtualizer.getVirtualItems(),
@@ -402,7 +415,7 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
   }
 
   onCleanup(() => {
-    if (captureFrame !== undefined) cancelAnimationFrame(captureFrame);
+    if (captureFrame !== undefined) window.cancelAnimationFrame(captureFrame);
   });
 
   function scrollToMessage(messageId: string) {

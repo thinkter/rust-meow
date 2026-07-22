@@ -29,6 +29,8 @@ export interface Preferences {
   splitView: boolean;
   /** Send a plain Enter instead of inserting a newline. */
   enterToSend: boolean;
+  /** Reduce animation and off-screen rendering work on constrained devices. */
+  batterySaver: boolean;
 }
 
 const defaults: Preferences = {
@@ -42,6 +44,7 @@ const defaults: Preferences = {
   showTabBar: true,
   splitView: false,
   enterToSend: true,
+  batterySaver: false,
 };
 
 function readStored(): Partial<Preferences> {
@@ -84,6 +87,7 @@ function sanitize(stored: Partial<Preferences>): Preferences {
     showTabBar: stored.showTabBar ?? defaults.showTabBar,
     splitView: stored.splitView ?? defaults.splitView,
     enterToSend: stored.enterToSend ?? defaults.enterToSend,
+    batterySaver: stored.batterySaver ?? defaults.batterySaver,
   };
 }
 
@@ -111,6 +115,7 @@ export function createPreferences() {
     const root = document.documentElement;
     root.style.setProperty("--scale", preferences.uiScale.toString());
     root.dataset.density = preferences.density;
+    root.dataset.batterySaver = preferences.batterySaver ? "true" : "false";
   }
 
   function update<K extends keyof Preferences>(key: K, value: Preferences[K]) {

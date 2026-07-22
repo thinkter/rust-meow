@@ -1,6 +1,7 @@
 import { batch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { bridge, normalizeBridgeError, openFile } from "../lib/bridge";
+import { BoundedSet } from "../lib/performance";
 import {
   AttachmentKind,
   ChatKind,
@@ -149,6 +150,9 @@ const emptyDraft = (): Draft => ({ text: "", replyToMessageId: "", mentions: [] 
 const MAX_ACTIVE_MESSAGES = 2_000;
 /** Cap on simultaneously hydrated conversations; least-recently-focused ones are evicted. */
 const MAX_HYDRATED_CONVERSATIONS = 8;
+const MAX_AVATAR_ATTEMPTS = 4_096;
+const MAX_PARTICIPANT_AVATARS = 512;
+const MAX_MEDIA_FAILURES = 512;
 
 function emptyConversation(chatId: string): ConversationState {
   return {
@@ -226,8 +230,11 @@ export function createAppModel() {
   const pendingImages = new Set<string>();
   const pendingAttachments = new Set<string>();
   const pendingAvatars = new Set<string>();
-  const attemptedAvatars = new Set<string>();
-  const attemptedParticipantAvatars = new Set<string>();
+  const attemptedAvatars = new BoundedSet<string>(MAX_AVATAR_ATTEMPTS);
+  const attemptedParticipantAvatars = new BoundedSet<string>(MAX_PARTICIPANT_AVATARS);
+  const participantAvatarKeys = new BoundedSet<string>(MAX_PARTICIPANT_AVATARS);
+  const failedImageKeys = new BoundedSet<string>(MAX_MEDIA_FAILURES);
+  const failedAttachmentKeys = new BoundedSet<string>(MAX_MEDIA_FAILURES);
   const backendChatRevisions = new Map<string, number>();
   /** Per-chat load generations so a stale in-flight fetch cannot clobber a fresher one. */
   const conversationGenerations = new Map<string, number>();
@@ -887,7 +894,10 @@ export function createAppModel() {
     if (pendingImages.has(key) || pendingImages.size >= 4) return;
     if (state.imageFailures[key] && !retry) return;
     pendingImages.add(key);
-    if (retry) setState("imageFailures", key, undefined!);
+    if (retry) {
+      failedImageKeys.delete(key);
+      setState("imageFailures", key, undefined!);
+    }
     try {
       const response = await bridge.getMessageImage(chatId, message.id);
       updateMessage(chatId, message.id, (current) => {
@@ -905,7 +915,11 @@ export function createAppModel() {
       });
       return response.imagePath || response.thumbnailPath || undefined;
     } catch (error) {
-      setState("imageFailures", key, normalizeBridgeError(error).message);
+      const evicted = failedImageKeys.add(key);
+      batch(() => {
+        if (evicted) setState("imageFailures", evicted, undefined!);
+        setState("imageFailures", key, normalizeBridgeError(error).message);
+      });
     } finally {
       pendingImages.delete(key);
     }
@@ -920,7 +934,10 @@ export function createAppModel() {
     if (pendingAttachments.has(key) || pendingAttachments.size >= 3) return;
     if (state.attachmentFailures[key] && !retry) return;
     pendingAttachments.add(key);
-    if (retry) setState("attachmentFailures", key, undefined!);
+    if (retry) {
+      failedAttachmentKeys.delete(key);
+      setState("attachmentFailures", key, undefined!);
+    }
     try {
       const response = await bridge.getMessageAttachment(chatId, message.id);
       updateMessage(chatId, message.id, (current) => {
@@ -934,7 +951,11 @@ export function createAppModel() {
       });
       return response.localPath || undefined;
     } catch (error) {
-      setState("attachmentFailures", key, normalizeBridgeError(error).message);
+      const evicted = failedAttachmentKeys.add(key);
+      batch(() => {
+        if (evicted) setState("attachmentFailures", evicted, undefined!);
+        setState("attachmentFailures", key, normalizeBridgeError(error).message);
+      });
     } finally {
       pendingAttachments.delete(key);
     }
@@ -973,7 +994,14 @@ export function createAppModel() {
     try {
       const response = await bridge.getParticipantAvatar(participantId);
       if (response.avatarPath) {
-        setState("participantAvatars", participantId, response.avatarPath);
+        const evicted = participantAvatarKeys.add(participantId);
+        batch(() => {
+          if (evicted) {
+            setState("participantAvatars", evicted, undefined!);
+            attemptedParticipantAvatars.delete(evicted);
+          }
+          setState("participantAvatars", participantId, response.avatarPath);
+        });
       }
     } catch {
       // Optional presentation data.
@@ -1161,9 +1189,17 @@ export function createAppModel() {
         setState("focusedPaneId", "pane-1");
         setState("selectedChatId", "");
         setState("drafts", {});
+        setState("participantAvatars", {});
+        setState("imageFailures", {});
+        setState("attachmentFailures", {});
       });
       conversationGenerations.clear();
       conversationLastFocusedAt.clear();
+      attemptedAvatars.clear();
+      attemptedParticipantAvatars.clear();
+      participantAvatarKeys.clear();
+      failedImageKeys.clear();
+      failedAttachmentKeys.clear();
       persistWorkspace();
       await bridge.startPairing();
     } catch (error) {
@@ -1292,10 +1328,9 @@ export function createAppModel() {
     const chatId = message.chatId;
     const conversationState = state.conversations[chatId];
     if (!conversationState) return; // The chat is not open in any pane.
-    const isNew = !conversationState.messages.some((candidate) => candidate.id === message.id);
-    const merged = mergeMessages(conversationState.messages, [
-      preserveLocalMedia(message, conversationState.messages),
-    ]);
+    const existingIndex = conversationState.messages.findIndex((candidate) => candidate.id === message.id);
+    const isNew = existingIndex < 0;
+    const merged = upsertSortedMessage(conversationState.messages, message, existingIndex);
     const trimmed = merged.length > MAX_ACTIVE_MESSAGES;
     setState("conversations", chatId, "messages", reconcile(trimMessages(merged, "older"), { key: "id" }));
     if (trimmed) setState("conversations", chatId, "hasOlder", true);
@@ -1631,12 +1666,13 @@ function draftIsEmpty(draft: Draft | undefined): boolean {
 
 function mergeMessages(existing: readonly Message[], incoming: readonly Message[]): Message[] {
   const byId = new Map(existing.map((message) => [message.id, message]));
-  for (const message of incoming) byId.set(message.id, preserveLocalMedia(message, existing));
+  for (const message of incoming) {
+    byId.set(message.id, preserveLocalMedia(message, byId.get(message.id)));
+  }
   return sortMessages([...byId.values()]);
 }
 
-function preserveLocalMedia(message: Message, existing: readonly Message[]): Message {
-  const previous = existing.find((candidate) => candidate.id === message.id);
+function preserveLocalMedia(message: Message, previous: Message | undefined): Message {
   if (!previous?.content || !message.content) return message;
   if ("image" in previous.content && "image" in message.content) {
     return {
@@ -1663,6 +1699,46 @@ function preserveLocalMedia(message: Message, existing: readonly Message[]): Mes
     };
   }
   return message;
+}
+
+/** Fast path for the common one-message live event: O(n) copy/insertion and
+ * no temporary n-entry Map or O(n log n) full-window sort. */
+function upsertSortedMessage(
+  existing: readonly Message[],
+  incoming: Message,
+  existingIndex = existing.findIndex((message) => message.id === incoming.id),
+): Message[] {
+  const message = preserveLocalMedia(incoming, existingIndex >= 0 ? existing[existingIndex] : undefined);
+  if (existingIndex >= 0) {
+    const next = [...existing];
+    next[existingIndex] = message;
+    const previous = next[existingIndex - 1];
+    const following = next[existingIndex + 1];
+    if (
+      (previous && compareMessages(previous, message) > 0) ||
+      (following && compareMessages(message, following) > 0)
+    ) {
+      next.sort(compareMessages);
+    }
+    return next;
+  }
+
+  if (existing.length === 0 || compareMessages(existing[existing.length - 1]!, message) <= 0) {
+    return [...existing, message];
+  }
+
+  let low = 0;
+  let high = existing.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (compareMessages(existing[middle]!, message) <= 0) low = middle + 1;
+    else high = middle;
+  }
+  return [...existing.slice(0, low), message, ...existing.slice(low)];
+}
+
+function compareMessages(left: Message, right: Message): number {
+  return left.timestampMs - right.timestampMs || left.id.localeCompare(right.id);
 }
 
 function trimMessages(messages: Message[], drop: "older" | "newer"): Message[] {
