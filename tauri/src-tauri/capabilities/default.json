@@ -8,6 +8,7 @@
     "dialog:allow-open",
     "notification:default",
     "opener:allow-open-url",
+    "opener:allow-default-urls",
     "core:window:allow-start-dragging",
     "core:window:allow-start-resize-dragging",
     "core:window:allow-minimize",
