@@ -182,3 +182,28 @@ test("exhausted transient retries are not session-cached as privacy failures", a
   assert.equal(calls, 2);
   assert.equal(queue.stats().terminalFailures, 0);
 });
+
+test("terminal privacy failures evict oldest entries at the configured bound", async () => {
+  const calls: string[] = [];
+  const queue = new ParticipantAvatarQueue({
+    maxTerminalFailures: 2,
+    fetchAvatar: async (participantId) => {
+      calls.push(participantId);
+      throw { code: "privacy", message: "hidden", retryable: false };
+    },
+    onHydrated: () => undefined,
+  });
+  for (const participantId of ["a", "b", "c"]) {
+    queue.subscribe(participantId, "group");
+    await flush();
+  }
+  assert.equal(queue.stats().terminalFailures, 2);
+
+  // `a` was the oldest negative entry, so eviction makes it eligible for a
+  // later request while the still-cached `b` remains suppressed.
+  queue.subscribe("a", "group");
+  queue.subscribe("b", "group");
+  await flush();
+  assert.deepEqual(calls, ["a", "b", "c", "a"]);
+  assert.equal(queue.stats().terminalFailures, 2);
+});

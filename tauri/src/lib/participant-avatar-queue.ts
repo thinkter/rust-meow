@@ -15,6 +15,7 @@ export interface ParticipantAvatarQueueOptions {
   maxQueued?: number;
   maxAttempts?: number;
   retryBaseMs?: number;
+  maxTerminalFailures?: number;
 }
 
 export function isRetryableAvatarError(error: unknown): boolean {
@@ -36,9 +37,10 @@ export class ParticipantAvatarQueue {
   readonly #maxQueued: number;
   readonly #maxAttempts: number;
   readonly #retryBaseMs: number;
+  readonly #maxTerminalFailures: number;
   readonly #entries = new Map<string, QueueEntry>();
   readonly #queued: QueueEntry[] = [];
-  readonly #terminalFailures = new Set<string>();
+  readonly #terminalFailures = new Map<string, true>();
   #nextSubscriberId = 1;
   #running = 0;
 
@@ -49,6 +51,7 @@ export class ParticipantAvatarQueue {
     this.#maxQueued = positiveInteger(options.maxQueued ?? 128, "maxQueued");
     this.#maxAttempts = positiveInteger(options.maxAttempts ?? 4, "maxAttempts");
     this.#retryBaseMs = Math.max(0, options.retryBaseMs ?? 250);
+    this.#maxTerminalFailures = positiveInteger(options.maxTerminalFailures ?? 2_048, "maxTerminalFailures");
   }
 
   subscribe(participantId: string, scopeId: string): () => void {
@@ -129,7 +132,7 @@ export class ParticipantAvatarQueue {
       if (this.#entries.get(entry.participantId) !== entry || entry.subscribers.size === 0) return;
       this.#entries.delete(entry.participantId);
       if (avatarPath) this.#onHydrated(entry.participantId, avatarPath);
-      else this.#terminalFailures.add(entry.participantId);
+      else this.#recordTerminalFailure(entry.participantId);
     } catch (error) {
       if (this.#entries.get(entry.participantId) !== entry || entry.subscribers.size === 0) return;
       const retryable = isRetryableAvatarError(error);
@@ -148,7 +151,7 @@ export class ParticipantAvatarQueue {
         }, delay);
       } else {
         this.#entries.delete(entry.participantId);
-        if (!retryable) this.#terminalFailures.add(entry.participantId);
+        if (!retryable) this.#recordTerminalFailure(entry.participantId);
       }
     } finally {
       this.#running -= 1;
@@ -158,6 +161,14 @@ export class ParticipantAvatarQueue {
       }
       this.#pump();
     }
+  }
+
+  #recordTerminalFailure(participantId: string) {
+    this.#terminalFailures.delete(participantId);
+    this.#terminalFailures.set(participantId, true);
+    if (this.#terminalFailures.size <= this.#maxTerminalFailures) return;
+    const oldest = this.#terminalFailures.keys().next().value;
+    if (oldest) this.#terminalFailures.delete(oldest);
   }
 }
 

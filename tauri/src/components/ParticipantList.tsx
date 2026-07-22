@@ -17,6 +17,7 @@ export function ParticipantList(props: {
   sectioned?: boolean;
   fill?: boolean;
   label: string;
+  rosterId: string;
 }) {
   let scrollRef: HTMLDivElement | undefined;
   const rows = createMemo(() => participantRosterRows(props.participants, Boolean(props.sectioned)));
@@ -62,7 +63,11 @@ export function ParticipantList(props: {
                     aria-posinset={participantRow().position}
                     aria-setsize={props.participants.length}
                   >
-                    <ParticipantRow participant={participantRow().participant} model={props.model} />
+                    <ParticipantRow
+                      participant={participantRow().participant}
+                      model={props.model}
+                      rosterId={props.rosterId}
+                    />
                   </div>
                   )}
                 </Show>

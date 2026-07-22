@@ -43,7 +43,14 @@ export function MemberPanel(props: { model: AppModel }) {
         </header>
         <div class="right-panel-scroll member-panel-scroll">
           <Show when={infoReady()} fallback={<div class="empty-state" style={{ height: "160px" }}><Spinner label="Loading members" /></div>}>
-            <ParticipantList model={props.model} participants={participants()} sectioned fill label="Group members" />
+            <ParticipantList
+              model={props.model}
+              participants={participants()}
+              rosterId={state.chatInfo?.chat?.id ?? ""}
+              sectioned
+              fill
+              label="Group members"
+            />
           </Show>
         </div>
       </aside>

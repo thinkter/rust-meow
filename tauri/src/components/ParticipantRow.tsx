@@ -3,13 +3,12 @@ import type { AppModel } from "../state/app";
 import type { ChatParticipant } from "../lib/types";
 import { Avatar } from "./Avatar";
 
-export function ParticipantRow(props: { participant: ChatParticipant; model: AppModel }) {
+export function ParticipantRow(props: { participant: ChatParticipant; model: AppModel; rosterId: string }) {
   const { state, actions, preferences } = props.model;
 
   createEffect(() => {
     const participantId = props.participant.participantId;
-    const rosterId = state.chatInfo?.chat?.id ?? state.selectedChatId;
-    const cancel = actions.loadParticipantAvatar(participantId, rosterId);
+    const cancel = actions.loadParticipantAvatar(participantId, props.rosterId);
     onCleanup(cancel);
   });
 

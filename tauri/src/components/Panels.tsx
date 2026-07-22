@@ -115,6 +115,7 @@ export function ChatInfoPanel(props: { model: AppModel }) {
                   <ParticipantList
                     model={props.model}
                     participants={value().participants}
+                    rosterId={value().chat?.id ?? chat()?.id ?? ""}
                     label="Group participants"
                   />
                 </section>

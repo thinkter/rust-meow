@@ -1109,7 +1109,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     }
   }
 
-  function loadParticipantAvatar(participantId: string, rosterId = state.selectedChatId) {
+  function loadParticipantAvatar(participantId: string, rosterId: string) {
     if (!participantId || !rosterId || state.participantAvatars[participantId]) return () => undefined;
     return participantAvatarQueue.subscribe(participantId, rosterId);
   }

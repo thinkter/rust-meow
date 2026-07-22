@@ -489,7 +489,9 @@ function GroupAvatar(props: { model: AppModel; message: Message; scale: number }
   const { state, actions } = props.model;
   createEffect(() => {
     const senderId = props.message.senderId;
-    if (senderId) void actions.loadParticipantAvatar(senderId);
+    if (!senderId) return;
+    const cancel = actions.loadParticipantAvatar(senderId, props.message.chatId);
+    onCleanup(cancel);
   });
   return (
     <Avatar
