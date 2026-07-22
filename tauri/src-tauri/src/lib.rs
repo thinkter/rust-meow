@@ -990,6 +990,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             configure_asset_protocol_scope(&app.asset_protocol_scope(), &paths::data_dir())?;

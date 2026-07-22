@@ -3,6 +3,12 @@ import { createStore, reconcile } from "solid-js/store";
 import { bridge, normalizeBridgeError, openFile } from "../lib/bridge";
 import { BoundedSet } from "../lib/performance";
 import {
+  ensureNotificationPermission,
+  listenForNotificationActions,
+  sendMessageNotification,
+} from "../lib/notifications";
+import { shouldNotify } from "../lib/notification-policy";
+import {
   AttachmentKind,
   ChatKind,
   ConnectionState,
@@ -242,9 +248,16 @@ export function createAppModel() {
   let conversationGenerationSequence = 0;
   /** Drives LRU eviction once more than `MAX_HYDRATED_CONVERSATIONS` chats are hydrated. */
   const conversationLastFocusedAt = new Map<string, number>();
+  /** A brand-new conversation emits its message immediately before its chat row. */
+  const pendingNotifications = new Map<string, Message>();
+  const notifiedMessages = new Set<string>();
+  let disposeNotificationActions: (() => void) | undefined;
 
   async function bootstrap() {
     try {
+      disposeNotificationActions = await listenForNotificationActions(({ chatId, messageId }) =>
+        selectChat(chatId, messageId),
+      );
       await bridge.subscribeBackend(handleEvent);
       const hello = await bridge.hello();
       const auth = await bridge.getAuthState();
@@ -259,6 +272,7 @@ export function createAppModel() {
         await bridge.startPairing();
         return;
       }
+      if (preferences.notificationsEnabled) void ensureNotificationPermission();
       await loadChats(true);
       await restoreWorkspaceConversations();
     } catch (error) {
@@ -961,6 +975,49 @@ export function createAppModel() {
     }
   }
 
+  /**
+   * Open a downloaded document in the platform default application. A stale
+   * cache path is cleared and fetched once more before surfacing the failure;
+   * this covers users cleaning the cache between history load and click.
+   */
+  async function openAttachment(message: Message, chatId = message.chatId) {
+    if (!(message.content && "attachment" in message.content)) return;
+    const originalAttachment = message.content.attachment;
+    let current = message;
+    let path: string | undefined = originalAttachment.localPath || undefined;
+    if (path) {
+      try {
+        await bridge.openMediaPath(path);
+        return;
+      } catch {
+        updateMessage(chatId, message.id, (stored) => {
+          if (!(stored.content && "attachment" in stored.content)) return stored;
+          return {
+            ...stored,
+            content: { attachment: { ...stored.content.attachment, localPath: "" } },
+          };
+        });
+        current = {
+          ...message,
+          content: {
+            attachment: { ...originalAttachment, localPath: "" },
+          },
+        };
+      }
+    }
+    path = await hydrateAttachment(current, true, chatId);
+    if (!path) {
+      const failure = state.attachmentFailures[mediaKey(chatId, message.id)];
+      if (failure) toast(failure);
+      return;
+    }
+    try {
+      await bridge.openMediaPath(path);
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+    }
+  }
+
   async function loadAvatar(chatId: string) {
     const chat = state.chats.find((candidate) => candidate.id === chatId);
     if (
@@ -1176,6 +1233,29 @@ export function createAppModel() {
     }
   }
 
+  async function setNotificationsEnabled(enabled: boolean) {
+    if (!enabled) {
+      prefActions.update("notificationsEnabled", false);
+      return;
+    }
+    try {
+      if (await ensureNotificationPermission()) {
+        prefActions.update("notificationsEnabled", true);
+      } else {
+        prefActions.update("notificationsEnabled", false);
+        toast("Notifications were not enabled by the operating system");
+      }
+    } catch (error) {
+      prefActions.update("notificationsEnabled", false);
+      toast(`Could not enable notifications: ${normalizeBridgeError(error).message}`);
+    }
+  }
+
+  function dispose() {
+    disposeNotificationActions?.();
+    disposeNotificationActions = undefined;
+  }
+
   async function logout() {
     try {
       stopTyping();
@@ -1254,12 +1334,21 @@ export function createAppModel() {
           const chat = event.payload.chat;
           backendChatRevisions.set(chat.id, (backendChatRevisions.get(chat.id) ?? 0) + 1);
           upsertChat(chat);
+          const pending = pendingNotifications.get(chat.id);
+          if (pending) {
+            pendingNotifications.delete(chat.id);
+            void notifyForMessage(pending, chat);
+          }
         }
         break;
       case "messageUpserted":
         if (event.payload.message) {
-          upsertMessage(event.payload.message, true);
-          clearTypingForMessage(event.payload.message);
+          const message = event.payload.message;
+          const chat = state.chats.find((candidate) => candidate.id === message.chatId);
+          if (chat) void notifyForMessage(message, chat);
+          else if (!message.fromMe) pendingNotifications.set(message.chatId, message);
+          upsertMessage(message, true);
+          clearTypingForMessage(message);
         }
         break;
       case "receiptUpdated":
@@ -1305,6 +1394,31 @@ export function createAppModel() {
 
   function upsertChat(chat: Chat) {
     setState("chats", reconcile(sortChats(mergeChats(state.chats, [chat])), { key: "id" }));
+  }
+
+  async function notifyForMessage(message: Message, chat: Chat) {
+    const key = mediaKey(message.chatId, message.id);
+    if (notifiedMessages.has(key)) return;
+    if (
+      !shouldNotify({
+        enabled: preferences.notificationsEnabled,
+        visible: document.visibilityState === "visible",
+        chatVisible: isChatVisible(message.chatId),
+        muted: chat.muted,
+        incoming: !message.fromMe && !message.edited && !message.revoked,
+      })
+    ) return;
+    notifiedMessages.add(key);
+    if (notifiedMessages.size > 1_000) {
+      const oldest = notifiedMessages.values().next().value;
+      if (oldest) notifiedMessages.delete(oldest);
+    }
+    try {
+      await sendMessageNotification(chat, message, preferences.notificationPreviews);
+    } catch (error) {
+      // A desktop notification failure must never interrupt event reduction.
+      console.warn("Could not show incoming message notification", error);
+    }
   }
 
   async function resyncAfterEventGap() {
@@ -1599,11 +1713,13 @@ export function createAppModel() {
       sendAttachment,
       hydrateImage,
       hydrateAttachment,
+      openAttachment,
       loadAvatar,
       loadParticipantAvatar,
       loadStickers,
       sendStickerFromPack,
       saveMediaAs,
+      setNotificationsEnabled,
       showChatInfo,
       ensureMentionDirectory,
       hideChatInfo,
@@ -1619,6 +1735,7 @@ export function createAppModel() {
       selectedChat,
       activeDraft,
       dismissToast,
+      dispose,
       setLogoutConfirmation: (value: boolean) => setState("logoutConfirmation", value),
     },
   };

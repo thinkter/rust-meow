@@ -31,6 +31,10 @@ export interface Preferences {
   enterToSend: boolean;
   /** Reduce animation and off-screen rendering work on constrained devices. */
   batterySaver: boolean;
+  /** Show native notifications for background messages in unmuted chats. */
+  notificationsEnabled: boolean;
+  /** Include message text in the operating system notification. */
+  notificationPreviews: boolean;
 }
 
 const defaults: Preferences = {
@@ -45,6 +49,8 @@ const defaults: Preferences = {
   splitView: false,
   enterToSend: true,
   batterySaver: false,
+  notificationsEnabled: true,
+  notificationPreviews: true,
 };
 
 function readStored(): Partial<Preferences> {
@@ -88,6 +94,8 @@ function sanitize(stored: Partial<Preferences>): Preferences {
     splitView: stored.splitView ?? defaults.splitView,
     enterToSend: stored.enterToSend ?? defaults.enterToSend,
     batterySaver: stored.batterySaver ?? defaults.batterySaver,
+    notificationsEnabled: stored.notificationsEnabled ?? defaults.notificationsEnabled,
+    notificationPreviews: stored.notificationPreviews ?? defaults.notificationPreviews,
   };
 }
 

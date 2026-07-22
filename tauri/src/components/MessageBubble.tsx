@@ -34,7 +34,7 @@ import {
   messageText,
   safeHttpUrl,
 } from "../lib/format";
-import { assetUrl, bridge, openUrl } from "../lib/bridge";
+import { assetUrl, openUrl } from "../lib/bridge";
 import { EmojiPicker } from "./EmojiPicker";
 import { IconButton, Spinner } from "./Primitives";
 
@@ -415,37 +415,40 @@ function AttachmentMessage(props: {
   model: AppModel;
   chatId: string;
 }) {
+  const [playbackFailed, setPlaybackFailed] = createSignal(false);
   const source = () => assetUrl(props.attachment.localPath);
   const isAudio = () => props.attachment.kind === "audio" || props.attachment.voiceNote;
   const isVideo = () => props.attachment.kind === "video";
+  const isGif = () => isVideo() && props.attachment.animated;
+  const failure = () => props.model.state.attachmentFailures[`${props.chatId}\u0000${props.message.id}`];
   const icon = () => (isAudio() ? <FileAudio size={23} /> : isVideo() ? <FileVideo size={23} /> : <FileText size={23} />);
 
   return (
     <>
-      <Show when={isVideo() && source()}>
+      <Show when={isVideo() && !playbackFailed() ? source() : undefined}>
         {(url) => (
-          <video class="message-image" controls preload="metadata" src={url()} aria-label={props.attachment.fileName || "Video"} />
+          <video
+            class={`message-image ${isGif() ? "gif" : ""}`}
+            controls={!isGif()}
+            autoplay={isGif()}
+            loop={isGif()}
+            muted={isGif()}
+            playsinline
+            preload={isGif() ? "auto" : "metadata"}
+            src={url()}
+            aria-label={props.attachment.fileName || (isGif() ? "Animated GIF" : "Video")}
+            onError={() => setPlaybackFailed(true)}
+          />
         )}
       </Show>
       <Show when={isAudio() && source()}>
         {(url) => <audio controls preload="metadata" src={url()} aria-label={props.attachment.fileName || "Audio message"} />}
       </Show>
-      <Show when={!(isVideo() && source()) && !(isAudio() && source())}>
+      <Show when={!(isVideo() && source() && !playbackFailed()) && !(isAudio() && source())}>
         <button
           type="button"
           class="attachment-card"
-          onClick={() => {
-            if (props.attachment.localPath) void bridge.openMediaPath(props.attachment.localPath);
-            else {
-              void props.model.actions
-                .hydrateAttachment(props.message, true, props.chatId)
-                .then((downloadedPath) => {
-                  if (downloadedPath && !isAudio() && !isVideo()) {
-                    void bridge.openMediaPath(downloadedPath);
-                  }
-                });
-            }
-          }}
+          onClick={() => void props.model.actions.openAttachment(props.message, props.chatId)}
         >
           <span class="attachment-icon">{icon()}</span>
           <span class="attachment-meta">
@@ -460,6 +463,18 @@ function AttachmentMessage(props: {
             <Download size={20} />
           </Show>
         </button>
+      </Show>
+      <Show when={failure()}>
+        {(error) => (
+          <button
+            type="button"
+            class="media-download-error"
+            onClick={() => void props.model.actions.openAttachment(props.message, props.chatId)}
+          >
+            <RefreshCcw size={14} />
+            <span>{error()}</span>
+          </button>
+        )}
       </Show>
       <Show when={props.attachment.caption}><p class="message-text">{props.attachment.caption}</p></Show>
     </>
@@ -510,6 +525,7 @@ function linkHost(value: string): string {
 
 function attachmentLabel(attachment: AttachmentContent): string {
   if (attachment.voiceNote) return "Voice message";
+  if (attachment.kind === "video" && attachment.animated) return "GIF";
   if (attachment.kind === "video") return "Video";
   if (attachment.kind === "audio") return "Audio";
   return "Document";

@@ -202,7 +202,7 @@ Known foundation blockers at this snapshot:
 | Mark read through exact message | GPUI | Core command | **CP-08:** optimistic unread rollback on failure and group receipt context are correct. |
 | Paste/drag-drop image | Missing | Missing | **CP-09:** clipboard/drop validation enters the same preview/send path without granting broad filesystem access. |
 | Document attachment | Backend/Core/UI path | Implemented; proof pending | **CP-10:** upload, filename/MIME/size, caption, download/open/save, retry, history persistence, and registered typed Tauri calls. |
-| Video/GIF attachment and playback | Backend/Core/UI path | Partial; proof pending | **CP-11:** transcoding/thumbnail/duration, range playback, codec fallback, caption, bounded cache, and registered typed Tauri calls. |
+| Video/GIF attachment and playback | Backend/Core/UI path | UI loops downloaded GIF-playback media inline and falls back to the OS player on codec failure; proof pending | **CP-11:** transcoding/thumbnail/duration, range playback, codec fallback, caption, bounded cache, and registered typed Tauri calls. |
 | Audio file and voice-note recording | Stored-attachment path; no recorder | Partial; recorder missing | **CP-12:** microphone permission, waveform/duration, cancel/lock/pause, upload, playback speed, seeking, background behavior, and registered typed Tauri calls. |
 | Contact and location message | Placeholder only | Missing | **CP-13:** render and send structured contact/location with safe external actions and privacy review. |
 | Poll create/vote/results | Placeholder only | Missing | **CP-14:** single/multi-select, encrypted vote updates, retraction, live totals, and history replay. |
@@ -254,7 +254,7 @@ silently excluded when declaring the migration complete.
 | --- | --- | --- | --- |
 | Native open-file dialog | GPUI native picker | Core/plugin permission | **DS-01:** image/sticker filters and cancellation work on all OSes; arbitrary paths cannot bypass command validation. |
 | Safe external URL opener | GPUI validation | Core/plugin permission | **DS-02:** allow only reviewed schemes; custom protocols, local files, credentials, and malformed URLs are rejected. |
-| Desktop notifications | Missing | Missing | **DS-03:** OS permission, foreground suppression, muted chats, privacy preview setting, click-to-open exact chat/message, and grouping. |
+| Desktop notifications | Missing | Core/UI: permission, foreground/mute suppression, privacy previews, grouping, and exact-message action routing; platform proof pending | **DS-03:** OS permission, foreground suppression, muted chats, privacy preview setting, click-to-open exact chat/message, and grouping. |
 | App/tray badge and background mode | Missing | Missing | **DS-04:** unread aggregate, hide/quit distinction, startup behavior, and sidecar lifetime match settings. |
 | Window geometry persistence | Missing/limited | Missing | **DS-05:** position/size/maximized state restore safely across monitor/DPI changes without off-screen launch. |
 | Single-instance focus/deep-link routing | Missing | Missing | **DS-06:** second launch and notification/deep link focus the running window and route once. |

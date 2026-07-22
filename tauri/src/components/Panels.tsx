@@ -4,6 +4,7 @@ import {
   Archive,
   BadgeCheck,
   BellOff,
+  BellRing,
   CalendarDays,
   ClipboardCopy,
   Clock3,
@@ -195,11 +196,12 @@ function Toggle(props: { checked: boolean; onChange: (value: boolean) => void; l
   );
 }
 
-type SettingsSection = "appearance" | "chats" | "storage" | "about";
+type SettingsSection = "appearance" | "chats" | "notifications" | "storage" | "about";
 
 const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: (props: { size?: number }) => JSX.Element }> = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "chats", label: "Chats", icon: MessagesSquare },
+  { id: "notifications", label: "Notifications", icon: BellRing },
   { id: "storage", label: "Storage", icon: HardDrive },
   { id: "about", label: "About & privacy", icon: ShieldCheck },
 ];
@@ -550,6 +552,29 @@ export function SettingsPanel(props: { model: AppModel }) {
               </div>
               <Show when={storageError()}><p>{storageError()}</p></Show>
               <p>This only affects files you explicitly save out of Rust Meow. The encrypted local message cache always stays in the app's own data directory.</p>
+            </section>
+          </Show>
+
+          <Show when={activeSection() === "notifications"}>
+            <section class="settings-section">
+              <div class="setting-row">
+                <span class="setting-copy"><strong>Desktop notifications</strong><span>Notify for background messages from unmuted chats</span></span>
+                <Toggle
+                  checked={preferences.notificationsEnabled}
+                  label="Desktop notifications"
+                  onChange={(value) => void actions.setNotificationsEnabled(value)}
+                />
+              </div>
+              <div class="setting-row">
+                <span class="setting-copy"><strong>Message previews</strong><span>Include message text in operating system notifications</span></span>
+                <Toggle
+                  checked={preferences.notificationPreviews}
+                  label="Message previews"
+                  disabled={!preferences.notificationsEnabled}
+                  onChange={(value) => prefActions.update("notificationPreviews", value)}
+                />
+              </div>
+              <p>Notifications are suppressed while the conversation is visible and when a chat is muted. Opening one routes to the exact message.</p>
             </section>
           </Show>
 

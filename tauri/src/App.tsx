@@ -43,6 +43,7 @@ export default function App() {
     window.addEventListener("blur", handleBlur);
   });
   onCleanup(() => {
+    actions.dispose();
     window.removeEventListener("keydown", handleGlobalKeyDown, true);
     window.removeEventListener("keyup", handleGlobalKeyUp, true);
     window.removeEventListener("blur", handleBlur);

@@ -1306,6 +1306,12 @@ html[data-appearance="light"] .message-sender {
   background: transparent;
 }
 
+.message-image.gif {
+  max-height: calc(360px * var(--scale));
+  object-fit: contain;
+  cursor: default;
+}
+
 .message-image img {
   display: block;
   width: 100%;
@@ -1324,6 +1330,27 @@ html[data-appearance="light"] .message-sender {
   gap: 6px;
   padding: 14px;
   text-align: center;
+}
+
+.media-download-error {
+  display: flex;
+  max-width: min(calc(300px * var(--scale)), 55vw);
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--danger);
+  font-size: calc(11.5px * var(--scale));
+  text-align: left;
+  cursor: pointer;
+}
+
+.media-download-error span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .attachment-card,
