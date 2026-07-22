@@ -95,6 +95,29 @@ func TestMediaCapacityDoesNotBlockNonMediaRequest(t *testing.T) {
 	}
 }
 
+func TestMediaJobAdmissionIsBounded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := New(ctx, cancel, nil, nil)
+
+	for i := 0; i < maxMediaJobsInFlight; i++ {
+		if !s.tryAcquireMediaJob() {
+			t.Fatalf("media job %d rejected before the documented limit", i)
+		}
+	}
+	if s.tryAcquireMediaJob() {
+		t.Fatalf("media job admitted above limit %d", maxMediaJobsInFlight)
+	}
+	if got := len(s.mediaJobs); got != maxMediaJobsInFlight {
+		t.Fatalf("in-flight media jobs=%d, want %d", got, maxMediaJobsInFlight)
+	}
+
+	s.releaseMediaJob()
+	if !s.tryAcquireMediaJob() {
+		t.Fatal("released media capacity was not reusable")
+	}
+}
+
 func TestLogoutWaitsForActiveMediaJob(t *testing.T) {
 	ctx := context.Background()
 	s := &Server{ctx: ctx, mediaSlots: make(chan struct{}, 2)}

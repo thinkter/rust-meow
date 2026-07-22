@@ -27,6 +27,8 @@ import (
 
 const ProtocolVersion uint32 = 14
 const maxTextBytes = 65_536
+const maxConcurrentMediaJobs = 4
+const maxMediaJobsInFlight = 32
 
 type Server struct {
 	ctx        context.Context
@@ -39,6 +41,7 @@ type Server struct {
 	handshaken atomic.Bool
 	eventMu    sync.Mutex
 	mediaSlots chan struct{}
+	mediaJobs  chan struct{}
 	mediaWG    sync.WaitGroup
 	logoutFn   func(context.Context) error
 }
@@ -66,7 +69,14 @@ func (s *Server) validateReplyTarget(chatID, messageID string) error {
 }
 
 func New(ctx context.Context, cancel context.CancelFunc, codec *bridge.Codec, store *store.Store) *Server {
-	return &Server{ctx: ctx, cancel: cancel, codec: codec, store: store, mediaSlots: make(chan struct{}, 4)}
+	return &Server{
+		ctx:        ctx,
+		cancel:     cancel,
+		codec:      codec,
+		store:      store,
+		mediaSlots: make(chan struct{}, maxConcurrentMediaJobs),
+		mediaJobs:  make(chan struct{}, maxMediaJobsInFlight),
+	}
 }
 func (s *Server) SetWhatsApp(client *wa.Client) {
 	s.wa = client
@@ -79,6 +89,20 @@ func usesMediaSlot(request *bridgev1.RpcRequest) bool {
 		request.GetGetChatInfo() != nil || request.GetGetMessageAttachment() != nil || request.GetSendAttachment() != nil ||
 		request.GetSendStickerFromLibrary() != nil
 }
+
+// Reserve before spawning a media goroutine. mediaSlots limits expensive
+// work, while this second ceiling prevents a hostile or stalled webview from
+// accumulating an unbounded number of goroutines waiting for those slots.
+func (s *Server) tryAcquireMediaJob() bool {
+	select {
+	case s.mediaJobs <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseMediaJob() { <-s.mediaJobs }
 
 func (s *Server) waitForMediaJobs(ctx context.Context) error {
 	done := make(chan struct{})
@@ -107,9 +131,17 @@ func (s *Server) Run() error {
 		// GetChatInfo joins the media pool because group and about lookups are
 		// network round-trips that must not stall the serialized RPC loop.
 		if s.handshaken.Load() && envelope.GetProtocolVersion() == ProtocolVersion && usesMediaSlot(request) {
+			if !s.tryAcquireMediaJob() {
+				response := rpcError("busy", "too many media requests are already in flight", true)
+				if err = s.codec.Write(&bridgev1.Envelope{ProtocolVersion: ProtocolVersion, RequestId: envelope.GetRequestId(), Body: &bridgev1.Envelope_Response{Response: response}}); err != nil {
+					return err
+				}
+				continue
+			}
 			s.mediaWG.Add(1)
 			go func(envelope *bridgev1.Envelope) {
 				defer s.mediaWG.Done()
+				defer s.releaseMediaJob()
 				select {
 				case s.mediaSlots <- struct{}{}:
 				case <-s.ctx.Done():
