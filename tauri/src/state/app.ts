@@ -255,9 +255,15 @@ export function createAppModel() {
 
   async function bootstrap() {
     try {
-      disposeNotificationActions = await listenForNotificationActions(({ chatId, messageId }) =>
-        selectChat(chatId, messageId),
-      );
+      try {
+        disposeNotificationActions = await listenForNotificationActions(({ chatId, messageId }) =>
+          selectChat(chatId, messageId),
+        );
+      } catch (error) {
+        // Notifications are optional desktop integration. A missing or broken
+        // platform service must not prevent the messaging bridge from starting.
+        console.warn("Could not register notification actions", error);
+      }
       await bridge.subscribeBackend(handleEvent);
       const hello = await bridge.hello();
       const auth = await bridge.getAuthState();
@@ -272,7 +278,11 @@ export function createAppModel() {
         await bridge.startPairing();
         return;
       }
-      if (preferences.notificationsEnabled) void ensureNotificationPermission();
+      if (preferences.notificationsEnabled) {
+        void ensureNotificationPermission().catch((error) => {
+          console.warn("Could not initialize notifications", error);
+        });
+      }
       await loadChats(true);
       await restoreWorkspaceConversations();
     } catch (error) {
