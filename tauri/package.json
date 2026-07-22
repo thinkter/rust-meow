@@ -1,0 +1,29 @@
+{
+  "name": "rust-meow-tauri",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tanstack/solid-virtual": "3.13.34",
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "2.7.2",
+    "@tauri-apps/plugin-opener": "2.5.4",
+    "lucide-solid": "1.25.0",
+    "qrcode": "1.5.4",
+    "solid-js": "1.9.14"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "@types/qrcode": "1.5.5",
+    "typescript": "7.0.2",
+    "vite": "8.1.5",
+    "vite-plugin-solid": "2.11.13"
+  },
+  "packageManager": "pnpm@10.28.2"
+}

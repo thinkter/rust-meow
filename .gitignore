@@ -1,8 +1,11 @@
 /build/
 /backend/rust-meow-backend
 /desktop/target/
+/tauri/node_modules/
+/tauri/dist/
+/tauri/src-tauri/gen/
+/tauri/src-tauri/target/
 *.db
 *.db-shm
 *.db-wal
 *.log
-

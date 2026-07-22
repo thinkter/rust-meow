@@ -1,114 +1,123 @@
 # Rust Meow
 
-Rust Meow is a native GPUI desktop client backed by a local
-[whatsmeow](https://github.com/tulir/whatsmeow) process. The UI and its active
-working set live in Rust; WhatsApp protocol state, history reduction, and the
-durable local database live in Go.
+Rust Meow is a small Tauri desktop client backed by a local
+[whatsmeow](https://github.com/tulir/whatsmeow) process. The SolidJS webview
+owns presentation and virtualized lists; the Tauri Rust core owns the typed
+desktop boundary; the Go sidecar remains the sole owner of WhatsApp state,
+history reduction, media, and the durable databases.
 
-This repository currently implements the first two MVP slices:
-
-- a two-pane, virtualized GPUI client with a 10,000-chat fake backend;
-- framed protobuf IPC over the sidecar's stdin/stdout;
-- QR pairing and a persistent whatsmeow device session;
-- idempotent live/history message reduction into SQLite;
-- unified local conversations that bind WhatsApp PN and LID transport aliases;
-- cursor-paged chats and keyset-paged messages;
-- prioritized fuzzy local search across contacts, groups, and message metadata,
-  with exact-message navigation;
-- text send/receive, delivery/read receipts, mark-read, reconnect, logout, and
-  graceful shutdown;
-- confirmed logout with a fail-closed, transactional local account-data wipe;
-- a bounded 2,000-message in-memory conversation window. Older messages remain
-  in SQLite and are fetched on demand.
-
-Media download/rendering is deliberately outside these two slices. Non-text
-messages are preserved as typed unsupported placeholders instead of being
-dropped.
+The Tauri app under `tauri/` is the primary desktop on this branch. The GPUI
+implementation under `desktop/` remains available as the behavioral reference
+during migration. This is still a private-testing build, not a production-ready
+WhatsApp Desktop replacement; the exact parity and release gates live in
+[`docs/TAURI_PARITY.md`](docs/TAURI_PARITY.md).
 
 ## Architecture
 
 ```text
-GPUI desktop (Rust)
-  UI state + virtual lists + protobuf bridge
-                  |
-         4-byte BE size + Envelope
-                  |
+SolidJS + TanStack Virtual (Tauri webview)
+              typed invoke + ordered Channel events
+Tauri Rust core
+              4-byte BE length + protobuf v14 Envelope
 Go sidecar (whatsmeow)
-  session.db + client.db + reducer + WhatsApp socket
+              session.db + client.db + bounded media cache
 ```
 
-Only protobuf frames are written to sidecar stdout. Diagnostics go to the app
-data directory's `backend.log`. Frames are capped at 8 MiB and the desktop must
-complete the version handshake before other RPCs or events are accepted.
-
-Chat IDs on the desktop/backend bridge are opaque local conversation IDs, not
-WhatsApp JIDs. The backend keeps PN/LID addresses separately and records the
-raw transport JID on each message so receipts, reactions, and history requests
-remain protocol-correct after aliases are unified.
+Only protobuf frames are written to sidecar stdout. Diagnostics go to
+`backend.log`. Frames are capped at 8 MiB, and the versioned Hello handshake
+must finish before other RPCs or events are accepted. The Tauri core reuses the
+existing Rust bridge, path, and sticker modules, while Rust protobuf bindings
+are generated directly from `proto/bridge.proto`.
 
 ## Prerequisites
 
 - Go 1.25 or newer
-- Rust 1.95 (pinned by `desktop/rust-toolchain.toml`)
-- Linux GPUI system libraries when building on Linux (Vulkan, X11/Wayland,
-  fontconfig, and their development headers)
+- the repository Rust toolchain and Cargo
+- Node.js plus pnpm 10.28.2
+- Tauri v2 Linux development packages, including WebKitGTK 4.1 headers
+- `dpkg` tooling to create the Linux `.deb`
+
+Install the pinned frontend dependency graph with:
+
+```sh
+make deps
+```
 
 ## Run it
 
-The fast UI path needs no WhatsApp account:
+The deterministic fake backend needs no account and is the fastest UI loop:
 
 ```sh
-make fake
+make dev-fake
 ```
 
-For a real local session, build both processes and put the sidecar adjacent to
-the desktop executable:
+It provides 10,000 chats, paged messages, pairing events, and periodic live
+messages. It does not prove real pairing, persistence, receipts, or media
+transport.
+
+Build and run against the real Go sidecar with:
 
 ```sh
-make desktop
-./desktop/target/debug/rust-meow-desktop
+make dev
 ```
 
-For an optimized release build:
+The first clean launch displays a QR code. Scan it from **WhatsApp > Linked
+devices > Link a device**. Use `RUST_MEOW_DATA_DIR` to isolate a QA profile;
+never run two clients against the same profile.
 
-```sh
-make release
-./desktop/target/release/rust-meow-desktop
+## Checks and builds
+
+| Command | Result |
+| --- | --- |
+| `make check` | Go tests/vet, strict TypeScript, and warning-free all-target Tauri Rust lint |
+| `make test` | Go tests, minified frontend build, and Tauri Rust tests |
+| `make build` | Unbundled size-optimized Tauri executable with adjacent stripped sidecar |
+| `make release-linux` | Native x86-64 or arm64 `.deb` containing the stripped Go sidecar |
+| `make legacy-test` | GPUI regression tests |
+| `make legacy-release` | Previous GPUI release layout |
+
+`make build` writes `tauri/src-tauri/target/release/rust-meow` and places a
+stripped static sidecar next to it. `make release-linux` detects the native Linux
+architecture, stages the target-triple-suffixed sidecar expected by Tauri, and
+writes the package beneath:
+
+```text
+tauri/src-tauri/target/<target-triple>/release/bundle/deb/
 ```
 
-The first launch displays a QR code. Scan it from **WhatsApp > Linked devices >
-Link a device**. By default private state is stored under the current OS user's
-application-data directory. Set `RUST_MEOW_DATA_DIR` to isolate a test session,
-or `RUST_MEOW_BACKEND` to point the desktop at a different sidecar binary.
+The bundle-only config is `tauri/src-tauri/tauri.bundle.conf.json`. Keeping
+`externalBin` there means normal fake development does not require a staged Go
+binary. A release is not validated merely because it bundles: unpack it and
+prove the installed app starts its adjacent sidecar and completes protocol v14
+Hello without `RUST_MEOW_BACKEND`.
 
-When upgrading a development profile from the raw-JID schema to conversation
-identities, log out with the previous build and exit it first. The new backend
-will rebuild an empty product cache, but intentionally refuses to discard a
-non-empty legacy cache automatically.
+The 2026-07-22 Linux x86-64 release measurement is:
 
-The reaction-replay schema upgrade removes legacy pseudo-message rows. A
-one-time SQLite `VACUUM` afterward is optional and is not required for
-correctness or normal startup. Consider it only when an upgraded database stays
-substantially larger than expected; stop Rust Meow and back up the database
-first because `VACUUM` needs exclusive access and temporary disk space.
+| Artifact | Exact bytes |
+| --- | ---: |
+| Tauri executable | 7,054,184 |
+| stripped static Go sidecar | 22,143,138 |
+| combined executable payload | 29,197,322 |
+| `.deb` package | 10,637,890 |
 
-## Verify
+That combined payload is 47.22% smaller than the measured 55,320,882-byte
+GPUI-plus-sidecar baseline. The packaged-layout smoke reached pairing after
+Hello without a backend override, rejected a second app instance before it
+could create another sidecar, and left no backend orphan after window close.
+Cross-platform and clean-machine package tests remain release gates.
 
-```sh
-make check
-make test
-```
+## Data and safety
 
-`proto/bridge.proto` is the source of truth. Go bindings are checked in for a
-simple backend build; Rust bindings are generated by `desktop/build.rs`.
+Private state uses the existing `rust-meow` platform data directory. It
+contains linked-device credentials and must never be attached to bug reports.
+`RUST_MEOW_BACKEND` can select a development sidecar; `RUST_MEOW_DATA_DIR` and
+`RUST_MEOW_CONFIG_DIR` select isolated locations.
 
-## Safety and product status
+This is an unofficial client built on WhatsApp's linked-device protocol. Keep
+it to private testing until the packaging, lifecycle, platform, accessibility,
+security, and feature gates in the parity ledger are proven. In particular,
+an app/sidecar update must remain atomic because different protocol versions
+fail closed by design.
 
-This is an unofficial client built on WhatsApp's linked-device protocol. It is
-appropriate for private testing, not production distribution yet. Never run two
-copies against the same data directory, and keep the session database private:
-it contains credentials for the linked device.
-
-Current hardening work beyond these two slices is automatic sidecar
-restart/backoff, bounded-LRU eviction for the fully loaded 10,000-chat metadata,
-media support, and desktop CI verification on Windows and macOS.
+More implementation detail, direct commands, troubleshooting, and QA guidance
+are in [`tauri/README.md`](tauri/README.md).
