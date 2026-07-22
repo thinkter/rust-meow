@@ -27,7 +27,7 @@ interface SidebarProps {
 }
 
 export function Sidebar(props: SidebarProps) {
-  const { state, actions } = props.model;
+  const { state, actions, preferences } = props.model;
   let listRef: HTMLDivElement | undefined;
   let searchResultsRef: HTMLDivElement | undefined;
   const chats = createMemo(() => actions.filteredChats());
@@ -36,7 +36,7 @@ export function Sidebar(props: SidebarProps) {
       return chats().length;
     },
     getScrollElement: () => listRef ?? null,
-    estimateSize: () => 72 * state.uiScale,
+    estimateSize: () => (preferences.density === "compact" ? 58 : 72) * preferences.uiScale,
     overscan: 8,
     getItemKey: (index) => chats()[index]?.id ?? index,
     onChange: (instance) => {
@@ -169,21 +169,32 @@ function FilterButton(props: { filter: ChatFilter; label: string; model: AppMode
 }
 
 function ChatRow(props: { chat: Chat; model: AppModel }) {
-  const { state, actions } = props.model;
+  const { state, actions, preferences } = props.model;
   const typing = () => actions.typingLabel(props.chat.id);
+  // A chat counts as open when any pane holds it, not only the focused one.
+  const open = () => state.panes.some((pane) => pane.activeChatId === props.chat.id);
   queueMicrotask(() => void actions.loadAvatar(props.chat.id));
 
   return (
     <button
       type="button"
-      class={`chat-row ${state.selectedChatId === props.chat.id ? "selected" : ""} ${props.chat.unreadCount > 0 ? "unread" : ""}`}
+      class={`chat-row ${open() ? "selected" : ""} ${props.chat.unreadCount > 0 ? "unread" : ""}`}
       aria-current={state.selectedChatId === props.chat.id ? "page" : undefined}
-      onClick={() => void actions.selectChat(props.chat.id)}
+      onClick={(event) => {
+        // Ctrl/Cmd-click matches the browser convention the tab strip sets up.
+        if (event.ctrlKey || event.metaKey) actions.openInNewTab(props.chat.id);
+        else void actions.selectChat(props.chat.id);
+      }}
+      onAuxClick={(event) => {
+        if (event.button !== 1) return;
+        event.preventDefault();
+        actions.openInNewTab(props.chat.id);
+      }}
     >
       <Avatar
         name={props.chat.title || props.chat.phoneNumber}
         path={props.chat.avatarPath}
-        size={49 * state.uiScale}
+        size={(preferences.density === "compact" ? 38 : 49) * preferences.uiScale}
         group={props.chat.kind === ChatKind.Group}
       />
       <span class="chat-row-body">
@@ -319,7 +330,7 @@ function SearchResultRow(props: {
       <Avatar
         name={title()}
         path={avatarPath()}
-        size={42 * props.model.state.uiScale}
+        size={42 * props.model.preferences.uiScale}
         group={props.row.type === "group"}
       />
       <span class="search-result-copy">
