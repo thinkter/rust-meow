@@ -1104,7 +1104,14 @@ html[data-appearance="light"] .avatar {
   min-width: 0;
   align-items: flex-end;
   gap: calc(8px * var(--scale));
-  padding: calc(2px * var(--scale)) clamp(24px, 5vw, 82px);
+  /*
+   * Side padding is a percentage of the pane, not the viewport. `vw` looked
+   * right for one full-width conversation but in split view each pane is half
+   * as wide, so a fixed 82px per side crushed the bubbles into a thin central
+   * column. `%` resolves against the message canvas — i.e. the pane — so the
+   * gutter scales down with the pane instead.
+   */
+  padding: calc(2px * var(--scale)) clamp(16px, 5%, 64px);
 }
 
 .message-row.from-me {
@@ -1141,8 +1148,8 @@ html[data-appearance="light"] .avatar {
 .unread-separator {
   position: absolute;
   top: calc(6px * var(--scale));
-  right: clamp(24px, 5vw, 82px);
-  left: clamp(24px, 5vw, 82px);
+  right: clamp(16px, 5%, 64px);
+  left: clamp(16px, 5%, 64px);
   display: flex;
   align-items: center;
   gap: 12px;
