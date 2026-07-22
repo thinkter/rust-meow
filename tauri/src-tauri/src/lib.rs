@@ -59,6 +59,7 @@ enum FrontendEventKind {
     RecentReactionsRepaired(proto::RecentReactionsRepaired),
     ChatMerged(proto::ChatMerged),
     TypingChanged(proto::TypingChanged),
+    StickersChanged(proto::StickersChanged),
     BridgeExited(BridgeExited),
 }
 
@@ -100,6 +101,7 @@ impl From<proto::BackendEvent> for Option<FrontendEvent> {
             }
             Event::ChatMerged(value) => FrontendEventKind::ChatMerged(value),
             Event::TypingChanged(value) => FrontendEventKind::TypingChanged(value),
+            Event::StickersChanged(value) => FrontendEventKind::StickersChanged(value),
         };
         Some(FrontendEvent { sequence, event })
     }
@@ -424,6 +426,106 @@ fn open_media_path(app: tauri::AppHandle, path: String) -> Result<(), CommandErr
     app.opener()
         .open_path(target, None::<String>)
         .map_err(|error| CommandError::open_failed(format!("open media file: {error}")))
+}
+
+/// Reduce a caller-supplied name to a single safe path component.
+///
+/// The frontend derives this from a WhatsApp file name, which is remote input:
+/// it may contain separators, `..`, control characters, or nothing usable at
+/// all. Everything outside a conservative allowlist becomes `_` so a saved
+/// download can only ever land directly inside the chosen directory.
+fn sanitize_download_name(requested: &str, fallback_extension: Option<&str>) -> String {
+    let base = Path::new(requested)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let mut cleaned: String = base
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ' | '(' | ')')
+            {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    cleaned = cleaned.trim().trim_matches('.').to_owned();
+    if cleaned.is_empty() {
+        cleaned = match fallback_extension {
+            Some(extension) => format!("rust-meow-file.{extension}"),
+            None => "rust-meow-file".to_owned(),
+        };
+    }
+    // Leave room for the " (n)" de-duplication suffix within common limits.
+    cleaned.truncate(200);
+    cleaned
+}
+
+/// Pick a name inside `directory` that does not already exist.
+fn unique_destination(directory: &Path, file_name: &str) -> PathBuf {
+    let candidate = directory.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file");
+    let extension = path.extension().and_then(|value| value.to_str());
+    for index in 2..1_000 {
+        let attempt = match extension {
+            Some(extension) => format!("{stem} ({index}).{extension}"),
+            None => format!("{stem} ({index})"),
+        };
+        let candidate = directory.join(attempt);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    directory.join(file_name)
+}
+
+/// Copy one cached media file into a user-chosen directory.
+///
+/// Both ends are validated: the source must resolve inside the backend-managed
+/// media cache, and the destination must be an existing directory the user
+/// picked. Neither is allowed to be an arbitrary path from the webview.
+#[tauri::command]
+fn save_media_as(
+    source_path: String,
+    destination_dir: String,
+    file_name: String,
+) -> Result<String, CommandError> {
+    let source = canonical_media_file(&paths::data_dir(), Path::new(&source_path))?;
+    let directory = std::fs::canonicalize(Path::new(&destination_dir)).map_err(|error| {
+        CommandError::invalid_argument(format!("save location is unavailable: {error}"))
+    })?;
+    if !directory.is_dir() {
+        return Err(CommandError::invalid_argument(
+            "save location is not a directory",
+        ));
+    }
+
+    let fallback_extension = source.extension().and_then(|value| value.to_str());
+    let safe_name = sanitize_download_name(&file_name, fallback_extension);
+    let destination = unique_destination(&directory, &safe_name);
+    std::fs::copy(&source, &destination)
+        .map_err(|error| CommandError::open_failed(format!("save file: {error}")))?;
+
+    // `copy` carries the cache's restrictive 0600 mode across. A file the user
+    // deliberately exported belongs to them under the usual default instead.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o644));
+    }
+
+    destination
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| CommandError::open_failed("saved path is not valid UTF-8"))
 }
 
 fn restart_app(app: tauri::AppHandle) -> ! {
@@ -898,6 +1000,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             subscribe_backend,
             open_media_path,
+            save_media_as,
             restart_app_command,
             hello,
             get_auth_state,
@@ -1091,5 +1194,68 @@ mod tests {
             assert_eq!(error.code, "invalid_argument");
             assert!(!error.retryable);
         }
+    }
+
+    #[test]
+    fn download_names_are_reduced_to_one_safe_component() {
+        assert_eq!(sanitize_download_name("holiday.jpg", None), "holiday.jpg");
+        assert_eq!(
+            sanitize_download_name("../../etc/passwd", None),
+            "passwd".to_string()
+        );
+        assert_eq!(
+            sanitize_download_name("/absolute/path/report.pdf", None),
+            "report.pdf"
+        );
+        // Assert the security-relevant invariant rather than an exact string,
+        // because `file_name()` splits on `\` only on Windows: whatever survives
+        // must be a single component with no separators or shell metacharacters,
+        // however the host platform tokenised the input.
+        let sanitized = sanitize_download_name("a/b\\c:d*e?.txt", None);
+        assert!(!sanitized.contains('/'));
+        assert!(!sanitized.contains('\\'));
+        assert!(!sanitized.contains(':'));
+        assert!(!sanitized.contains('*'));
+        assert!(!sanitized.contains('?'));
+        assert!(!sanitized.contains(".."));
+        assert!(sanitized.ends_with(".txt"));
+        assert_eq!(
+            sanitize_download_name("", Some("webp")),
+            "rust-meow-file.webp"
+        );
+        assert_eq!(sanitize_download_name("...", None), "rust-meow-file");
+        assert!(!sanitize_download_name(&"x".repeat(500), None).is_empty());
+        assert!(sanitize_download_name(&"x".repeat(500), None).len() <= 200);
+    }
+
+    #[test]
+    fn saving_twice_does_not_overwrite_the_first_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = unique_destination(directory.path(), "photo.jpg");
+        assert_eq!(first, directory.path().join("photo.jpg"));
+        std::fs::write(&first, b"one").unwrap();
+
+        let second = unique_destination(directory.path(), "photo.jpg");
+        assert_eq!(second, directory.path().join("photo (2).jpg"));
+        std::fs::write(&second, b"two").unwrap();
+
+        let third = unique_destination(directory.path(), "photo.jpg");
+        assert_eq!(third, directory.path().join("photo (3).jpg"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+    }
+
+    #[test]
+    fn saving_rejects_a_source_outside_the_managed_media_cache() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("id_rsa");
+        std::fs::write(&secret, b"private").unwrap();
+
+        let error = save_media_as(
+            secret.to_string_lossy().into_owned(),
+            outside.path().to_string_lossy().into_owned(),
+            "id_rsa".to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_argument");
     }
 }
