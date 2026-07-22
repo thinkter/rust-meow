@@ -2670,6 +2670,19 @@ html[data-density="compact"] .reaction-chip {
 
 /* ── Motion & accessibility ── */
 
+html[data-battery-saver="true"] *,
+html[data-battery-saver="true"] *::before,
+html[data-battery-saver="true"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+html[data-battery-saver="true"] .modal-backdrop {
+  backdrop-filter: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

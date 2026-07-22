@@ -50,6 +50,7 @@ const RESIZE_HANDLES: ReadonlyArray<{ cls: string; direction: ResizeDirection }>
 export function TitleBar(props: { model: AppModel }) {
   const { state, actions, prefActions } = props.model;
   const [maximized, setMaximized] = createSignal(false);
+  let resizeFrame: number | undefined;
 
   async function currentWindow() {
     if (browserMockEnabled) return undefined;
@@ -69,9 +70,22 @@ export function TitleBar(props: { model: AppModel }) {
 
   onMount(() => {
     void refreshMaximized();
-    window.addEventListener("resize", refreshMaximized);
+    window.addEventListener("resize", scheduleMaximizedRefresh);
   });
-  onCleanup(() => window.removeEventListener("resize", refreshMaximized));
+  onCleanup(() => {
+    window.removeEventListener("resize", scheduleMaximizedRefresh);
+    if (resizeFrame !== undefined) window.cancelAnimationFrame(resizeFrame);
+  });
+
+  // Native resize events can arrive much faster than the display refresh
+  // rate. At most one isMaximized IPC per frame keeps window dragging cheap.
+  function scheduleMaximizedRefresh() {
+    if (resizeFrame !== undefined) return;
+    resizeFrame = window.requestAnimationFrame(() => {
+      resizeFrame = undefined;
+      void refreshMaximized();
+    });
+  }
 
   async function handleDragPointerDown(event: PointerEvent) {
     if (event.button !== 0) return;

@@ -37,7 +37,9 @@ export function Sidebar(props: SidebarProps) {
     },
     getScrollElement: () => listRef ?? null,
     estimateSize: () => (preferences.density === "compact" ? 58 : 72) * preferences.uiScale,
-    overscan: 8,
+    get overscan() {
+      return preferences.batterySaver ? 3 : 8;
+    },
     getItemKey: (index) => chats()[index]?.id ?? index,
     onChange: (instance) => {
       const items = instance.getVirtualItems();

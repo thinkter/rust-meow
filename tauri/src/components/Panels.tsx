@@ -490,6 +490,14 @@ export function SettingsPanel(props: { model: AppModel }) {
                   </button>
                 </div>
               </div>
+              <div class="setting-row">
+                <span class="setting-copy"><strong>Battery saver</strong><span>Reduce animation and off-screen rendering work</span></span>
+                <Toggle
+                  checked={preferences.batterySaver}
+                  label="Battery saver"
+                  onChange={(value) => prefActions.update("batterySaver", value)}
+                />
+              </div>
             </section>
           </Show>
 
