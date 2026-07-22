@@ -1,6 +1,6 @@
 import { batch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
-import { bridge, normalizeBridgeError } from "../lib/bridge";
+import { bridge, normalizeBridgeError, openFile } from "../lib/bridge";
 import {
   AttachmentKind,
   ChatKind,
@@ -16,7 +16,26 @@ import {
   type SearchResults,
 } from "../lib/types";
 import { pairingStartupDecision } from "./pairing";
+import { createPreferences } from "./preferences";
 import { optimisticUnreadCount, shouldRestoreOptimisticUnread } from "./unread";
+import {
+  closeTabInWorkspace,
+  conversationsToEvict,
+  cycleSwitcher as cycleSwitcherHighlight,
+  emptyPane,
+  moveTabBetweenPanes,
+  openSwitcher as buildSwitcher,
+  openTab,
+  readWorkspaceSnapshot,
+  recentChatCandidates,
+  remapPaneChatId,
+  selectTab,
+  writeWorkspaceSnapshot,
+  type Pane,
+  type Switcher,
+} from "./workspace";
+
+export type { Pane, Switcher } from "./workspace";
 
 export type Screen = "starting" | "pairing" | "chats" | "fatal";
 export type ChatFilter = "all" | "unread" | "groups" | "archived";
@@ -51,6 +70,37 @@ export interface ImageViewerState {
   sticker: boolean;
 }
 
+/** One conversation's message window, keyed by chat id so two panes can each hold one. */
+export interface ConversationState {
+  chatId: string;
+  messages: Message[];
+  loading: boolean;
+  loadingOlder: boolean;
+  loadingNewer: boolean;
+  hasOlder: boolean;
+  hasNewer: boolean;
+  firstUnreadMessageId: string;
+  highlightedMessageId: string;
+  liveMessageVersion: number;
+}
+
+/**
+ * Placeholder sticker-pack shape so composer/tray work can begin before the
+ * STICKERS agent lands the real type in `lib/types.ts`. See `loadStickers`
+ * for the corresponding defensive bridge call.
+ */
+export interface StickerPack {
+  id: string;
+  name: string;
+  stickerIds: string[];
+}
+
+export interface StickersState {
+  packs: StickerPack[];
+  loading: boolean;
+  error: string;
+}
+
 export interface AppState {
   screen: Screen;
   connection: number;
@@ -67,16 +117,12 @@ export interface AppState {
   nextChatCursor: string;
   loadingChats: boolean;
   chatFilter: ChatFilter;
+  /** Derived from, and kept in sync with, the focused pane's `activeChatId`. */
   selectedChatId: string;
-  messages: Message[];
-  loadingMessages: boolean;
-  loadingOlder: boolean;
-  loadingNewer: boolean;
-  hasOlder: boolean;
-  hasNewer: boolean;
-  firstUnreadMessageId: string;
-  highlightedMessageId: string;
-  liveMessageVersion: number;
+  conversations: Record<string, ConversationState>;
+  panes: Pane[];
+  focusedPaneId: string;
+  switcher: Switcher | null;
   drafts: Record<string, Draft>;
   sending: boolean;
   typing: Record<string, Record<string, TypingPresence>>;
@@ -93,8 +139,7 @@ export interface AppState {
   attachmentFailures: Record<string, string>;
   imageViewer: ImageViewerState | null;
   settingsOpen: boolean;
-  theme: "dark" | "light";
-  uiScale: number;
+  stickers: StickersState;
   logoutConfirmation: boolean;
   toasts: Toast[];
   fatalError: string;
@@ -102,10 +147,32 @@ export interface AppState {
 
 const emptyDraft = (): Draft => ({ text: "", replyToMessageId: "", mentions: [] });
 const MAX_ACTIVE_MESSAGES = 2_000;
+/** Cap on simultaneously hydrated conversations; least-recently-focused ones are evicted. */
+const MAX_HYDRATED_CONVERSATIONS = 8;
+
+function emptyConversation(chatId: string): ConversationState {
+  return {
+    chatId,
+    messages: [],
+    loading: false,
+    loadingOlder: false,
+    loadingNewer: false,
+    hasOlder: false,
+    hasNewer: false,
+    firstUnreadMessageId: "",
+    highlightedMessageId: "",
+    liveMessageVersion: 0,
+  };
+}
 
 export function createAppModel() {
-  const savedTheme = localStorage.getItem("rust-meow-theme");
-  const savedScale = Number.parseFloat(localStorage.getItem("rust-meow-scale") ?? "1");
+  const { preferences, prefActions } = createPreferences();
+  const restoredWorkspace = readWorkspaceSnapshot();
+  const initialPanes = restoredWorkspace?.panes ?? [emptyPane("pane-1")];
+  const initialFocusedPaneId = restoredWorkspace?.focusedPaneId ?? initialPanes[0]!.id;
+  const initialSelectedChatId =
+    initialPanes.find((pane) => pane.id === initialFocusedPaneId)?.activeChatId ?? "";
+
   const [state, setState] = createStore<AppState>({
     screen: "starting",
     connection: ConnectionState.Starting,
@@ -122,16 +189,11 @@ export function createAppModel() {
     nextChatCursor: "",
     loadingChats: false,
     chatFilter: "all",
-    selectedChatId: "",
-    messages: [],
-    loadingMessages: false,
-    loadingOlder: false,
-    loadingNewer: false,
-    hasOlder: false,
-    hasNewer: false,
-    firstUnreadMessageId: "",
-    highlightedMessageId: "",
-    liveMessageVersion: 0,
+    selectedChatId: initialSelectedChatId,
+    conversations: {},
+    panes: initialPanes,
+    focusedPaneId: initialFocusedPaneId,
+    switcher: null,
     drafts: {},
     sending: false,
     typing: {},
@@ -148,14 +210,12 @@ export function createAppModel() {
     attachmentFailures: {},
     imageViewer: null,
     settingsOpen: false,
-    theme: savedTheme === "light" ? "light" : "dark",
-    uiScale: Number.isFinite(savedScale) ? Math.min(1.5, Math.max(1, savedScale)) : 1,
+    stickers: { packs: [], loading: false, error: "" },
     logoutConfirmation: false,
     toasts: [],
     fatalError: "",
   });
 
-  let selectionGeneration = 0;
   let searchGeneration = 0;
   let searchTimer: number | undefined;
   let syncRefreshTimer: number | undefined;
@@ -169,14 +229,12 @@ export function createAppModel() {
   const attemptedAvatars = new Set<string>();
   const attemptedParticipantAvatars = new Set<string>();
   const backendChatRevisions = new Map<string, number>();
-
-  function applyAppearance() {
-    document.documentElement.dataset.theme = state.theme;
-    document.documentElement.style.setProperty("--scale", state.uiScale.toString());
-  }
+  /** Per-chat load generations so a stale in-flight fetch cannot clobber a fresher one. */
+  const conversationGenerations = new Map<string, number>();
+  /** Drives LRU eviction once more than `MAX_HYDRATED_CONVERSATIONS` chats are hydrated. */
+  const conversationLastFocusedAt = new Map<string, number>();
 
   async function bootstrap() {
-    applyAppearance();
     try {
       await bridge.subscribeBackend(handleEvent);
       const hello = await bridge.hello();
@@ -193,9 +251,21 @@ export function createAppModel() {
         return;
       }
       await loadChats(true);
+      await restoreWorkspaceConversations();
     } catch (error) {
       fatal(normalizeBridgeError(error).message);
     }
+  }
+
+  /** Hydrate whichever chats the restored (or freshly created) panes are showing. */
+  async function restoreWorkspaceConversations() {
+    const chatIds = [...new Set(state.panes.map((pane) => pane.activeChatId).filter(Boolean))];
+    await Promise.all(
+      chatIds.map((chatId) => {
+        touchConversationFocus(chatId);
+        return loadConversation(chatId).catch(() => undefined);
+      }),
+    );
   }
 
   async function refreshPairing() {
@@ -243,17 +313,201 @@ export function createAppModel() {
     }
   }
 
-  async function selectChat(chatId: string, aroundMessageId = "") {
-    stopTyping();
-    const generation = ++selectionGeneration;
+  // ---------------------------------------------------------------------
+  // Conversations
+  // ---------------------------------------------------------------------
+
+  /** Never returns undefined so components can render before a chat has loaded. */
+  function conversation(chatId: string): ConversationState {
+    return state.conversations[chatId] ?? Object.freeze(emptyConversation(chatId));
+  }
+
+  function ensureConversation(chatId: string) {
+    if (!state.conversations[chatId]) setState("conversations", chatId, emptyConversation(chatId));
+  }
+
+  function bumpConversationGeneration(chatId: string): number {
+    const next = (conversationGenerations.get(chatId) ?? 0) + 1;
+    conversationGenerations.set(chatId, next);
+    return next;
+  }
+
+  function isCurrentGeneration(chatId: string, generation: number): boolean {
+    return conversationGenerations.get(chatId) === generation;
+  }
+
+  function touchConversationFocus(chatId: string) {
+    if (!chatId) return;
+    conversationLastFocusedAt.set(chatId, Date.now());
+  }
+
+  function isChatVisible(chatId: string): boolean {
+    return state.panes.some((pane) => pane.activeChatId === chatId);
+  }
+
+  /** Evict conversations that are no longer open anywhere, then trim to the LRU cap. */
+  function pruneConversations() {
+    const openChatIds = new Set(state.panes.flatMap((pane) => pane.tabChatIds));
+    const evicted = conversationsToEvict(
+      Object.keys(state.conversations),
+      openChatIds,
+      conversationLastFocusedAt,
+      MAX_HYDRATED_CONVERSATIONS,
+    );
+    if (evicted.length === 0) return;
     batch(() => {
-      setState("selectedChatId", chatId);
-      setState("messages", []);
-      setState("loadingMessages", true);
-      setState("hasOlder", false);
-      setState("hasNewer", false);
-      setState("firstUnreadMessageId", "");
-      setState("highlightedMessageId", "");
+      for (const chatId of evicted) {
+        setState("conversations", chatId, undefined!);
+        conversationGenerations.delete(chatId);
+        conversationLastFocusedAt.delete(chatId);
+      }
+    });
+  }
+
+  /** Fetch (or refetch) a chat's message window and write it into `state.conversations`. */
+  async function loadConversation(chatId: string, aroundMessageId = "") {
+    if (!chatId) return;
+    ensureConversation(chatId);
+    const generation = bumpConversationGeneration(chatId);
+    setState("conversations", chatId, "loading", true);
+    try {
+      if (aroundMessageId) {
+        const response = await bridge.listMessagesAround(chatId, aroundMessageId);
+        if (!isCurrentGeneration(chatId, generation)) return;
+        const highlightId = response.anchorMessageId || aroundMessageId;
+        batch(() => {
+          setState(
+            "conversations",
+            chatId,
+            "messages",
+            reconcile(
+              sortMessages(mergeMessages(state.conversations[chatId]?.messages ?? [], response.messages)),
+              { key: "id" },
+            ),
+          );
+          setState("conversations", chatId, "hasOlder", response.hasOlder);
+          setState("conversations", chatId, "hasNewer", response.hasNewer);
+          setState("conversations", chatId, "highlightedMessageId", highlightId);
+        });
+        window.setTimeout(() => {
+          if (state.conversations[chatId]?.highlightedMessageId === highlightId) {
+            setState("conversations", chatId, "highlightedMessageId", "");
+          }
+        }, 3_000);
+      } else {
+        const response = await bridge.openMessageWindow(chatId);
+        if (!isCurrentGeneration(chatId, generation)) return;
+        batch(() => {
+          setState(
+            "conversations",
+            chatId,
+            "messages",
+            reconcile(
+              sortMessages(mergeMessages(state.conversations[chatId]?.messages ?? [], response.messages)),
+              { key: "id" },
+            ),
+          );
+          setState("conversations", chatId, "hasOlder", response.hasOlder);
+          setState("conversations", chatId, "hasNewer", response.hasNewer);
+          setState("conversations", chatId, "firstUnreadMessageId", response.firstUnreadMessageId);
+        });
+      }
+      void markChatRead(chatId);
+      void loadAvatar(chatId);
+      void bridge.repairRecentReactions(chatId).catch(() => undefined);
+    } catch (error) {
+      if (isCurrentGeneration(chatId, generation)) toast(normalizeBridgeError(error).message);
+    } finally {
+      if (isCurrentGeneration(chatId, generation)) setState("conversations", chatId, "loading", false);
+    }
+  }
+
+  async function loadOlder(chatId = state.selectedChatId) {
+    const current = state.conversations[chatId];
+    const first = current?.messages[0];
+    if (!current || !first || !current.hasOlder || current.loadingOlder) return;
+    setState("conversations", chatId, "loadingOlder", true);
+    try {
+      const response = await bridge.listMessages(chatId, first.timestampMs, first.id, 50);
+      if (!state.conversations[chatId]) return;
+      const merged = mergeMessages(response.messages, state.conversations[chatId]!.messages);
+      const trimmed = merged.length > MAX_ACTIVE_MESSAGES;
+      batch(() => {
+        setState("conversations", chatId, "messages", reconcile(trimMessages(merged, "newer"), { key: "id" }));
+        setState("conversations", chatId, "hasOlder", response.hasMore);
+        if (trimmed) setState("conversations", chatId, "hasNewer", true);
+      });
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+    } finally {
+      if (state.conversations[chatId]) setState("conversations", chatId, "loadingOlder", false);
+    }
+  }
+
+  async function loadNewer(chatId = state.selectedChatId) {
+    const current = state.conversations[chatId];
+    const last = current?.messages.at(-1);
+    if (!current || !last || !current.hasNewer || current.loadingNewer) return;
+    setState("conversations", chatId, "loadingNewer", true);
+    try {
+      const response = await bridge.listMessagesAfter(chatId, last.timestampMs, last.id, 50);
+      if (!state.conversations[chatId]) return;
+      const merged = mergeMessages(state.conversations[chatId]!.messages, response.messages);
+      const trimmed = merged.length > MAX_ACTIVE_MESSAGES;
+      batch(() => {
+        setState("conversations", chatId, "messages", reconcile(trimMessages(merged, "older"), { key: "id" }));
+        setState("conversations", chatId, "hasNewer", response.hasMore);
+        if (trimmed) setState("conversations", chatId, "hasOlder", true);
+      });
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+    } finally {
+      if (state.conversations[chatId]) setState("conversations", chatId, "loadingNewer", false);
+    }
+  }
+
+  async function jumpToLatest(chatId = state.selectedChatId) {
+    if (!chatId) return;
+    await loadConversation(chatId);
+  }
+
+  // ---------------------------------------------------------------------
+  // Panes and tabs
+  // ---------------------------------------------------------------------
+
+  function syncSelectedChatId() {
+    const pane = state.panes.find((candidate) => candidate.id === state.focusedPaneId);
+    setState("selectedChatId", pane?.activeChatId ?? "");
+  }
+
+  function writePane(paneId: string, pane: Pane) {
+    setState("panes", (candidate) => candidate.id === paneId, {
+      tabChatIds: pane.tabChatIds,
+      activeChatId: pane.activeChatId,
+    });
+  }
+
+  function persistWorkspace() {
+    writeWorkspaceSnapshot({
+      panes: state.panes.map((pane) => ({ ...pane, tabChatIds: [...pane.tabChatIds] })),
+      focusedPaneId: state.focusedPaneId,
+    });
+  }
+
+  /**
+   * Load a chat into a pane's active tab and focus that pane. Selecting a
+   * chat already open somewhere in the pane just focuses it; otherwise it
+   * replaces the active slot so sidebar clicks do not pile up tabs — use
+   * `openInNewTab` to open deliberately alongside the current tab.
+   */
+  async function selectChat(chatId: string, aroundMessageId = "", paneId = state.focusedPaneId) {
+    const pane = state.panes.find((candidate) => candidate.id === paneId);
+    if (!chatId || !pane) return;
+    stopTyping();
+    batch(() => {
+      writePane(paneId, selectTab(pane, chatId));
+      setState("focusedPaneId", paneId);
+      syncSelectedChatId();
       setState("chatInfoOpen", false);
       setState("chatInfo", null);
       setState("settingsOpen", false);
@@ -262,107 +516,144 @@ export function createAppModel() {
     });
     ensureDraft(chatId);
     rememberRecentChat(chatId);
-
-    try {
-      if (aroundMessageId) {
-        const response = await bridge.listMessagesAround(chatId, aroundMessageId);
-        if (generation !== selectionGeneration) return;
-        batch(() => {
-          setState(
-            "messages",
-            reconcile(sortMessages(mergeMessages(state.messages, response.messages)), { key: "id" }),
-          );
-          setState("hasOlder", response.hasOlder);
-          setState("hasNewer", response.hasNewer);
-          setState("highlightedMessageId", response.anchorMessageId || aroundMessageId);
-        });
-        window.setTimeout(() => {
-          if (state.highlightedMessageId === (response.anchorMessageId || aroundMessageId)) {
-            setState("highlightedMessageId", "");
-          }
-        }, 3_000);
-      } else {
-        const response = await bridge.openMessageWindow(chatId);
-        if (generation !== selectionGeneration) return;
-        batch(() => {
-          setState(
-            "messages",
-            reconcile(sortMessages(mergeMessages(state.messages, response.messages)), { key: "id" }),
-          );
-          setState("hasOlder", response.hasOlder);
-          setState("hasNewer", response.hasNewer);
-          setState("firstUnreadMessageId", response.firstUnreadMessageId);
-        });
-      }
-      void markSelectedRead();
-      void loadAvatar(chatId);
-      void bridge.repairRecentReactions(chatId).catch(() => undefined);
-    } catch (error) {
-      if (generation === selectionGeneration) toast(normalizeBridgeError(error).message);
-    } finally {
-      if (generation === selectionGeneration) setState("loadingMessages", false);
-    }
+    touchConversationFocus(chatId);
+    pruneConversations();
+    persistWorkspace();
+    await loadConversation(chatId, aroundMessageId);
   }
 
-  function closeChat() {
-    stopTyping();
-    selectionGeneration += 1;
+  /** Close the focused pane's active tab, if any — a convenience over `closeTab`. */
+  function closeChat(paneId = state.focusedPaneId) {
+    const pane = state.panes.find((candidate) => candidate.id === paneId);
+    if (pane?.activeChatId) closeTab(pane.activeChatId, paneId);
+  }
+
+  async function openInNewTab(chatId: string, paneId = state.focusedPaneId) {
+    const pane = state.panes.find((candidate) => candidate.id === paneId);
+    if (!chatId || !pane) return;
+    const alreadyHydrated = Boolean(state.conversations[chatId]);
     batch(() => {
-      setState("selectedChatId", "");
-      setState("messages", []);
+      writePane(paneId, openTab(pane, chatId));
+      setState("focusedPaneId", paneId);
+      syncSelectedChatId();
+    });
+    ensureDraft(chatId);
+    rememberRecentChat(chatId);
+    touchConversationFocus(chatId);
+    pruneConversations();
+    persistWorkspace();
+    if (!alreadyHydrated) await loadConversation(chatId);
+  }
+
+  function closeTab(chatId: string, paneId = state.focusedPaneId) {
+    const result = closeTabInWorkspace(state.panes, chatId, paneId);
+    batch(() => {
+      setState("panes", reconcile(result.panes, { key: "id" }));
+      if (result.removedPaneId && state.focusedPaneId === result.removedPaneId) {
+        setState("focusedPaneId", state.panes[0]?.id ?? "");
+      }
+      syncSelectedChatId();
+    });
+    if (typingChatId === chatId) stopTyping();
+    pruneConversations();
+    persistWorkspace();
+  }
+
+  function moveTab(chatId: string, fromPaneId: string, toPaneId: string, index: number) {
+    const fromPane = state.panes.find((candidate) => candidate.id === fromPaneId);
+    const toPane = state.panes.find((candidate) => candidate.id === toPaneId);
+    if (!fromPane || !toPane || !fromPane.tabChatIds.includes(chatId)) return;
+    const moved = moveTabBetweenPanes(state.panes, chatId, fromPaneId, toPaneId, index);
+    batch(() => {
+      setState("panes", reconcile(moved, { key: "id" }));
+      setState("focusedPaneId", toPaneId);
+      syncSelectedChatId();
+    });
+    touchConversationFocus(chatId);
+    pruneConversations();
+    persistWorkspace();
+  }
+
+  function focusPane(paneId: string) {
+    if (state.focusedPaneId === paneId || !state.panes.some((pane) => pane.id === paneId)) return;
+    setState("focusedPaneId", paneId);
+    syncSelectedChatId();
+    const active = state.panes.find((pane) => pane.id === paneId)?.activeChatId;
+    if (active) touchConversationFocus(active);
+    persistWorkspace();
+  }
+
+  /** Create the second pane, or simply focus it when the workspace is already split. */
+  function splitPane() {
+    if (state.panes.length >= 2) {
+      const other = state.panes.find((pane) => pane.id !== state.focusedPaneId);
+      if (other) focusPane(other.id);
+      return;
+    }
+    const newPaneId = state.panes.some((pane) => pane.id === "pane-1") ? "pane-2" : "pane-1";
+    batch(() => {
+      setState("panes", (panes) => [...panes, emptyPane(newPaneId)]);
+      setState("focusedPaneId", newPaneId);
+      syncSelectedChatId();
+    });
+    persistWorkspace();
+  }
+
+  /** The workspace always keeps at least one pane; closing the only pane is a no-op. */
+  function closePane(paneId: string) {
+    if (state.panes.length <= 1 || !state.panes.some((pane) => pane.id === paneId)) return;
+    const remaining = state.panes.filter((pane) => pane.id !== paneId);
+    batch(() => {
+      setState("panes", remaining);
+      if (state.focusedPaneId === paneId) setState("focusedPaneId", remaining[0]!.id);
+      syncSelectedChatId();
+    });
+    pruneConversations();
+    persistWorkspace();
+  }
+
+  // ---------------------------------------------------------------------
+  // Chat switcher (Ctrl+Tab, goal G4)
+  // ---------------------------------------------------------------------
+
+  function openSwitcher(reverse: boolean) {
+    const candidates = recentChatCandidates(
+      readRecentChats(),
+      (chatId) => state.chats.some((chat) => chat.id === chatId),
+      state.chats.map((chat) => chat.id),
+      state.selectedChatId,
+    );
+    const selectedIsFirst = Boolean(state.selectedChatId) && candidates[0] === state.selectedChatId;
+    const switcher = buildSwitcher(candidates, reverse, selectedIsFirst);
+    if (!switcher) return;
+    batch(() => {
       setState("chatInfoOpen", false);
+      setState("chatInfo", null);
+      setState("settingsOpen", false);
+      setState("imageViewer", null);
+      setState("switcher", switcher);
     });
   }
 
-  async function loadOlder() {
-    const first = state.messages[0];
-    if (!first || !state.hasOlder || state.loadingOlder) return;
-    const chatId = state.selectedChatId;
-    setState("loadingOlder", true);
-    try {
-      const response = await bridge.listMessages(
-        chatId,
-        first.timestampMs,
-        first.id,
-        50,
-      );
-      if (chatId !== state.selectedChatId) return;
-      const merged = mergeMessages(response.messages, state.messages);
-      const trimmed = merged.length > MAX_ACTIVE_MESSAGES;
-      setState("messages", reconcile(trimMessages(merged, "newer"), { key: "id" }));
-      setState("hasOlder", response.hasMore);
-      if (trimmed) setState("hasNewer", true);
-    } catch (error) {
-      toast(normalizeBridgeError(error).message);
-    } finally {
-      setState("loadingOlder", false);
-    }
+  function cycleSwitcher(reverse: boolean) {
+    if (!state.switcher) return;
+    setState("switcher", cycleSwitcherHighlight(state.switcher, reverse));
   }
 
-  async function loadNewer() {
-    const last = state.messages.at(-1);
-    if (!last || !state.hasNewer || state.loadingNewer) return;
-    const chatId = state.selectedChatId;
-    setState("loadingNewer", true);
-    try {
-      const response = await bridge.listMessagesAfter(chatId, last.timestampMs, last.id, 50);
-      if (chatId !== state.selectedChatId) return;
-      const merged = mergeMessages(state.messages, response.messages);
-      const trimmed = merged.length > MAX_ACTIVE_MESSAGES;
-      setState("messages", reconcile(trimMessages(merged, "older"), { key: "id" }));
-      setState("hasNewer", response.hasMore);
-      if (trimmed) setState("hasOlder", true);
-    } catch (error) {
-      toast(normalizeBridgeError(error).message);
-    } finally {
-      setState("loadingNewer", false);
-    }
+  function commitSwitcher() {
+    const switcher = state.switcher;
+    setState("switcher", null);
+    const chatId = switcher?.chatIds[switcher.highlighted];
+    if (chatId) void selectChat(chatId);
   }
 
-  async function jumpToLatest() {
-    if (!state.selectedChatId) return;
-    await selectChat(state.selectedChatId);
+  function cancelSwitcher() {
+    setState("switcher", null);
   }
+
+  // ---------------------------------------------------------------------
+  // Search
+  // ---------------------------------------------------------------------
 
   function updateSearch(query: string) {
     setState("searchQuery", query);
@@ -424,28 +715,33 @@ export function createAppModel() {
     await selectChat(result.chatId, result.messageId);
   }
 
-  function setDraftText(text: string) {
-    const chatId = state.selectedChatId;
+  // ---------------------------------------------------------------------
+  // Composer / drafts
+  // ---------------------------------------------------------------------
+
+  function setDraftText(text: string, chatId = state.selectedChatId) {
     if (!chatId) return;
     ensureDraft(chatId);
     setState("drafts", chatId, "text", text);
-    scheduleTyping(text.trim().length > 0);
+    scheduleTyping(chatId, text.trim().length > 0);
   }
 
-  function replyTo(messageId: string) {
-    const chatId = state.selectedChatId;
+  function replyTo(messageId: string, chatId = state.selectedChatId) {
     if (!chatId) return;
     ensureDraft(chatId);
     setState("drafts", chatId, "replyToMessageId", messageId);
   }
 
-  function cancelReply() {
-    const chatId = state.selectedChatId;
+  function cancelReply(chatId = state.selectedChatId) {
     if (chatId && state.drafts[chatId]) setState("drafts", chatId, "replyToMessageId", "");
   }
 
-  function addMention(participant: ChatParticipant, tokenStart: number, tokenEnd: number) {
-    const chatId = state.selectedChatId;
+  function addMention(
+    participant: ChatParticipant,
+    tokenStart: number,
+    tokenEnd: number,
+    chatId = state.selectedChatId,
+  ) {
     const draft = state.drafts[chatId];
     if (!chatId || !draft) return;
     const displayName = participant.displayName || participant.phoneNumber;
@@ -459,8 +755,7 @@ export function createAppModel() {
     });
   }
 
-  async function sendCurrentText() {
-    const chatId = state.selectedChatId;
+  async function sendCurrentText(chatId = state.selectedChatId) {
     const draft = state.drafts[chatId];
     if (!chatId || !draft || state.sending) return;
     const text = draft.text.trim();
@@ -475,7 +770,7 @@ export function createAppModel() {
       setState("sending", true);
       setState("drafts", chatId, emptyDraft());
     });
-    scheduleTyping(false);
+    scheduleTyping(chatId, false);
     try {
       const response = await bridge.sendText(
         chatId,
@@ -492,29 +787,30 @@ export function createAppModel() {
     }
   }
 
-  async function sendImage(path: string) {
-    await sendFile(path, "image");
+  async function sendImage(path: string, chatId = state.selectedChatId) {
+    await sendFile(chatId, path, "image");
   }
 
-  async function sendSticker(path: string) {
-    await sendFile(path, "sticker");
+  async function sendSticker(path: string, chatId = state.selectedChatId) {
+    await sendFile(chatId, path, "sticker");
   }
 
   async function sendAttachment(
     path: string,
     kind: AttachmentKind,
     voiceNote = false,
+    chatId = state.selectedChatId,
   ) {
-    await sendFile(path, "attachment", kind, voiceNote);
+    await sendFile(chatId, path, "attachment", kind, voiceNote);
   }
 
   async function sendFile(
+    chatId: string,
     path: string,
     mode: "image" | "sticker" | "attachment",
     attachmentKind: AttachmentKind = AttachmentKind.Document,
     voiceNote = false,
   ) {
-    const chatId = state.selectedChatId;
     const draft = state.drafts[chatId] ?? emptyDraft();
     if (!chatId || state.sending) return;
     const previous = cloneDraft(draft);
@@ -522,7 +818,7 @@ export function createAppModel() {
       setState("sending", true);
       setState("drafts", chatId, emptyDraft());
     });
-    scheduleTyping(false);
+    scheduleTyping(chatId, false);
     try {
       const response =
         mode === "image"
@@ -546,20 +842,29 @@ export function createAppModel() {
     }
   }
 
-  async function hydrateImage(message: Message, retry = false, requireFull = false) {
+  // ---------------------------------------------------------------------
+  // Media hydration
+  // ---------------------------------------------------------------------
+
+  async function hydrateImage(
+    message: Message,
+    retry = false,
+    requireFull = false,
+    chatId = message.chatId,
+  ) {
     if (!(message.content && "image" in message.content)) return;
     const image = message.content.image;
     if (image.localPath) return image.localPath;
     if (image.thumbnailPath && !requireFull) return image.thumbnailPath;
     if (!image.downloadable) return image.thumbnailPath || undefined;
-    const key = mediaKey(message.chatId, message.id);
+    const key = mediaKey(chatId, message.id);
     if (pendingImages.has(key) || pendingImages.size >= 4) return;
     if (state.imageFailures[key] && !retry) return;
     pendingImages.add(key);
     if (retry) setState("imageFailures", key, undefined!);
     try {
-      const response = await bridge.getMessageImage(message.chatId, message.id);
-      updateMessage(message.id, (current) => {
+      const response = await bridge.getMessageImage(chatId, message.id);
+      updateMessage(chatId, message.id, (current) => {
         if (!(current.content && "image" in current.content)) return current;
         return {
           ...current,
@@ -580,19 +885,19 @@ export function createAppModel() {
     }
   }
 
-  async function hydrateAttachment(message: Message, retry = false) {
+  async function hydrateAttachment(message: Message, retry = false, chatId = message.chatId) {
     if (!(message.content && "attachment" in message.content)) return;
     const attachment = message.content.attachment;
     if (attachment.localPath) return attachment.localPath;
     if (!attachment.downloadable) return;
-    const key = mediaKey(message.chatId, message.id);
+    const key = mediaKey(chatId, message.id);
     if (pendingAttachments.has(key) || pendingAttachments.size >= 3) return;
     if (state.attachmentFailures[key] && !retry) return;
     pendingAttachments.add(key);
     if (retry) setState("attachmentFailures", key, undefined!);
     try {
-      const response = await bridge.getMessageAttachment(message.chatId, message.id);
-      updateMessage(message.id, (current) => {
+      const response = await bridge.getMessageAttachment(chatId, message.id);
+      updateMessage(chatId, message.id, (current) => {
         if (!(current.content && "attachment" in current.content)) return current;
         return {
           ...current,
@@ -649,6 +954,10 @@ export function createAppModel() {
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Chat info / settings overlays (single instance over the pane group)
+  // ---------------------------------------------------------------------
+
   async function showChatInfo() {
     const chatId = state.selectedChatId;
     if (!chatId) return;
@@ -688,8 +997,8 @@ export function createAppModel() {
     setState("chatInfoOpen", false);
   }
 
-  async function react(messageId: string, emoji: string) {
-    const message = state.messages.find((candidate) => candidate.id === messageId);
+  async function react(messageId: string, emoji: string, chatId = state.selectedChatId) {
+    const message = state.conversations[chatId]?.messages.find((candidate) => candidate.id === messageId);
     if (!message) return;
     try {
       const response = await bridge.sendReaction(message.chatId, message.id, emoji);
@@ -725,24 +1034,92 @@ export function createAppModel() {
     }
   }
 
-  function setTheme(theme: "dark" | "light") {
-    setState("theme", theme);
-    localStorage.setItem("rust-meow-theme", theme);
-    applyAppearance();
-  }
-
-  function setScale(scale: number) {
-    const normalized = Math.round(Math.min(1.5, Math.max(1, scale)) * 10) / 10;
-    setState("uiScale", normalized);
-    localStorage.setItem("rust-meow-scale", normalized.toString());
-    applyAppearance();
-  }
-
   function toggleSettings(open = !state.settingsOpen) {
     batch(() => {
       setState("settingsOpen", open);
       if (open) setState("chatInfoOpen", false);
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // Stickers (placeholder pending the STICKERS agent's bridge/type work)
+  // ---------------------------------------------------------------------
+
+  /**
+   * `bridge` does not yet declare `listStickers`; the STICKERS agent is
+   * adding it (and the real `StickerPack` type) to `lib/bridge.ts` and
+   * `lib/types.ts`. Call it defensively so this compiles and degrades to a
+   * reported error in the meantime.
+   */
+  async function loadStickers() {
+    const listStickers = (bridge as Partial<{ listStickers: () => Promise<{ packs: StickerPack[] }> }>)
+      .listStickers;
+    if (!listStickers) {
+      setState("stickers", "error", "Sticker sync is not available in this build yet");
+      return;
+    }
+    setState("stickers", "loading", true);
+    try {
+      const response = await listStickers();
+      batch(() => {
+        setState("stickers", "packs", response.packs);
+        setState("stickers", "error", "");
+      });
+    } catch (error) {
+      setState("stickers", "error", normalizeBridgeError(error).message);
+    } finally {
+      setState("stickers", "loading", false);
+    }
+  }
+
+  async function sendStickerFromPack(stickerId: string, chatId = state.selectedChatId) {
+    const sendStickerById = (
+      bridge as Partial<{
+        sendStickerById: (chatId: string, stickerId: string) => Promise<{ message: Message | null }>;
+      }>
+    ).sendStickerById;
+    if (!chatId) return;
+    if (!sendStickerById) {
+      toast("Sticker sync is not available in this build yet");
+      return;
+    }
+    try {
+      const response = await sendStickerById(chatId, stickerId);
+      if (response.message) upsertMessage(response.message, true);
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Downloads (goal G7)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Copy one cached media file out to the user's save location. With no
+   * configured directory the picker stands in, which is what the settings
+   * panel means by "Ask every time".
+   */
+  async function saveMediaAs(sourcePath: string, suggestedName: string) {
+    if (!sourcePath) {
+      toast("That file has not been downloaded yet");
+      return;
+    }
+    try {
+      let destinationDir = preferences.downloadDir;
+      if (!destinationDir) {
+        const chosen = await openFile({
+          directory: true,
+          title: "Choose where to save this file",
+        });
+        if (!chosen) return;
+        destinationDir = chosen;
+      }
+      const savedPath = await bridge.saveMediaAs(sourcePath, destinationDir, suggestedName);
+      toast(`Saved to ${savedPath}`, "info");
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+    }
   }
 
   async function logout() {
@@ -753,24 +1130,19 @@ export function createAppModel() {
         setState("logoutConfirmation", false);
         setState("screen", "pairing");
         setState("chats", []);
-        setState("messages", []);
+        setState("conversations", {});
+        setState("panes", [emptyPane("pane-1")]);
+        setState("focusedPaneId", "pane-1");
         setState("selectedChatId", "");
         setState("drafts", {});
       });
+      conversationGenerations.clear();
+      conversationLastFocusedAt.clear();
+      persistWorkspace();
       await bridge.startPairing();
     } catch (error) {
       fatal(`Logout could not be completed safely: ${normalizeBridgeError(error).message}`);
     }
-  }
-
-  function cycleRecentChat(reverse: boolean) {
-    const recent = readRecentChats().filter((id) => state.chats.some((chat) => chat.id === id));
-    if (recent.length < 2) return;
-    const current = recent.indexOf(state.selectedChatId);
-    const next = reverse
-      ? (current - 1 + recent.length) % recent.length
-      : (current + 1) % recent.length;
-    void selectChat(recent[next] ?? recent[0]!);
   }
 
   function handleEvent(event: FrontendEvent) {
@@ -830,13 +1202,10 @@ export function createAppModel() {
         break;
       case "receiptUpdated":
         {
-          const index = state.messages.findIndex(
-            (message) =>
-              message.id === event.payload.messageId &&
-              message.chatId === event.payload.chatId,
-          );
-          if (index >= 0) {
-            setState("messages", index, "status", event.payload.status);
+          const conversation = state.conversations[event.payload.chatId];
+          const index = conversation?.messages.findIndex((message) => message.id === event.payload.messageId);
+          if (conversation && index !== undefined && index >= 0) {
+            setState("conversations", event.payload.chatId, "messages", index, "status", event.payload.status);
           }
         }
         break;
@@ -865,8 +1234,8 @@ export function createAppModel() {
         fatal(`The WhatsApp backend stopped: ${event.payload.message}`);
         break;
       case "recentReactionsRepaired":
-        if (event.payload.recoveredReactions > 0 && state.selectedChatId === event.payload.chatId) {
-          void selectChat(event.payload.chatId);
+        if (event.payload.recoveredReactions > 0 && state.conversations[event.payload.chatId]) {
+          void loadConversation(event.payload.chatId);
         }
         break;
     }
@@ -879,22 +1248,12 @@ export function createAppModel() {
   async function resyncAfterEventGap() {
     if (resyncing) return;
     resyncing = true;
-    const chatId = state.selectedChatId;
-    const generation = selectionGeneration;
     try {
-      const [messages] = await Promise.all([
-        chatId ? bridge.openMessageWindow(chatId) : Promise.resolve(null),
+      const openChatIds = [...new Set(state.panes.map((pane) => pane.activeChatId).filter(Boolean))];
+      await Promise.all([
+        ...openChatIds.map((chatId) => loadConversation(chatId).catch(() => undefined)),
         loadChats(true),
       ]);
-      if (messages && generation === selectionGeneration && chatId === state.selectedChatId) {
-        batch(() => {
-          setState("messages", reconcile(sortMessages(messages.messages), { key: "id" }));
-          setState("hasOlder", messages.hasOlder);
-          setState("hasNewer", messages.hasNewer);
-          setState("firstUnreadMessageId", messages.firstUnreadMessageId);
-        });
-        void markSelectedRead();
-      }
       toast("Chat state refreshed after a missed backend event", "info");
     } catch (error) {
       toast(`Could not refresh after the event gap: ${normalizeBridgeError(error).message}`);
@@ -904,27 +1263,33 @@ export function createAppModel() {
   }
 
   function upsertMessage(message: Message, live: boolean) {
-    if (message.chatId !== state.selectedChatId) return;
-    const isNew = !state.messages.some((candidate) => candidate.id === message.id);
-    const merged = mergeMessages(state.messages, [preserveLocalMedia(message, state.messages)]);
+    const chatId = message.chatId;
+    const conversationState = state.conversations[chatId];
+    if (!conversationState) return; // The chat is not open in any pane.
+    const isNew = !conversationState.messages.some((candidate) => candidate.id === message.id);
+    const merged = mergeMessages(conversationState.messages, [
+      preserveLocalMedia(message, conversationState.messages),
+    ]);
     const trimmed = merged.length > MAX_ACTIVE_MESSAGES;
-    setState("messages", reconcile(trimMessages(merged, "older"), { key: "id" }));
-    if (trimmed) setState("hasOlder", true);
+    setState("conversations", chatId, "messages", reconcile(trimMessages(merged, "older"), { key: "id" }));
+    if (trimmed) setState("conversations", chatId, "hasOlder", true);
     if (live && isNew) {
-      setState("liveMessageVersion", (version) => version + 1);
-      if (!message.fromMe && document.visibilityState === "visible") {
-        queueMicrotask(() => void markSelectedRead());
+      setState("conversations", chatId, "liveMessageVersion", (version) => version + 1);
+      if (!message.fromMe && document.visibilityState === "visible" && isChatVisible(chatId)) {
+        queueMicrotask(() => void markChatRead(chatId));
       }
     }
   }
 
-  function updateMessage(id: string, update: (message: Message) => Message) {
-    const index = state.messages.findIndex((message) => message.id === id);
-    if (index >= 0) setState("messages", index, update(state.messages[index]!));
+  function updateMessage(chatId: string, id: string, update: (message: Message) => Message) {
+    const messages = state.conversations[chatId]?.messages;
+    if (!messages) return;
+    const index = messages.findIndex((message) => message.id === id);
+    if (index >= 0) setState("conversations", chatId, "messages", index, update(messages[index]!));
   }
 
   function applyReaction(reaction: Reaction, removed: boolean) {
-    updateMessage(reaction.messageId, (message) => {
+    updateMessage(reaction.chatId, reaction.messageId, (message) => {
       const reactions = message.reactions.filter((item) => item.senderId !== reaction.senderId);
       if (!removed && reaction.emoji) reactions.push(reaction);
       reactions.sort((left, right) => left.timestampMs - right.timestampMs);
@@ -932,34 +1297,61 @@ export function createAppModel() {
     });
   }
 
+  function remapMessagesChatId(messages: readonly Message[], newId: string): Message[] {
+    return messages.map((message) => (message.chatId === newId ? message : { ...message, chatId: newId }));
+  }
+
+  function mergeConversationsForChatMerge(
+    oldConversation: ConversationState | undefined,
+    newConversation: ConversationState | undefined,
+    newId: string,
+  ): ConversationState | undefined {
+    if (!oldConversation && !newConversation) return undefined;
+    const base = newConversation ?? emptyConversation(newId);
+    const oldMessages = oldConversation ? remapMessagesChatId(oldConversation.messages, newId) : [];
+    const messages = sortMessages(mergeMessages(base.messages, oldMessages));
+    return { ...base, chatId: newId, messages };
+  }
+
   function mergeChatId(oldId: string, newId: string) {
     const oldDraft = state.drafts[oldId];
     const oldChat = state.chats.find((chat) => chat.id === oldId);
     const newChat = state.chats.find((chat) => chat.id === newId);
     const chats = state.chats.filter((chat) => chat.id !== oldId && chat.id !== newId);
-    if (oldChat || newChat) {
-      chats.push({ ...oldChat, ...newChat, id: newId } as Chat);
-    }
-    const messages = state.messages.map((message) =>
-      message.chatId === oldId ? { ...message, chatId: newId } : message,
+    if (oldChat || newChat) chats.push({ ...oldChat, ...newChat, id: newId } as Chat);
+
+    const mergedConversation = mergeConversationsForChatMerge(
+      state.conversations[oldId],
+      state.conversations[newId],
+      newId,
     );
+    const remappedPanes = state.panes.map((pane) => remapPaneChatId(pane, oldId, newId));
     const oldTyping = state.typing[oldId];
     const currentTyping = state.typing[newId];
+
     batch(() => {
       setState("chats", reconcile(sortChats(chats), { key: "id" }));
-      setState("messages", reconcile(messages, { key: "id" }));
+      if (mergedConversation) setState("conversations", newId, mergedConversation);
+      setState("conversations", oldId, undefined!);
+      setState("panes", reconcile(remappedPanes, { key: "id" }));
       if (oldDraft && !state.drafts[newId]) setState("drafts", newId, oldDraft);
       setState("drafts", oldId, undefined!);
       if (oldTyping) setState("typing", newId, { ...oldTyping, ...currentTyping });
       setState("typing", oldId, undefined!);
-      if (state.chatInfo?.chat?.id === oldId) {
-        setState("chatInfo", "chat", "id", newId);
-      }
-      if (state.selectedChatId === oldId) setState("selectedChatId", newId);
+      if (state.chatInfo?.chat?.id === oldId) setState("chatInfo", "chat", "id", newId);
+      syncSelectedChatId();
     });
+
+    conversationLastFocusedAt.set(
+      newId,
+      Math.max(conversationLastFocusedAt.get(oldId) ?? 0, conversationLastFocusedAt.get(newId) ?? 0),
+    );
+    conversationLastFocusedAt.delete(oldId);
+    conversationGenerations.delete(oldId);
     if (typingChatId === oldId) typingChatId = newId;
     const recent = readRecentChats().map((id) => (id === oldId ? newId : id));
     writeRecentChats([...new Set(recent)]);
+    persistWorkspace();
   }
 
   function updateTyping(payload: {
@@ -1014,9 +1406,8 @@ export function createAppModel() {
     return names.length > 0 ? `${names.join(" and ")} are typing…` : `${active.length} people are typing…`;
   }
 
-  function scheduleTyping(composing: boolean) {
+  function scheduleTyping(chatId: string, composing: boolean) {
     if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-    const chatId = state.selectedChatId;
     if (!chatId) return;
     if (typingChatId && typingChatId !== chatId) {
       void bridge.setTyping(typingChatId, false).catch(() => undefined);
@@ -1025,7 +1416,7 @@ export function createAppModel() {
     void bridge.setTyping(chatId, composing).catch(() => undefined);
     if (composing) {
       typingTimer = window.setTimeout(() => {
-        if (typingChatId === chatId && state.selectedChatId === chatId) scheduleTyping(true);
+        if (typingChatId === chatId) scheduleTyping(chatId, true);
       }, 8_000);
     }
   }
@@ -1040,12 +1431,12 @@ export function createAppModel() {
     if (chatId) void bridge.setTyping(chatId, false).catch(() => undefined);
   }
 
-  async function markSelectedRead() {
-    const lastIncoming = [...state.messages].reverse().find((message) => !message.fromMe);
-    const chatId = state.selectedChatId;
+  async function markChatRead(chatId: string) {
+    const conversationState = state.conversations[chatId];
+    const lastIncoming = conversationState ? [...conversationState.messages].reverse().find((message) => !message.fromMe) : undefined;
     if (!chatId || !lastIncoming) return;
     const previous = state.chats.find((chat) => chat.id === chatId)?.unreadCount ?? 0;
-    const optimistic = optimisticUnreadCount(previous, state.hasNewer);
+    const optimistic = optimisticUnreadCount(previous, conversationState!.hasNewer);
     const backendRevision = backendChatRevisions.get(chatId) ?? 0;
     if (optimistic !== previous) {
       setState("chats", (chat) => chat.id === chatId, "unreadCount", optimistic);
@@ -1105,21 +1496,34 @@ export function createAppModel() {
     return state.chats.find((chat) => chat.id === state.selectedChatId);
   }
 
-  function activeDraft(): Draft {
-    return state.drafts[state.selectedChatId] ?? emptyDraft();
+  function activeDraft(chatId = state.selectedChatId): Draft {
+    return state.drafts[chatId] ?? emptyDraft();
   }
 
   return {
     state,
+    preferences,
+    prefActions,
     actions: {
       bootstrap,
       refreshPairing,
       loadChats,
+      conversation,
       selectChat,
       closeChat,
+      openInNewTab,
+      closeTab,
+      moveTab,
+      focusPane,
+      splitPane,
+      closePane,
       loadOlder,
       loadNewer,
       jumpToLatest,
+      openSwitcher,
+      cycleSwitcher,
+      commitSwitcher,
+      cancelSwitcher,
       updateSearch,
       clearSearch,
       openContact,
@@ -1136,6 +1540,9 @@ export function createAppModel() {
       hydrateAttachment,
       loadAvatar,
       loadParticipantAvatar,
+      loadStickers,
+      sendStickerFromPack,
+      saveMediaAs,
       showChatInfo,
       ensureMentionDirectory,
       hideChatInfo,
@@ -1143,11 +1550,8 @@ export function createAppModel() {
       openImage,
       closeImage,
       setFilter,
-      setTheme,
-      setScale,
       toggleSettings,
       logout,
-      cycleRecentChat,
       stopTyping,
       typingLabel,
       filteredChats,
