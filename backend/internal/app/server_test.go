@@ -217,6 +217,8 @@ func TestAttachmentRequestValidation(t *testing.T) {
 		{"document voice note", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendAttachment{SendAttachment: &bridgev1.SendAttachmentRequest{ClientMessageId: validID, ChatId: "chat", FilePath: "/file", Kind: bridgev1.AttachmentKind_ATTACHMENT_KIND_DOCUMENT, VoiceNote: true}}}},
 		{"invalid caption UTF-8", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendAttachment{SendAttachment: &bridgev1.SendAttachmentRequest{ClientMessageId: validID, ChatId: "chat", FilePath: "/file", Kind: bridgev1.AttachmentKind_ATTACHMENT_KIND_DOCUMENT, Caption: string([]byte{0xff})}}}},
 		{"missing attachment message", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_GetMessageAttachment{GetMessageAttachment: &bridgev1.GetMessageAttachmentRequest{ChatId: "chat"}}}},
+		{"missing sticker library fields", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendStickerFromLibrary{SendStickerFromLibrary: &bridgev1.SendStickerFromLibraryRequest{}}}},
+		{"sticker library invalid client ID", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendStickerFromLibrary{SendStickerFromLibrary: &bridgev1.SendStickerFromLibraryRequest{ClientMessageId: "not-a-uuid", ChatId: "chat", StickerId: "abc"}}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

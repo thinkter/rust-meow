@@ -76,7 +76,8 @@ func (s *Server) SetWhatsApp(client *wa.Client) {
 func usesMediaSlot(request *bridgev1.RpcRequest) bool {
 	return request.GetGetChatAvatar() != nil || request.GetGetParticipantAvatar() != nil ||
 		request.GetGetMessageImage() != nil || request.GetSendImage() != nil || request.GetSendSticker() != nil ||
-		request.GetGetChatInfo() != nil || request.GetGetMessageAttachment() != nil || request.GetSendAttachment() != nil
+		request.GetGetChatInfo() != nil || request.GetGetMessageAttachment() != nil || request.GetSendAttachment() != nil ||
+		request.GetSendStickerFromLibrary() != nil
 }
 
 func (s *Server) waitForMediaJobs(ctx context.Context) error {
@@ -175,6 +176,8 @@ func (s *Server) Emit(event wa.Event) {
 		body.Event = &bridgev1.BackendEvent_ReceiptUpdated{ReceiptUpdated: &bridgev1.ReceiptUpdated{ChatId: event.ChatJID, MessageId: event.MessageID, Status: wireStatus(event.Status)}}
 	case "problem":
 		body.Event = &bridgev1.BackendEvent_Problem{Problem: &bridgev1.BackendProblem{Code: "WHATSAPP", Message: event.Detail}}
+	case "stickers":
+		body.Event = &bridgev1.BackendEvent_StickersChanged{StickersChanged: &bridgev1.StickersChanged{}}
 	default:
 		return
 	}
@@ -509,6 +512,33 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, err
 		}
 		return &bridgev1.RpcResponse_SendAttachment{SendAttachment: &bridgev1.SendAttachmentResponse{Message: s.wireMessage(message)}}, nil
+	case *bridgev1.RpcRequest_ListStickers:
+		packs, err := s.wa.StickerLibrary(s.ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_ListStickers{ListStickers: &bridgev1.ListStickersResponse{Packs: wireStickerLibrary(packs)}}, nil
+	case *bridgev1.RpcRequest_SendStickerFromLibrary:
+		if req.SendStickerFromLibrary.GetClientMessageId() == "" || req.SendStickerFromLibrary.GetChatId() == "" || req.SendStickerFromLibrary.GetStickerId() == "" {
+			return nil, fail("invalid_argument", "client_message_id, chat_id and sticker_id are required", false)
+		}
+		if _, err := uuid.Parse(req.SendStickerFromLibrary.GetClientMessageId()); err != nil {
+			return nil, fail("invalid_argument", "client_message_id must be a UUID", false)
+		}
+		if err := s.validateReplyTarget(req.SendStickerFromLibrary.GetChatId(), req.SendStickerFromLibrary.GetReplyToMessageId()); err != nil {
+			return nil, err
+		}
+		if !s.wa.IsConnected() {
+			return nil, fail("not_connected", "WhatsApp is not connected", true)
+		}
+		message, err := s.wa.SendStickerFromLibrary(s.ctx, req.SendStickerFromLibrary.GetClientMessageId(), req.SendStickerFromLibrary.GetChatId(), req.SendStickerFromLibrary.GetStickerId(), req.SendStickerFromLibrary.GetReplyToMessageId())
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fail("invalid_argument", "sticker_id was not found in the library", false)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_SendStickerFromLibrary{SendStickerFromLibrary: &bridgev1.SendStickerFromLibraryResponse{Message: s.wireMessage(message)}}, nil
 	case *bridgev1.RpcRequest_GetMessageImage:
 		if req.GetMessageImage.GetChatId() == "" || req.GetMessageImage.GetMessageId() == "" {
 			return nil, fail("invalid_argument", "chat_id and message_id are required", false)
@@ -687,6 +717,10 @@ func success(result any) *bridgev1.RpcResponse {
 		response.Result = value
 	case *bridgev1.RpcResponse_SendAttachment:
 		response.Result = value
+	case *bridgev1.RpcResponse_ListStickers:
+		response.Result = value
+	case *bridgev1.RpcResponse_SendStickerFromLibrary:
+		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageImage:
 		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageAttachment:
@@ -812,6 +846,26 @@ func wireMessage(m domain.Message) *bridgev1.Message {
 
 func (s *Server) wireMessage(m domain.Message) *bridgev1.Message {
 	return s.wireMessageWithIdentities(m, nil)
+}
+
+func wireSticker(sticker wa.Sticker) *bridgev1.Sticker {
+	return &bridgev1.Sticker{
+		Id: sticker.ID, LocalPath: sticker.LocalPath, MimeType: sticker.MIMEType, Animated: sticker.Animated,
+		Width: int32(sticker.Width), Height: int32(sticker.Height), Favorite: sticker.Favorite, LastUsedMs: sticker.LastUsedMs,
+		SourceChatId: sticker.SourceChatID, SourceMessageId: sticker.SourceMessageID,
+	}
+}
+
+func wireStickerLibrary(packs []wa.StickerLibraryPack) []*bridgev1.StickerPack {
+	wired := make([]*bridgev1.StickerPack, len(packs))
+	for i, pack := range packs {
+		stickers := make([]*bridgev1.Sticker, len(pack.Stickers))
+		for j, sticker := range pack.Stickers {
+			stickers[j] = wireSticker(sticker)
+		}
+		wired[i] = &bridgev1.StickerPack{Id: pack.ID, Name: pack.Name, Stickers: stickers}
+	}
+	return wired
 }
 
 type wireIdentity struct {
