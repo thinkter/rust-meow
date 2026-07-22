@@ -1200,6 +1200,23 @@ textarea:focus-visible,
   height: 100% !important;
 }
 
+.qr-expired {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: #3b4a54;
+  text-align: center;
+}
+
+.qr-expired span {
+  font-size: 13px;
+}
+
+.pairing-card .qr-expiry {
+  margin: -14px 0 20px;
+  font-size: 13px;
+}
+
 .pairing-steps {
   margin: 0;
   padding-left: 22px;

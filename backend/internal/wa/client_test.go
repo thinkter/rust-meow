@@ -1255,6 +1255,27 @@ func TestChatStateProjectionRetriesThenRunsOnlyOncePerProcess(t *testing.T) {
 	}
 }
 
+func TestStartPairingIsIdempotentWhileQRStreamIsActive(t *testing.T) {
+	emitted := make([]Event, 0, 1)
+	c := &Client{
+		pairing: true,
+		sink: func(event Event) {
+			emitted = append(emitted, event)
+		},
+	}
+
+	started, err := c.StartPairing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started {
+		t.Fatal("active pairing stream was reported as newly started")
+	}
+	if len(emitted) != 0 {
+		t.Fatalf("active pairing request emitted events: %+v", emitted)
+	}
+}
+
 func TestLogoutAlreadyRemoteLoggedOutStillClearsLocalData(t *testing.T) {
 	ctx := context.Background()
 	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))

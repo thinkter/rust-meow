@@ -206,12 +206,13 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		return &bridgev1.RpcResponse_AuthState{AuthState: &bridgev1.AuthStateResponse{Paired: s.wa.IsPaired(), LoggedIn: s.wa.IsConnected(), OwnUserId: s.wa.OwnID(), ConnectionState: authConnectionState(s.wa)}}, nil
 	case *bridgev1.RpcRequest_StartPairing:
 		if s.wa.IsPaired() {
-			return nil, fmt.Errorf("already paired")
+			return &bridgev1.RpcResponse_StartPairing{StartPairing: &bridgev1.StartPairingResponse{Started: false}}, nil
 		}
-		if err := s.wa.StartPairing(s.ctx); err != nil {
+		started, err := s.wa.StartPairing(s.ctx)
+		if err != nil {
 			return nil, err
 		}
-		return &bridgev1.RpcResponse_StartPairing{StartPairing: &bridgev1.StartPairingResponse{Started: true}}, nil
+		return &bridgev1.RpcResponse_StartPairing{StartPairing: &bridgev1.StartPairingResponse{Started: started}}, nil
 	case *bridgev1.RpcRequest_ListChats:
 		page, err := s.store.Chats(s.ctx, req.ListChats.GetCursor(), int(req.ListChats.GetLimit()))
 		if err != nil {

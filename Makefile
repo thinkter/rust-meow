@@ -61,6 +61,7 @@ backend-test:
 	cd backend && go test ./...
 
 tauri-test: deps
+	pnpm --dir $(TAURI_DIR) test
 	pnpm --dir $(TAURI_DIR) build
 	cd $(TAURI_CRATE_DIR) && cargo test --locked
 

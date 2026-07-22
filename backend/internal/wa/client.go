@@ -1107,24 +1107,24 @@ func (c *Client) avatarPath(jid types.JID) string {
 	return filepath.Join(c.avatarDir, name)
 }
 
-func (c *Client) StartPairing(ctx context.Context) error {
-	c.sink(Event{Kind: "connection", Detail: "pairing"})
+func (c *Client) StartPairing(ctx context.Context) (bool, error) {
 	c.pairingMu.Lock()
 	if c.pairing {
 		c.pairingMu.Unlock()
-		return nil
+		return false, nil
 	}
 	c.pairing = true
 	c.pairingMu.Unlock()
+	c.sink(Event{Kind: "connection", Detail: "pairing"})
 	qr, err := c.wa.GetQRChannel(ctx)
 	if err != nil {
 		c.finishPairing()
-		return err
+		return false, err
 	}
 	if !c.wa.IsConnected() {
 		if err = c.wa.ConnectContext(ctx); err != nil {
 			c.finishPairing()
-			return err
+			return false, err
 		}
 	}
 	go func() {
@@ -1148,7 +1148,7 @@ func (c *Client) StartPairing(ctx context.Context) error {
 			}
 		}
 	}()
-	return nil
+	return true, nil
 }
 func (c *Client) finishPairing() { c.pairingMu.Lock(); c.pairing = false; c.pairingMu.Unlock() }
 

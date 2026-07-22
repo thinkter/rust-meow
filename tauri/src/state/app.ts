@@ -15,6 +15,7 @@ import {
   type Reaction,
   type SearchResults,
 } from "../lib/types";
+import { pairingStartupDecision } from "./pairing";
 
 export type Screen = "starting" | "pairing" | "chats" | "fatal";
 export type ChatFilter = "all" | "unread" | "groups" | "archived";
@@ -183,12 +184,12 @@ export function createAppModel() {
         setState("connection", auth.connectionState);
         setState("ownUserId", auth.ownUserId);
       });
-      if (!auth.paired || !auth.loggedIn) {
-        setState("screen", "pairing");
+      const pairing = pairingStartupDecision(auth);
+      setState("screen", pairing.screen);
+      if (pairing.startPairing) {
         await bridge.startPairing();
         return;
       }
-      setState("screen", "chats");
       await loadChats(true);
     } catch (error) {
       fatal(normalizeBridgeError(error).message);
@@ -197,11 +198,21 @@ export function createAppModel() {
 
   async function refreshPairing() {
     try {
-      batch(() => {
-        setState("qrCode", "");
-        setState("qrExpiresAtMs", 0);
-      });
-      await bridge.startPairing();
+      const response = await bridge.startPairing();
+      if (response.started) return;
+      const auth = await bridge.getAuthState();
+      if (auth.paired) {
+        batch(() => {
+          setState("connection", auth.connectionState);
+          setState("ownUserId", auth.ownUserId);
+          setState("screen", "chats");
+          setState("qrCode", "");
+          setState("qrExpiresAtMs", 0);
+        });
+        await loadChats(true);
+        return;
+      }
+      toast("Pairing is already active. A fresh QR code will appear automatically.", "info");
     } catch (error) {
       toast(normalizeBridgeError(error).message);
     }
@@ -766,8 +777,15 @@ export function createAppModel() {
         batch(() => {
           setState("connection", event.payload.state);
           setState("connectionDetail", event.payload.detail);
-          if (event.payload.state === ConnectionState.LoggedOut) setState("screen", "pairing");
-          else if (event.payload.state === ConnectionState.Connected) setState("screen", "chats");
+          if (event.payload.state === ConnectionState.LoggedOut) {
+            setState("screen", "pairing");
+            setState("qrCode", "");
+            setState("qrExpiresAtMs", 0);
+          } else if (event.payload.state === ConnectionState.Connected) {
+            setState("screen", "chats");
+            setState("qrCode", "");
+            setState("qrExpiresAtMs", 0);
+          }
         });
         if (event.payload.state === ConnectionState.Connected) void loadChats(true);
         break;

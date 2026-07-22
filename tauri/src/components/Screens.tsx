@@ -9,6 +9,7 @@ import {
   X,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
+import { qrPresentation } from "../state/pairing";
 import { assetUrl, bridge } from "../lib/bridge";
 import { IconButton, Spinner } from "./Primitives";
 
@@ -28,6 +29,10 @@ export function StartupScreen() {
 export function PairingScreen(props: { model: AppModel }) {
   const { state, actions } = props.model;
   const [canvas, setCanvas] = createSignal<HTMLCanvasElement>();
+  const [now, setNow] = createSignal(Date.now());
+  const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+  onCleanup(() => window.clearInterval(timer));
+  const qr = () => qrPresentation(state.qrCode, state.qrExpiresAtMs, now());
   createEffect(() => {
     const target = canvas();
     if (!target || !state.qrCode) return;
@@ -44,8 +49,27 @@ export function PairingScreen(props: { model: AppModel }) {
         <LockKeyhole size={38} color="var(--accent-bright)" />
         <h2>Link Rust Meow to WhatsApp</h2>
         <p>Your session and message cache stay on this computer.</p>
-        <Show when={state.qrCode} fallback={<div class="qr-frame"><Spinner label="Waiting for a QR code" /></div>}>
+        <Show
+          when={qr().phase === "active"}
+          fallback={
+            <div class="qr-frame">
+              <Show
+                when={qr().phase === "expired"}
+                fallback={<Spinner label="Waiting for a QR code" />}
+              >
+                <div role="status" class="qr-expired">
+                  <CircleAlert size={24} />
+                  <strong>QR code expired</strong>
+                  <span>Waiting for a fresh code…</span>
+                </div>
+              </Show>
+            </div>
+          }
+        >
           <div class="qr-frame"><canvas ref={setCanvas} aria-label="WhatsApp pairing QR code" /></div>
+        </Show>
+        <Show when={qr().phase === "active" && qr().secondsRemaining > 0}>
+          <p class="qr-expiry">This code refreshes in {qr().secondsRemaining} seconds.</p>
         </Show>
         <ol class="pairing-steps">
           <li>Open WhatsApp on your phone.</li>
