@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
@@ -1909,6 +1910,14 @@ func (c *Client) thumbnailPath(chatID, messageID string) string {
 	return filepath.Join(c.mediaDir, name)
 }
 
+// favoriteStickerPath is keyed the same way mediaPath is (a hash of an
+// identifier, never the identifier itself) so a favourite ID of unexpected
+// shape can never influence the on-disk file name.
+func (c *Client) favoriteStickerPath(id, mimeType string) string {
+	name := fmt.Sprintf("fav-%x%s", sha256.Sum256([]byte(id)), imageExtension(mimeType))
+	return filepath.Join(c.mediaDir, name)
+}
+
 func validCachedImage(path string) bool {
 	stat, err := os.Lstat(path)
 	if err != nil || !stat.Mode().IsRegular() || stat.Size() <= 0 || stat.Size() > maxImageBytes {
@@ -2027,6 +2036,16 @@ func (c *Client) cachedImagePaths(chatID, messageID, mimeType string, generateTh
 
 func (c *Client) CachedImagePaths(chatID, messageID, mimeType string) (string, string) {
 	return c.cachedImagePaths(chatID, messageID, mimeType, false)
+}
+
+// CachedFavoriteStickerPath returns the on-disk path for a favourite that has
+// already been downloaded, or "" if it has not (or the cache evicted it).
+func (c *Client) CachedFavoriteStickerPath(id, mimeType string) string {
+	path := c.favoriteStickerPath(id, mimeType)
+	if !validCachedImage(path) {
+		return ""
+	}
+	return path
 }
 
 func (c *Client) cacheImageBytes(chatID, messageID, mimeType string, data []byte) (string, string, error) {
@@ -2246,6 +2265,156 @@ func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data 
 	err = c.store.ApplyMessage(ctx, pending, false)
 	c.emitChat(chatID)
 	return pending, err
+}
+
+// Sticker is one entry in the assembled sticker library returned by
+// StickerLibrary, already resolved against the local media cache.
+type Sticker struct {
+	ID              string
+	LocalPath       string
+	MIMEType        string
+	Animated        bool
+	Width, Height   uint32
+	Favorite        bool
+	LastUsedMs      int64
+	SourceChatID    string
+	SourceMessageID string
+}
+
+// StickerLibraryPack is one named group of stickers (favourites/recent/all).
+type StickerLibraryPack struct {
+	ID, Name string
+	Stickers []Sticker
+}
+
+const stickerPackLimit = 300
+
+// StickerLibrary assembles the user's reusable stickers from the sources
+// that are actually available to a linked-device client: stickers already
+// present in local message history (both received and sent), the account's
+// WhatsApp-favourited stickers synced through app-state, and a "recently
+// used" pack derived from the desktop's own outgoing sticker history.
+//
+// A synced "recently used" list is not reconstructable: WhatsApp's
+// removeRecentSticker app-state index only ever carries a removal marker,
+// never the sticker it refers to or a positive "used" event, so there is no
+// server-provided list to read here. The "recent" pack is therefore local
+// only, derived from this client's own outgoing sticker messages ordered by
+// time; a sticker used only on the phone or another linked device will not
+// appear in it.
+//
+// Entries are not force-downloaded: LocalPath is empty until a caller
+// requests the bytes (via SendStickerFromLibrary, or the desktop hydrating a
+// visible tray cell through GetMessageImage/a future dedicated download
+// call), matching how ordinary image and attachment messages already behave
+// in this codebase.
+func (c *Client) StickerLibrary(ctx context.Context) ([]StickerLibraryPack, error) {
+	favorites, err := c.store.FavoriteStickers(ctx, stickerPackLimit)
+	if err != nil {
+		return nil, err
+	}
+	favoritePack := make([]Sticker, len(favorites))
+	// Favourites are keyed by hex(FileEncSHA256) (WhatsApp never syncs a
+	// favourite's plaintext hash) while history entries are keyed by
+	// hex(FileSHA256), so this membership check is best-effort: the same
+	// sticker favourited on the phone and also present in chat history can
+	// legitimately carry two different IDs and therefore not cross-mark here.
+	favoriteIDs := make(map[string]bool, len(favorites))
+	for i, fav := range favorites {
+		favoriteIDs[fav.ID] = true
+		favoritePack[i] = Sticker{
+			ID: fav.ID, LocalPath: c.CachedFavoriteStickerPath(fav.ID, fav.MIMEType), MIMEType: fav.MIMEType,
+			Animated: fav.Animated, Width: fav.Width, Height: fav.Height, Favorite: true, LastUsedMs: fav.UpdatedAtMs,
+		}
+	}
+	candidates, err := c.store.RecentStickerMessages(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	allPack := make([]Sticker, 0, min(len(candidates), stickerPackLimit))
+	recentPack := make([]Sticker, 0, min(len(candidates), stickerPackLimit))
+	seenAll := make(map[string]bool, len(candidates))
+	seenRecent := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if len(allPack) >= stickerPackLimit && len(recentPack) >= stickerPackLimit {
+			break
+		}
+		if len(allPack) < stickerPackLimit && !seenAll[candidate.ID] {
+			seenAll[candidate.ID] = true
+			allPack = append(allPack, c.wireStickerCandidate(candidate, favoriteIDs[candidate.ID]))
+		}
+		if candidate.FromMe && len(recentPack) < stickerPackLimit && !seenRecent[candidate.ID] {
+			seenRecent[candidate.ID] = true
+			recentPack = append(recentPack, c.wireStickerCandidate(candidate, favoriteIDs[candidate.ID]))
+		}
+	}
+	return []StickerLibraryPack{
+		{ID: "favorites", Name: "Favourites", Stickers: favoritePack},
+		{ID: "recent", Name: "Recently used", Stickers: recentPack},
+		{ID: "all", Name: "From your chats", Stickers: allPack},
+	}, nil
+}
+
+func (c *Client) wireStickerCandidate(candidate domain.StickerCandidate, favorite bool) Sticker {
+	localPath, _ := c.CachedImagePaths(candidate.ChatJID, candidate.MessageID, candidate.MIMEType)
+	return Sticker{
+		ID: candidate.ID, LocalPath: localPath, MIMEType: candidate.MIMEType, Animated: candidate.Animated,
+		Width: candidate.Width, Height: candidate.Height, Favorite: favorite, LastUsedMs: candidate.TimestampMs,
+		SourceChatID: candidate.ChatJID, SourceMessageID: candidate.MessageID,
+	}
+}
+
+// SendStickerFromLibrary resends an already-known sticker's cached bytes
+// without the client-side create-a-sticker-from-image pipeline: it resolves
+// the sticker by ID (a WhatsApp favourite or a message already in local
+// history), downloading it into the cache first if necessary, then hands the
+// plaintext bytes to SendSticker so upload, validation, and the
+// client_message_id idempotency contract all stay in one place.
+func (c *Client) SendStickerFromLibrary(ctx context.Context, clientID, chatID, stickerID, replyToID string) (domain.Message, error) {
+	data, err := c.stickerLibraryBytes(ctx, stickerID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	return c.SendSticker(ctx, clientID, chatID, data, replyToID)
+}
+
+func (c *Client) stickerLibraryBytes(ctx context.Context, stickerID string) ([]byte, error) {
+	favorite, err := c.store.FavoriteSticker(ctx, stickerID)
+	if err == nil {
+		path, downloadErr := c.DownloadFavoriteSticker(ctx, favorite.ID)
+		if downloadErr != nil {
+			return nil, downloadErr
+		}
+		return readCappedImageFile(path)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	chatID, messageID, _, err := c.store.StickerMessageBySHA256(ctx, stickerID)
+	if err != nil {
+		return nil, err
+	}
+	path, _, err := c.DownloadImage(ctx, chatID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	return readCappedImageFile(path)
+}
+
+func readCappedImageFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || len(data) > maxImageBytes {
+		return nil, fmt.Errorf("cached sticker has invalid size")
+	}
+	return data, nil
 }
 
 func attachmentMediaType(kind string) (whatsmeow.MediaType, error) {
@@ -2547,6 +2716,70 @@ func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (s
 	}
 	c.pruneMediaCache(mediaCacheBytes)
 	return path, thumbnailPath, nil
+}
+
+// DownloadFavoriteSticker fetches and caches a WhatsApp-favourited sticker
+// that has no local message of its own. whatsmeow's StickerAction lacks
+// GetFileSHA256 (WhatsApp never syncs a favourite's plaintext content hash),
+// so it cannot satisfy the whatsmeow.DownloadableMessage interface that
+// DownloadImage relies on; this calls the lower-level path-based download
+// directly instead, with the same bounded-file and size-limit discipline.
+func (c *Client) DownloadFavoriteSticker(ctx context.Context, id string) (string, error) {
+	fav, err := c.store.FavoriteSticker(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	path := c.favoriteStickerPath(fav.ID, fav.MIMEType)
+	if validCachedImage(path) {
+		if fav.LocalPath != path {
+			_ = c.store.SetFavoriteStickerLocalPath(ctx, id, path)
+		}
+		return path, nil
+	}
+	if fav.DirectPath == "" || len(fav.MediaKey) == 0 {
+		return "", fmt.Errorf("favourite sticker is not downloadable")
+	}
+	if fav.FileSize > uint64(maxImageBytes) {
+		return "", errImageDownloadLimit
+	}
+	if err = os.MkdirAll(c.mediaDir, 0o700); err != nil {
+		return "", err
+	}
+	temporary, err := os.CreateTemp(c.mediaDir, ".favorite-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return "", err
+	}
+	bounded := &boundedFile{File: temporary, maxSize: maxImageDownloadBytes, limitErr: errImageDownloadLimit}
+	downloadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	err = c.wa.DownloadMediaWithPathToFile(downloadCtx, fav.DirectPath, fav.FileEncSHA256, nil, fav.MediaKey, whatsmeow.MediaImage, "", true, bounded)
+	cancel()
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("download favourite sticker: %w", err)
+	}
+	stat, err := os.Stat(temporaryPath)
+	if err != nil || stat.Size() <= 0 || stat.Size() > maxImageBytes {
+		return "", fmt.Errorf("downloaded favourite sticker has invalid size")
+	}
+	if _, err = safeImageFile(temporaryPath); err != nil {
+		return "", fmt.Errorf("downloaded favourite sticker is unsafe: %w", err)
+	}
+	if err = os.Rename(temporaryPath, path); err != nil {
+		return "", err
+	}
+	if err = c.store.SetFavoriteStickerLocalPath(ctx, id, path); err != nil {
+		return "", err
+	}
+	c.pruneMediaCache(mediaCacheBytes)
+	return path, nil
 }
 
 type boundedFile struct {
@@ -3302,6 +3535,48 @@ func (c *Client) handleEvent(source *whatsmeow.Client, sourceGeneration uint64, 
 			delete(c.negativeAvatars, jid.String())
 			c.negativeAvatarMu.Unlock()
 		}
+	case *events.AppState:
+		c.enqueue(func() { c.reduceFavoriteSticker(evt) })
+	}
+}
+
+// reduceFavoriteSticker applies a `favoriteSticker` app-state mutation
+// synced from another linked device. whatsmeow has no higher-level event for
+// this action (unlike Mute/Pin/Star/...), so it only ever arrives through
+// the low-level events.AppState catch-all; see StickerAction's doc comment
+// on domain.FavoriteSticker for why the ID is hex(FileEncSHA256) rather than
+// the plaintext content hash used for history-derived stickers.
+func (c *Client) reduceFavoriteSticker(evt *events.AppState) {
+	if len(evt.Index) == 0 || evt.Index[0] != appstate.IndexFavoriteSticker {
+		return
+	}
+	action := evt.GetStickerAction()
+	if action == nil || len(action.GetFileEncSHA256()) == 0 {
+		return
+	}
+	id := hex.EncodeToString(action.GetFileEncSHA256())
+	var changed bool
+	if action.GetIsFavorite() {
+		err := c.store.UpsertFavoriteSticker(c.ctx, domain.FavoriteSticker{
+			ID: id, MIMEType: action.GetMimetype(), DirectPath: action.GetDirectPath(), MediaKey: action.GetMediaKey(),
+			FileEncSHA256: action.GetFileEncSHA256(), Width: action.GetWidth(), Height: action.GetHeight(),
+			Animated: action.GetIsLottie(), FileSize: action.GetFileLength(), UpdatedAtMs: evt.GetTimestamp(),
+		})
+		if err != nil {
+			c.log.Error("record favourite sticker", "error", err)
+			return
+		}
+		changed = true
+	} else {
+		var err error
+		changed, err = c.store.RemoveFavoriteSticker(c.ctx, id)
+		if err != nil {
+			c.log.Error("remove favourite sticker", "error", err)
+			return
+		}
+	}
+	if changed {
+		c.sink(Event{Kind: "stickers"})
 	}
 }
 

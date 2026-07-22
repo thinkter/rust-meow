@@ -3,6 +3,7 @@ package wa
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"image"
@@ -2115,5 +2116,113 @@ func TestValidateAvatarURLRequiresHTTPS(t *testing.T) {
 	}
 	if err := validateAvatarURL("https://example.com/a.jpg"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReduceFavoriteStickerUpsertsAndRemovesOnAppStateSync(t *testing.T) {
+	ctx := context.Background()
+	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	var emitted []Event
+	c := &Client{ctx: ctx, store: productStore, sink: func(event Event) { emitted = append(emitted, event) }, log: slog.Default()}
+
+	favoriteAppState := func(favorite bool) *events.AppState {
+		return &events.AppState{
+			Index: []string{appstate.IndexFavoriteSticker, "opaque-whatsapp-key"},
+			SyncActionValue: &waSyncAction.SyncActionValue{
+				Timestamp: proto.Int64(1_700_000_000_000),
+				StickerAction: &waSyncAction.StickerAction{
+					FileEncSHA256: []byte("enc-hash-bytes-000000000000000"),
+					MediaKey:      []byte("media-key"),
+					Mimetype:      proto.String("image/webp"),
+					Height:        proto.Uint32(512),
+					Width:         proto.Uint32(512),
+					DirectPath:    proto.String("/v/t1/abc"),
+					FileLength:    proto.Uint64(2048),
+					IsFavorite:    proto.Bool(favorite),
+				},
+			},
+		}
+	}
+	stickerID := fmt.Sprintf("%x", []byte("enc-hash-bytes-000000000000000"))
+
+	c.reduceFavoriteSticker(favoriteAppState(true))
+	fav, err := productStore.FavoriteSticker(ctx, stickerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fav.MIMEType != "image/webp" || fav.Width != 512 || fav.DirectPath != "/v/t1/abc" {
+		t.Fatalf("stored favourite = %+v", fav)
+	}
+	if len(emitted) != 1 || emitted[0].Kind != "stickers" {
+		t.Fatalf("emitted = %+v, want one stickers-changed event", emitted)
+	}
+
+	// An index that isn't the favouriteSticker mutation must be ignored, not
+	// crash on a StickerAction that doesn't exist.
+	c.reduceFavoriteSticker(&events.AppState{Index: []string{"mute", "123@s.whatsapp.net"}, SyncActionValue: &waSyncAction.SyncActionValue{}})
+	if len(emitted) != 1 {
+		t.Fatalf("unrelated app-state mutation should not emit: %+v", emitted)
+	}
+
+	c.reduceFavoriteSticker(favoriteAppState(false))
+	if _, err = productStore.FavoriteSticker(ctx, stickerID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("err=%v, want sql.ErrNoRows after unfavourite", err)
+	}
+	if len(emitted) != 2 || emitted[1].Kind != "stickers" {
+		t.Fatalf("emitted = %+v, want a second stickers-changed event", emitted)
+	}
+}
+
+func TestStickerLibraryAssemblesFavoritesRecentAndAllPacks(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+
+	hashMine := bytes.Repeat([]byte{0x33}, 32)
+	hashTheirs := bytes.Repeat([]byte{0x44}, 32)
+	messages := []domain.Message{
+		{ID: "s1", ChatJID: "111@s.whatsapp.net", Kind: "sticker", Timestamp: time.Unix(10, 0), FromMe: true,
+			Image: &domain.Image{MIMEType: "image/webp", FileSHA256: hashMine, Width: 512, Height: 512}},
+		{ID: "s2", ChatJID: "111@s.whatsapp.net", Kind: "sticker", Timestamp: time.Unix(20, 0), FromMe: false,
+			Image: &domain.Image{MIMEType: "image/webp", FileSHA256: hashTheirs, Width: 256, Height: 256}},
+	}
+	if err = productStore.ApplyMessages(ctx, messages, false); err != nil {
+		t.Fatal(err)
+	}
+	fav := domain.FavoriteSticker{ID: "favhash", MIMEType: "image/webp", DirectPath: "/v/t1/x", MediaKey: []byte("k"), FileEncSHA256: []byte("e"), Width: 100, Height: 100, UpdatedAtMs: 5}
+	if err = productStore.UpsertFavoriteSticker(ctx, fav); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &Client{store: productStore, mediaDir: filepath.Join(directory, "media")}
+	packs, err := client.StickerLibrary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]StickerLibraryPack, len(packs))
+	for _, pack := range packs {
+		byID[pack.ID] = pack
+	}
+	favorites, recent, all := byID["favorites"], byID["recent"], byID["all"]
+	if len(favorites.Stickers) != 1 || favorites.Stickers[0].ID != fav.ID || !favorites.Stickers[0].Favorite {
+		t.Fatalf("favorites pack = %+v", favorites.Stickers)
+	}
+	if len(all.Stickers) != 2 {
+		t.Fatalf("all pack = %+v, want 2 distinct history stickers", all.Stickers)
+	}
+	if all.Stickers[0].SourceMessageID != "s2" {
+		t.Fatalf("all pack not newest-first: %+v", all.Stickers)
+	}
+	// Only the FromMe sticker qualifies for the locally-derived recent pack.
+	if len(recent.Stickers) != 1 || recent.Stickers[0].SourceMessageID != "s1" {
+		t.Fatalf("recent pack = %+v, want only s1 (sent by me)", recent.Stickers)
 	}
 }
