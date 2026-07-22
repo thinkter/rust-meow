@@ -65,10 +65,38 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
     actions.moveTab(payload.chatId, payload.fromPaneId, props.pane.id, index);
   }
 
+  function moveKeyboardFocus(event: KeyboardEvent, currentChatId: string) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return false;
+    const tabs = props.pane.tabChatIds;
+    if (tabs.length === 0) return true;
+    const current = Math.max(0, tabs.indexOf(currentChatId));
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? tabs.length - 1
+          : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    const nextChatId = tabs[nextIndex];
+    if (nextChatId) {
+      void actions.selectChat(nextChatId, "", props.pane.id);
+      requestAnimationFrame(() => {
+        (event.currentTarget as HTMLElement)
+          .closest(".tab-strip")
+          ?.querySelectorAll<HTMLElement>("[role=tab]")
+          .item(nextIndex)
+          ?.focus();
+      });
+    }
+    event.preventDefault();
+    return true;
+  }
+
   return (
     <Show when={preferences.showTabBar}>
       <div
         class="tab-strip"
+        role="tablist"
+        aria-label={`Open chats in ${props.pane.id === state.focusedPaneId ? "focused" : "secondary"} pane`}
         onDragOver={(event) => event.preventDefault()}
         onDrop={(event) => handleDrop(event, props.pane.tabChatIds.length)}
       >
@@ -82,7 +110,8 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
               <div
                 class={`tab ${active() ? "active" : ""}`}
                 role="tab"
-                tabIndex={0}
+                tabIndex={active() ? 0 : -1}
+                data-chat-id={chatId}
                 aria-selected={active()}
                 draggable
                 onDragStart={(event) => {
@@ -102,6 +131,7 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
                 }}
                 onClick={() => void actions.selectChat(chatId, "", props.pane.id)}
                 onKeyDown={(event) => {
+                  if (moveKeyboardFocus(event, chatId)) return;
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
                     void actions.selectChat(chatId, "", props.pane.id);

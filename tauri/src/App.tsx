@@ -1,6 +1,8 @@
 import { For, onCleanup, onMount, Show } from "solid-js";
 import {
   Archive,
+  PanelLeftClose,
+  PanelLeftOpen,
   MessageCircle,
   Settings,
   ShieldCheck,
@@ -9,7 +11,6 @@ import { createAppModel } from "./state/app";
 import { Sidebar } from "./components/Sidebar";
 import { Conversation } from "./components/Conversation";
 import { TitleBar } from "./components/TitleBar";
-import { Tabs } from "./components/Tabs";
 import { MemberPanel } from "./components/MemberPanel";
 import { ChatSwitcher } from "./components/ChatSwitcher";
 import { ChatInfoPanel, SettingsPanel } from "./components/Panels";
@@ -65,7 +66,7 @@ export default function App() {
       <Show when={state.screen === "fatal"}><FatalScreen model={model} /></Show>
       <Show when={state.screen === "chats"}>
         <main
-          class="app-shell"
+          class={`app-shell ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""}`}
           inert={Boolean(state.logoutConfirmation || state.imageViewer)}
           aria-hidden={state.logoutConfirmation || state.imageViewer ? "true" : undefined}
         >
@@ -85,6 +86,15 @@ export default function App() {
               onClick={() => actions.setFilter("archived")}
             >
               <Archive size={20} />
+            </IconButton>
+            <IconButton
+              label={preferences.sidebarCollapsed ? "Show chat list" : "Hide chat list"}
+              active={!preferences.sidebarCollapsed}
+              onClick={() => prefActions.update("sidebarCollapsed", !preferences.sidebarCollapsed)}
+            >
+              <Show when={preferences.sidebarCollapsed} fallback={<PanelLeftClose size={20} />}>
+                <PanelLeftOpen size={20} />
+              </Show>
             </IconButton>
             <div class="nav-spacer" />
             <IconButton label="Privacy architecture" onClick={() => actions.toggleSettings(true)}>
@@ -106,7 +116,6 @@ export default function App() {
                       onPointerDown={() => actions.focusPane(pane.id)}
                       onFocusIn={() => actions.focusPane(pane.id)}
                     >
-                      <Tabs model={model} pane={pane} />
                       <Show when={pane.activeChatId} fallback={<EmptyConversation />}>
                         <Conversation model={model} chatId={pane.activeChatId} paneId={pane.id} />
                       </Show>

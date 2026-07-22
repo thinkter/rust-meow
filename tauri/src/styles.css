@@ -129,6 +129,14 @@ a:focus-visible,
   letter-spacing: 0.2px;
 }
 
+.titlebar-brand .brand-mark {
+  width: calc(22px * var(--scale));
+  height: calc(22px * var(--scale));
+  margin: 0;
+  border-radius: var(--radius-sm);
+  font-size: calc(11px * var(--scale));
+}
+
 .titlebar-controls {
   display: flex;
   flex: none;
@@ -251,6 +259,25 @@ a:focus-visible,
   scrollbar-width: none;
 }
 
+/* In normal operation the focused pane's strip is the centre of the custom
+   title bar. Keep a small genuine drag surface beside it so tabs never turn
+   window dragging into a hit-target guessing exercise. */
+.titlebar > .tab-strip {
+  min-height: 0;
+  flex: 4 1 auto;
+  padding-top: calc(4px * var(--scale));
+  border-bottom: 0;
+  background: transparent;
+}
+
+.titlebar > .tab-strip .tab {
+  min-width: calc(112px * var(--scale));
+}
+
+.titlebar > .tab-strip + .tab-strip {
+  border-left: 1px solid var(--border);
+}
+
 .tab-strip::-webkit-scrollbar {
   display: none;
 }
@@ -364,6 +391,14 @@ a:focus-visible,
   grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
   grid-template-columns: calc(56px * var(--scale)) minmax(260px, calc(300px * var(--scale))) minmax(0, 1fr);
   background: var(--bg-app);
+}
+
+.app-shell.sidebar-collapsed {
+  grid-template-columns: calc(56px * var(--scale)) 0 minmax(0, 1fr);
+}
+
+.app-shell.sidebar-collapsed .sidebar {
+  display: none;
 }
 
 .app-shell > .titlebar {
@@ -2762,5 +2797,155 @@ html[data-battery-saver="true"] .modal-backdrop {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* The member dock is useful at desktop widths, but stealing another 200px
+   from a two-pane conversation below notebook width produces unreadable
+   message columns. Chat info remains available from the conversation header. */
+@media (max-width: 1120px) {
+  .member-panel {
+    display: none;
+  }
+}
+
+/* A split remains logically intact at compact widths, while only its focused
+   pane is rendered. Focusing a tab in the title bar changes which pane is
+   visible without destroying either pane's tab collection or scroll state. */
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: calc(52px * var(--scale)) minmax(230px, calc(268px * var(--scale))) minmax(0, 1fr);
+  }
+
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: calc(52px * var(--scale)) 0 minmax(0, 1fr);
+  }
+
+  .pane:not(.pane-focused),
+  .pane-divider {
+    display: none;
+  }
+
+  .message-row {
+    padding-right: clamp(14px, 3vw, 32px);
+    padding-left: clamp(14px, 3vw, 32px);
+  }
+
+  .unread-separator {
+    right: clamp(14px, 3vw, 32px);
+    left: clamp(14px, 3vw, 32px);
+  }
+}
+
+/* Phone-sized browser QA and narrow snapped desktop windows use the chat list
+   as a drawer. Selecting a chat collapses it in Sidebar.tsx; the compact back
+   button restores it, so both surfaces remain keyboard and pointer reachable. */
+@media (max-width: 760px) {
+  .app-shell,
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: calc(48px * var(--scale)) 0 minmax(0, 1fr);
+  }
+
+  .nav-rail {
+    padding-top: calc(8px * var(--scale));
+  }
+
+  .sidebar {
+    position: absolute;
+    top: var(--titlebar-height);
+    bottom: 0;
+    left: calc(48px * var(--scale));
+    z-index: 25;
+    display: flex;
+    width: min(calc(320px * var(--scale)), calc(100vw - 48px * var(--scale)));
+    box-shadow: var(--shadow-lg);
+  }
+
+  .sidebar-collapsed .sidebar {
+    display: none;
+  }
+
+  .compact-back {
+    display: inline-grid;
+  }
+
+  .titlebar-brand > span:last-child {
+    display: none;
+  }
+
+  .titlebar-brand {
+    padding-right: calc(6px * var(--scale));
+    padding-left: calc(8px * var(--scale));
+  }
+
+  .titlebar-drag {
+    min-width: calc(18px * var(--scale));
+  }
+
+  .titlebar-controls .icon-button,
+  .window-button:first-of-type {
+    display: none;
+  }
+
+  .window-button {
+    width: calc(38px * var(--scale));
+  }
+
+  .conversation-header {
+    padding: 0 calc(8px * var(--scale));
+  }
+
+  .message-bubble {
+    max-width: min(560px, 88%);
+  }
+
+  .settings-panel,
+  .right-panel {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .settings-nav {
+    width: calc(132px * var(--scale));
+    min-width: calc(112px * var(--scale));
+  }
+
+  .setting-row,
+  .path-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .segmented-control {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 520px) {
+  .titlebar > .tab-strip .tab {
+    min-width: calc(96px * var(--scale));
+  }
+
+  .tab-avatar,
+  .tab-badge {
+    display: none;
+  }
+
+  .settings-panel {
+    flex-direction: column;
+  }
+
+  .settings-nav {
+    width: 100%;
+    min-width: 0;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .settings-nav-item {
+    min-width: max-content;
   }
 }

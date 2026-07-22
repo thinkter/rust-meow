@@ -171,7 +171,7 @@ function FilterButton(props: { filter: ChatFilter; label: string; model: AppMode
 }
 
 function ChatRow(props: { chat: Chat; model: AppModel }) {
-  const { state, actions, preferences } = props.model;
+  const { state, actions, preferences, prefActions } = props.model;
   const typing = () => actions.typingLabel(props.chat.id);
   // A chat counts as open when any pane holds it, not only the focused one.
   const open = () => state.panes.some((pane) => pane.activeChatId === props.chat.id);
@@ -186,6 +186,9 @@ function ChatRow(props: { chat: Chat; model: AppModel }) {
         // Ctrl/Cmd-click matches the browser convention the tab strip sets up.
         if (event.ctrlKey || event.metaKey) actions.openInNewTab(props.chat.id);
         else void actions.selectChat(props.chat.id);
+        if (window.matchMedia("(max-width: 760px)").matches) {
+          prefActions.update("sidebarCollapsed", true);
+        }
       }}
       onAuxClick={(event) => {
         if (event.button !== 1) return;

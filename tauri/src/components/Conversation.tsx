@@ -184,7 +184,11 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
   return (
     <section class="conversation-shell" aria-label={chat()?.title || "Conversation"}>
       <header class="conversation-header">
-        <IconButton label="Back to chats" class="compact-back" onClick={() => actions.closeTab(props.chatId)}>
+        <IconButton
+          label="Back to chats"
+          class="compact-back"
+          onClick={() => props.model.prefActions.update("sidebarCollapsed", false)}
+        >
           <ArrowLeft size={21} />
         </IconButton>
         <Show

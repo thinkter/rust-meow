@@ -108,7 +108,7 @@ invent new top-level classes without adding them here.
 **Tabs** `.tab-strip` `.tab` `.tab.active` `.tab-avatar` `.tab-title`
 `.tab-badge` `.tab-close` `.tab-add`
 
-**Shell** `.app-shell` `.nav-rail` `.nav-spacer` `.brand-mark` `.workspace`
+**Shell** `.app-shell` `.app-shell.sidebar-collapsed` `.nav-rail` `.nav-spacer` `.brand-mark` `.workspace`
 `.pane-group` `.pane` `.pane-focused` `.pane-divider`
 
 **Sidebar** `.sidebar` `.sidebar-header` `.sidebar-title` `.sidebar-search-wrap`

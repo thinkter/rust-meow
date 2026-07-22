@@ -514,6 +514,14 @@ export function SettingsPanel(props: { model: AppModel }) {
                 />
               </div>
               <div class="setting-row">
+                <span class="setting-copy"><strong>Show chat list</strong><span>Keep the chat list docked beside the workspace</span></span>
+                <Toggle
+                  checked={!preferences.sidebarCollapsed}
+                  label="Show chat list"
+                  onChange={(value) => prefActions.update("sidebarCollapsed", !value)}
+                />
+              </div>
+              <div class="setting-row">
                 <span class="setting-copy"><strong>Always show member list</strong><span>Keep the member list docked open for group chats</span></span>
                 <Toggle
                   checked={preferences.memberPanelOpen}
@@ -534,7 +542,14 @@ export function SettingsPanel(props: { model: AppModel }) {
                 <Toggle
                   checked={preferences.splitView}
                   label="Split view"
-                  onChange={(value) => prefActions.update("splitView", value)}
+                  onChange={(value) => {
+                    if (value && state.panes.length < 2) actions.splitPane();
+                    if (!value && state.panes.length >= 2) {
+                      const secondary = state.panes.find((pane) => pane.id !== state.focusedPaneId);
+                      if (secondary) actions.closePane(secondary.id);
+                    }
+                    prefActions.update("splitView", value);
+                  }}
                 />
               </div>
             </section>

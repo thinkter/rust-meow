@@ -3,6 +3,7 @@ import { Columns2, Minus, Square, X } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import { browserMockEnabled } from "../lib/bridge";
 import { IconButton } from "./Primitives";
+import { Tabs } from "./Tabs";
 
 /**
  * The eight literal directions `Window.startResizeDragging` accepts. The
@@ -41,11 +42,10 @@ const RESIZE_HANDLES: ReadonlyArray<{ cls: string; direction: ResizeDirection }>
  * `@tauri-apps/api/window` handle, guarded by `browserMockEnabled`, because
  * the browser dev mock has no `__TAURI_INTERNALS__` to call into.
  *
- * Per-pane tab strips live inside `.pane` (see `Tabs.tsx` and `App.tsx`),
- * not here — with up to two panes there is no single, unambiguous tab strip
- * to hoist into this bar, and `.pane` already lays out as a flex column with
- * exactly that slot at its top. This bar keeps the split-view toggle, since
- * that acts on the whole workspace rather than one pane.
+ * Each pane's tabs live directly in this bar, replacing the OS title bar
+ * instead of consuming another row of conversation space. In split view the
+ * two strips sit side by side, so neither pane's navigation disappears just
+ * because focus moved across the divider.
  */
 export function TitleBar(props: { model: AppModel }) {
   const { state, actions, prefActions } = props.model;
@@ -150,8 +150,12 @@ export function TitleBar(props: { model: AppModel }) {
     <>
       <header class="titlebar">
         <div class="titlebar-brand" aria-hidden="true">
+          <span class="brand-mark">M</span>
           <span>Rust Meow</span>
         </div>
+        <Show when={state.screen === "chats"}>
+          <For each={state.panes}>{(pane) => <Tabs model={props.model} pane={pane} />}</For>
+        </Show>
         <div
           class="titlebar-drag"
           onPointerDown={(event) => void handleDragPointerDown(event)}
