@@ -1215,6 +1215,62 @@ func TestCrossDeviceReadReceiptClearsOnlyReferencedUnreadMessages(t *testing.T) 
 	}
 }
 
+func TestMarkReadEmitsAuthoritativeUnreadCountForWindowBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		throughMessage  string
+		wantUnreadCount int64
+	}{
+		{name: "partial history window", throughMessage: "m1", wantUnreadCount: 1},
+		{name: "newest message", throughMessage: "m2", wantUnreadCount: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer productStore.Close()
+			for i := 0; i < 3; i++ {
+				message := domain.Message{
+					ID:           fmt.Sprintf("m%d", i),
+					ChatJID:      "123@g.us",
+					TransportJID: "123@g.us",
+					SenderJID:    "456@s.whatsapp.net",
+					Timestamp:    time.Unix(int64(i+1), 0),
+				}
+				if err = productStore.ApplyMessage(ctx, message, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var emitted []Event
+			client := &Client{
+				ctx:   ctx,
+				store: productStore,
+				sink:  func(event Event) { emitted = append(emitted, event) },
+				markReadFn: func(context.Context, []types.MessageID, time.Time, types.JID, types.JID, ...types.ReceiptType) error {
+					return nil
+				},
+			}
+			if err = client.MarkRead(ctx, "123@g.us", test.throughMessage); err != nil {
+				t.Fatal(err)
+			}
+
+			chat, err := productStore.Chat(ctx, "123@g.us")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if chat.UnreadCount != test.wantUnreadCount {
+				t.Fatalf("stored unread=%d want %d", chat.UnreadCount, test.wantUnreadCount)
+			}
+			if len(emitted) != 1 || emitted[0].Kind != "chat" || emitted[0].Chat.UnreadCount != test.wantUnreadCount {
+				t.Fatalf("emitted=%+v want one chat with unread=%d", emitted, test.wantUnreadCount)
+			}
+		})
+	}
+}
+
 func TestMarkChatAsReadEventPreservesNewerUnreadMessages(t *testing.T) {
 	ctx := context.Background()
 	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))

@@ -87,6 +87,7 @@ type Client struct {
 	generation         atomic.Uint64
 	logoutFn           func(context.Context) error
 	clearAccountDataFn func(context.Context) error
+	markReadFn         func(context.Context, []types.MessageID, time.Time, types.JID, types.JID, ...types.ReceiptType) error
 	avatarDir          string
 	mediaDir           string
 	contactCache       sync.Map
@@ -196,6 +197,7 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 	c.fetchAppStateFn = w.FetchAppState
 	c.logoutFn = w.Logout
 	c.clearAccountDataFn = productStore.ClearAccountData
+	c.markReadFn = w.MarkRead
 	c.accepting.Store(true)
 	c.reducerWG.Add(1)
 	go func() {
@@ -2826,6 +2828,11 @@ func (c *Client) MarkRead(ctx context.Context, chatID, messageID string) error {
 	if err != nil {
 		return err
 	}
+	// The desktop deliberately does not infer the remaining unread count from a
+	// bounded message window. Publish the exact stored count after every attempt,
+	// including partially persisted multi-sender reads, so chat state stays
+	// authoritative even when a later receipt group fails.
+	defer c.emitChat(chatID)
 	type receiptGroup struct {
 		ids    []types.MessageID
 		rawIDs []string
@@ -2856,7 +2863,7 @@ func (c *Client) MarkRead(ctx context.Context, chatID, messageID string) error {
 		}
 	}
 	for _, group := range groups {
-		if err = c.wa.MarkRead(ctx, group.ids, group.latest, group.chat, group.sender); err != nil {
+		if err = c.markReadFn(ctx, group.ids, group.latest, group.chat, group.sender); err != nil {
 			return err
 		}
 		if err = c.store.MarkReadIDs(ctx, chatID, group.rawIDs); err != nil {

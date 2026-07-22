@@ -16,6 +16,7 @@ import {
   type SearchResults,
 } from "../lib/types";
 import { pairingStartupDecision } from "./pairing";
+import { optimisticUnreadCount, shouldRestoreOptimisticUnread } from "./unread";
 
 export type Screen = "starting" | "pairing" | "chats" | "fatal";
 export type ChatFilter = "all" | "unread" | "groups" | "archived";
@@ -167,6 +168,7 @@ export function createAppModel() {
   const pendingAvatars = new Set<string>();
   const attemptedAvatars = new Set<string>();
   const attemptedParticipantAvatars = new Set<string>();
+  const backendChatRevisions = new Map<string, number>();
 
   function applyAppearance() {
     document.documentElement.dataset.theme = state.theme;
@@ -814,7 +816,11 @@ export function createAppModel() {
         }
         break;
       case "chatUpserted":
-        if (event.payload.chat) upsertChat(event.payload.chat);
+        if (event.payload.chat) {
+          const chat = event.payload.chat;
+          backendChatRevisions.set(chat.id, (backendChatRevisions.get(chat.id) ?? 0) + 1);
+          upsertChat(chat);
+        }
         break;
       case "messageUpserted":
         if (event.payload.message) {
@@ -1039,11 +1045,28 @@ export function createAppModel() {
     const chatId = state.selectedChatId;
     if (!chatId || !lastIncoming) return;
     const previous = state.chats.find((chat) => chat.id === chatId)?.unreadCount ?? 0;
-    setState("chats", (chat) => chat.id === chatId, "unreadCount", 0);
+    const optimistic = optimisticUnreadCount(previous, state.hasNewer);
+    const backendRevision = backendChatRevisions.get(chatId) ?? 0;
+    if (optimistic !== previous) {
+      setState("chats", (chat) => chat.id === chatId, "unreadCount", optimistic);
+    }
     try {
       await bridge.markRead(chatId, lastIncoming.id);
     } catch {
-      setState("chats", (chat) => chat.id === chatId, "unreadCount", previous);
+      // A backend chat upsert can arrive before a rejected RPC when one receipt
+      // group persisted and a later group failed, or when a successful response
+      // was lost. Do not overwrite that authoritative count with stale state.
+      const current = state.chats.find((chat) => chat.id === chatId)?.unreadCount;
+      if (
+        shouldRestoreOptimisticUnread(
+          current,
+          optimistic,
+          backendRevision,
+          backendChatRevisions.get(chatId) ?? 0,
+        )
+      ) {
+        setState("chats", (chat) => chat.id === chatId, "unreadCount", previous);
+      }
     }
   }
 
