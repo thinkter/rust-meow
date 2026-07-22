@@ -190,13 +190,13 @@ Measured from the 2026-07-22 integration worktree:
 
 | Artifact | Exact bytes | gzip -9 reference |
 | --- | ---: | ---: |
-| Tauri executable | 7,054,696 | 2,532,305 |
+| Tauri executable | 7,054,696 | 2,532,272 |
 | stripped static Go sidecar | 22,159,522 | 7,812,378 |
-| combined executable payload | 29,214,218 | 10,344,683 |
-| `.deb` | 10,640,910 | package size |
+| combined executable payload | 29,214,218 | 10,344,650 |
+| `.deb` | 10,640,954 | package size |
 
 The measured `.deb` SHA-256 is
-`4ccdb67990a9a0139aa96d5ae981a6bc312812230359cd4d06dffe6b5c12107e`.
+`efdb44d6f4e45e50f04b71bab40356853cba1705f15df9a688f174fec9f2e4f8`.
 
 The frontend JavaScript plus CSS is 60,744 bytes with per-file gzip -9. The
 combined executable payload is 47.19% smaller than the measured
