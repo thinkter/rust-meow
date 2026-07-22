@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -410,7 +411,8 @@ func TestApplyMessagesBatchesLargeConversation(t *testing.T) {
 
 func TestClearAccountDataRemovesAllPriorAccountRows(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	path := filepath.Join(t.TempDir(), "client.db")
+	s, err := Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +421,9 @@ func TestClearAccountDataRemovesAllPriorAccountRows(t *testing.T) {
 	if _, _, err = s.ReserveOutgoingMessage(ctx, "request-id", pending); err != nil {
 		t.Fatal(err)
 	}
-	incoming := domain.Message{ID: "incoming", ChatJID: "old@g.us", SenderJID: "other@s.whatsapp.net", Text: "secret", Timestamp: time.Now().Add(time.Second), Kind: "text"}
+	ftsMarker := []byte("qzxp")
+	sentinel := "logout-client-sentinel-" + strings.Repeat("private-message-", 64) + string(ftsMarker)
+	incoming := domain.Message{ID: "incoming", ChatJID: "old@g.us", SenderJID: "other@s.whatsapp.net", Text: sentinel, Timestamp: time.Now().Add(time.Second), Kind: "text"}
 	if err = s.ApplyMessage(ctx, incoming, true); err != nil {
 		t.Fatal(err)
 	}
@@ -428,6 +432,13 @@ func TestClearAccountDataRemovesAllPriorAccountRows(t *testing.T) {
 	}
 	if _, err = s.db.ExecContext(ctx, `INSERT INTO sync_state(key,value) VALUES('checkpoint','old-account')`); err != nil {
 		t.Fatal(err)
+	}
+	if !sqliteFilesContain(t, path, []byte(sentinel)) {
+		t.Fatal("sentinel was not persisted before account clear")
+	}
+	shadowBlock := ftsShadowBlockContaining(t, s.db, ftsMarker[:3])
+	if len(shadowBlock) == 0 {
+		t.Fatal("unique trigram was not persisted in an FTS shadow block before account clear")
 	}
 	if err = s.ClearAccountData(ctx); err != nil {
 		t.Fatal(err)
@@ -441,6 +452,98 @@ func TestClearAccountDataRemovesAllPriorAccountRows(t *testing.T) {
 			t.Fatalf("%s retained %d rows", table, count)
 		}
 	}
+	if sqliteFilesContain(t, path, []byte(sentinel)) {
+		t.Fatal("account clear left recoverable sentinel bytes in SQLite files")
+	}
+	if sqliteFilesContain(t, path, shadowBlock) {
+		t.Fatal("account clear left the pre-clear FTS shadow block in SQLite files")
+	}
+	for _, marker := range [][]byte{ftsMarker[:3], ftsMarker[1:]} {
+		if sqliteFilesContain(t, path, marker) {
+			t.Fatalf("account clear left recoverable FTS trigram %q", marker)
+		}
+	}
+	for table, where := range map[string]string{
+		"message_search_idx":     "",
+		"message_search_docsize": "",
+		"message_search_data":    " WHERE id NOT IN (1,10)",
+	} {
+		var count int
+		if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM `+table+where).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s retained %d account index rows", table, count)
+		}
+	}
+	var secureDelete, ftsSecureDelete, freePages int
+	if err = s.db.QueryRowContext(ctx, `PRAGMA secure_delete`).Scan(&secureDelete); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT v FROM message_search_config WHERE k='secure-delete'`).Scan(&ftsSecureDelete); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freePages); err != nil {
+		t.Fatal(err)
+	}
+	if secureDelete != 1 || ftsSecureDelete != 1 || freePages != 0 {
+		t.Fatalf("secure_delete=%d fts_secure_delete=%d freelist_count=%d", secureDelete, ftsSecureDelete, freePages)
+	}
+	if info, statErr := os.Stat(path + "-wal"); statErr == nil && info.Size() != 0 {
+		t.Fatalf("WAL retained %d bytes after truncation", info.Size())
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		t.Fatal(statErr)
+	}
+
+	// The same open Store remains usable for the next account.
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "new", ChatJID: "new@g.us", SenderJID: "new@s.whatsapp.net", Text: "fresh", Timestamp: time.Now(), Kind: "text"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if count, countErr := s.ChatCount(ctx); countErr != nil || count != 1 {
+		t.Fatalf("post-clear chat count=%d err=%v", count, countErr)
+	}
+	if hits, searchErr := s.SearchMessages(ctx, "fresh", 10); searchErr != nil || len(hits) != 1 || hits[0].MessageID != "new" {
+		t.Fatalf("post-clear search hits=%+v err=%v", hits, searchErr)
+	}
+}
+
+func sqliteFilesContain(t *testing.T, path string, sentinel []byte) bool {
+	t.Helper()
+	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		data, err := os.ReadFile(candidate)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, sentinel) {
+			return true
+		}
+	}
+	return false
+}
+
+func ftsShadowBlockContaining(t *testing.T, db *sql.DB, marker []byte) []byte {
+	t.Helper()
+	rows, err := db.Query(`SELECT block FROM message_search_data WHERE id NOT IN (1,10)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var block []byte
+		if err = rows.Scan(&block); err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(block, marker) {
+			return append([]byte(nil), block...)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return nil
 }
 
 func TestReactionUpsertRemovalAndMessageHydration(t *testing.T) {

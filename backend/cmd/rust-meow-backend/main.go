@@ -73,9 +73,9 @@ func run() error {
 	}
 	defer client.Close()
 	server.SetWhatsApp(client)
-	if client.IsPaired() {
+	if connect := client.PrepareConnect(); connect != nil {
 		go func() {
-			if err := client.Connect(); err != nil {
+			if err := connect(); err != nil {
 				log.Error("connect failed", "error", err)
 			}
 		}()

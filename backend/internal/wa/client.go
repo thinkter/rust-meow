@@ -32,11 +32,13 @@ import (
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
 	"github.com/rust-meow/rust-meow/backend/internal/securefs"
+	"github.com/rust-meow/rust-meow/backend/internal/sqliteprivacy"
 	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -77,8 +79,11 @@ type Client struct {
 	store              *store.Store
 	sink               Sink
 	log                *slog.Logger
+	lifecycleMu        sync.Mutex
+	eventMu            sync.Mutex
 	pairingMu          sync.Mutex
 	pairing            bool
+	pairingAttempt     *pairingAttempt
 	handlerID          uint32
 	reducer            chan func()
 	reducerWG          sync.WaitGroup
@@ -87,6 +92,7 @@ type Client struct {
 	accepting          atomic.Bool
 	generation         atomic.Uint64
 	logoutFn           func(context.Context) error
+	clearSessionDataFn func(context.Context) error
 	clearAccountDataFn func(context.Context) error
 	markReadFn         func(context.Context, []types.MessageID, time.Time, types.JID, types.JID, ...types.ReceiptType) error
 	avatarDir          string
@@ -101,13 +107,27 @@ type Client struct {
 	projectionComplete bool
 	fetchAppStateFn    func(context.Context, appstate.WAPatchName, bool, bool) error
 	groupNameFetchMu   sync.Mutex
-	groupNameFetches   map[string]bool
+	groupNameFetches   map[string]*groupNameFetch
+	getGroupInfoFn     func(context.Context, *whatsmeow.Client, types.JID) (*types.GroupInfo, error)
+	sendPresenceFn     func(context.Context, *whatsmeow.Client, types.Presence) error
+	connectFn          func(context.Context, *whatsmeow.Client) error
 }
 
 type avatarFetch struct {
 	done chan struct{}
 	path string
 	err  error
+}
+
+type groupNameFetch struct {
+	generation uint64
+	done       chan struct{}
+}
+
+type pairingAttempt struct {
+	generation uint64
+	cancel     context.CancelFunc
+	done       chan struct{}
 }
 
 type cachedContactDetails struct {
@@ -175,9 +195,15 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
+	if err = sqliteprivacy.EnableSecureDelete(ctx, db); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("configure whatsmeow database privacy: %w", err)
+	}
+	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000", "PRAGMA synchronous=NORMAL"} {
+		if _, err = db.ExecContext(ctx, pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("configure whatsmeow database: %w", err)
+		}
 	}
 	container := sqlstore.NewWithDB(db, "sqlite3", nil)
 	if err = container.Upgrade(ctx); err != nil {
@@ -189,17 +215,11 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 		container.Close()
 		return nil, err
 	}
-	w := whatsmeow.NewClient(device, nil)
-	// Archive and cross-device read state live in app-state snapshots. Without
-	// this, whatsmeow updates its own session cache during an initial sync but
-	// does not project those events into Rust Meow's product database.
-	w.EmitAppStateEventsOnFullSync = true
-	c := &Client{ctx: ctx, wa: w, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time), groupNameFetches: make(map[string]bool)}
+	c := &Client{ctx: ctx, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time), groupNameFetches: make(map[string]*groupNameFetch)}
 	c.loadCachedAvatars()
-	c.fetchAppStateFn = w.FetchAppState
-	c.logoutFn = w.Logout
+	c.bindWhatsmeow(whatsmeow.NewClient(device, nil))
+	c.clearSessionDataFn = c.clearSessionData
 	c.clearAccountDataFn = productStore.ClearAccountData
-	c.markReadFn = w.MarkRead
 	c.accepting.Store(true)
 	c.reducerWG.Add(1)
 	go func() {
@@ -218,13 +238,56 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 			}
 		}
 	}()
-	c.handlerID = w.AddEventHandler(c.handleEvent)
 	return c, nil
 }
 
+func (c *Client) bindWhatsmeow(client *whatsmeow.Client) {
+	// Archive and cross-device read state live in app-state snapshots. Without
+	// this, whatsmeow updates its own session cache during an initial sync but
+	// does not project those events into Rust Meow's product database.
+	client.EmitAppStateEventsOnFullSync = true
+	c.wa = client
+	c.fetchAppStateFn = client.FetchAppState
+	c.logoutFn = client.Logout
+	c.markReadFn = client.MarkRead
+	sourceGeneration := c.generation.Load()
+	c.handlerID = client.AddEventHandler(func(raw any) { c.handleEvent(client, sourceGeneration, raw) })
+}
+
 func (c *Client) Connect() error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.connectLocked(c.wa, c.generation.Load())
+}
+
+// PrepareConnect captures the paired client synchronously so callers can
+// safely schedule the returned function. A delayed startup goroutine will
+// become a no-op if logout changes the account generation first.
+func (c *Client) PrepareConnect() func() error {
+	c.lifecycleMu.Lock()
+	source := c.wa
+	generation := c.generation.Load()
+	paired := source != nil && source.Store.ID != nil && c.accepting.Load()
+	c.lifecycleMu.Unlock()
+	if !paired {
+		return nil
+	}
+	return func() error {
+		c.lifecycleMu.Lock()
+		defer c.lifecycleMu.Unlock()
+		return c.connectLocked(source, generation)
+	}
+}
+
+func (c *Client) connectLocked(source *whatsmeow.Client, generation uint64) error {
+	if source == nil || c.wa != source || c.generation.Load() != generation || !c.accepting.Load() {
+		return nil
+	}
 	c.sink(Event{Kind: "connection", Detail: "connecting"})
-	return c.wa.ConnectContext(c.ctx)
+	if c.connectFn != nil {
+		return c.connectFn(c.ctx, source)
+	}
+	return source.ConnectContext(c.ctx)
 }
 func (c *Client) IsPaired() bool    { return c.wa.Store.ID != nil }
 func (c *Client) IsConnected() bool { return c.wa.IsConnected() }
@@ -1122,49 +1185,179 @@ func (c *Client) avatarPath(jid types.JID) string {
 }
 
 func (c *Client) StartPairing(ctx context.Context) (bool, error) {
+	c.lifecycleMu.Lock()
 	c.pairingMu.Lock()
 	if c.pairing {
 		c.pairingMu.Unlock()
+		c.lifecycleMu.Unlock()
 		return false, nil
 	}
+	if !c.accepting.Load() || c.wa == nil {
+		c.pairingMu.Unlock()
+		c.lifecycleMu.Unlock()
+		return false, errors.New("pairing unavailable during account reset")
+	}
+	source := c.wa
+	generation := c.generation.Load()
+	pairingCtx, cancel := context.WithCancel(ctx)
+	attempt := &pairingAttempt{generation: generation, cancel: cancel, done: make(chan struct{})}
 	c.pairing = true
+	c.pairingAttempt = attempt
 	c.pairingMu.Unlock()
-	c.sink(Event{Kind: "connection", Detail: "pairing"})
-	qr, err := c.wa.GetQRChannel(ctx)
+	if !c.emitPairingEvent(attempt, Event{Kind: "connection", Detail: "pairing"}) {
+		c.abortPairing(attempt)
+		c.lifecycleMu.Unlock()
+		return false, errors.New("pairing interrupted by account reset")
+	}
+	qr, err := source.GetQRChannel(pairingCtx)
 	if err != nil {
-		c.finishPairing()
+		c.abortPairing(attempt)
+		c.lifecycleMu.Unlock()
 		return false, err
 	}
-	if !c.wa.IsConnected() {
-		if err = c.wa.ConnectContext(ctx); err != nil {
-			c.finishPairing()
-			return false, err
+	if !source.IsConnected() {
+		if c.connectFn == nil {
+			err = source.ConnectContext(pairingCtx)
+		} else {
+			err = c.connectFn(pairingCtx, source)
+		}
+		if err != nil {
+			resetGeneration := generation
+			c.eventMu.Lock()
+			if c.wa == source && c.generation.Load() == generation {
+				c.accepting.Store(false)
+				resetGeneration = c.generation.Add(1)
+			}
+			c.eventMu.Unlock()
+			c.abortPairing(attempt)
+			c.lifecycleMu.Unlock()
+			resetErr := c.replaceFailedPairingClient(ctx, source, resetGeneration)
+			return false, errors.Join(err, resetErr)
 		}
 	}
 	go func() {
-		defer c.finishPairing()
-		for item := range qr {
+		defer func() {
+			c.finishPairing(attempt)
+			close(attempt.done)
+		}()
+		for {
+			var item whatsmeow.QRChannelItem
+			var ok bool
+			select {
+			case <-pairingCtx.Done():
+				return
+			case item, ok = <-qr:
+				if !ok {
+					return
+				}
+			}
+			var event Event
 			switch item.Event {
 			case whatsmeow.QRChannelEventCode:
-				c.sink(Event{Kind: "qr", QR: item.Code, QRExpires: time.Now().Add(item.Timeout)})
+				event = Event{Kind: "qr", QR: item.Code, QRExpires: time.Now().Add(item.Timeout)}
 			case "success":
-				c.sink(Event{Kind: "connection", Detail: "connected"})
+				event = Event{Kind: "connection", Detail: "connected"}
 			case whatsmeow.QRChannelEventError:
 				detail := "pairing failed"
 				if item.Error != nil {
 					detail = item.Error.Error()
 				}
-				c.sink(Event{Kind: "problem", Detail: detail})
+				event = Event{Kind: "problem", Detail: detail}
 			case "timeout":
-				c.sink(Event{Kind: "connection", Detail: "offline"})
+				event = Event{Kind: "connection", Detail: "offline"}
 			default:
-				c.sink(Event{Kind: "problem", Detail: "pairing ended: " + item.Event})
+				event = Event{Kind: "problem", Detail: "pairing ended: " + item.Event}
+			}
+			if !c.emitPairingEvent(attempt, event) {
+				return
 			}
 		}
 	}()
+	c.lifecycleMu.Unlock()
 	return true, nil
 }
-func (c *Client) finishPairing() { c.pairingMu.Lock(); c.pairing = false; c.pairingMu.Unlock() }
+
+func (c *Client) replaceFailedPairingClient(ctx context.Context, source *whatsmeow.Client, generation uint64) error {
+	// Follow the same lock order as Logout. Backfills cannot register while
+	// accepting is false, and holding their mutex through the swap prevents an
+	// old result from being mistaken for a fresh-client job.
+	c.groupNameFetchMu.Lock()
+	defer c.groupNameFetchMu.Unlock()
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.wa != source || c.generation.Load() != generation {
+		return nil
+	}
+	clear(c.groupNameFetches)
+	if err := c.reducerBarrier(ctx); err != nil {
+		return fmt.Errorf("isolate failed pairing client: %w", err)
+	}
+	c.appStateProjection.Lock()
+	defer c.appStateProjection.Unlock()
+	source.Disconnect()
+	source.RemoveEventHandlers()
+	retireDevice(source.Store)
+	if c.sessions == nil {
+		return errors.New("replace failed pairing client: session store unavailable")
+	}
+	c.bindWhatsmeow(whatsmeow.NewClient(c.sessions.NewDevice(), nil))
+	c.projectionComplete = false
+	c.eventMu.Lock()
+	c.accepting.Store(true)
+	c.eventMu.Unlock()
+	return nil
+}
+
+func (c *Client) emitPairingEvent(attempt *pairingAttempt, event Event) bool {
+	c.eventMu.Lock()
+	defer c.eventMu.Unlock()
+	if c.generation.Load() != attempt.generation || !c.accepting.Load() {
+		return false
+	}
+	c.pairingMu.Lock()
+	current := c.pairing && c.pairingAttempt == attempt
+	c.pairingMu.Unlock()
+	if !current {
+		return false
+	}
+	c.sink(event)
+	return true
+}
+
+func (c *Client) abortPairing(attempt *pairingAttempt) {
+	c.finishPairing(attempt)
+	close(attempt.done)
+}
+
+func (c *Client) finishPairing(attempt *pairingAttempt) {
+	attempt.cancel()
+	c.pairingMu.Lock()
+	if c.pairingAttempt == attempt {
+		c.pairing = false
+		c.pairingAttempt = nil
+	}
+	c.pairingMu.Unlock()
+}
+
+func (c *Client) cancelAndWaitPairing(ctx context.Context) error {
+	c.pairingMu.Lock()
+	attempt := c.pairingAttempt
+	c.pairing = false
+	c.pairingAttempt = nil
+	if attempt != nil {
+		attempt.cancel()
+	}
+	c.pairingMu.Unlock()
+	if attempt == nil {
+		return nil
+	}
+	select {
+	case <-attempt.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (c *Client) replyContext(ctx context.Context, chatID, messageID string) (*waE2E.ContextInfo, error) {
 	if messageID == "" {
@@ -2901,27 +3094,57 @@ func (c *Client) MarkRead(ctx context.Context, chatID, messageID string) error {
 }
 
 func (c *Client) Logout(ctx context.Context) error {
+	// Group-name fetch registration reads accepting, generation, and c.wa while
+	// holding this mutex. Keep it through both purges and the fresh-client swap
+	// so no fetch can combine an old client with the new account generation.
+	// Finishing jobs also take this lock around their final product-store write,
+	// so acquiring it first waits out every write already authorized.
+	c.groupNameFetchMu.Lock()
+	defer c.groupNameFetchMu.Unlock()
+	// Handler entry is serialized with generation invalidation. Anything that
+	// entered first has enqueued its generation-guarded reducer work before the
+	// barrier below; an old handler that resumes later is rejected at entry.
+	c.eventMu.Lock()
 	c.accepting.Store(false)
 	c.generation.Add(1)
+	clear(c.groupNameFetches)
+	c.eventMu.Unlock()
+	// Connect and pairing setup validate their captured generation under this
+	// lock. Keep it until remote logout, both purges, and the fresh bind finish.
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	pairingErr := c.cancelAndWaitPairing(ctx)
 	if err := c.reducerBarrier(ctx); err != nil {
 		return &LogoutError{Stage: "isolation", Local: err}
 	}
+	// FetchAppState writes through whatsmeow outside the reducer. Holding this
+	// lock until the fresh client is installed prevents an old projection from
+	// overlapping either database purge.
+	c.appStateProjection.Lock()
+	defer c.appStateProjection.Unlock()
 	remoteErr := c.logoutFn(ctx)
-	localErr := c.clearAccountDataFn(ctx)
-	if avatarErr := os.RemoveAll(c.avatarDir); localErr == nil && avatarErr != nil {
-		localErr = avatarErr
+	var localErr error
+	if pairingErr != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("stop pairing stream: %w", pairingErr))
+	}
+	if err := c.clearSessionDataFn(ctx); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear session database: %w", err))
+	}
+	if err := c.clearAccountDataFn(ctx); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear product database: %w", err))
+	}
+	if err := os.RemoveAll(c.avatarDir); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear avatar cache: %w", err))
 	}
 	c.clearAvatarCache()
-	if mediaErr := os.RemoveAll(c.mediaDir); localErr == nil && mediaErr != nil {
-		localErr = mediaErr
+	if err := os.RemoveAll(c.mediaDir); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear media cache: %w", err))
 	}
-	c.contactCache.Range(func(key, _ any) bool {
-		c.contactCache.Delete(key)
-		return true
-	})
+	c.clearContactCache()
 	c.negativeAvatarMu.Lock()
 	clear(c.negativeAvatars)
 	c.negativeAvatarMu.Unlock()
+	c.projectionComplete = false
 	if localErr != nil {
 		return &LogoutError{Stage: "local_clear", Remote: remoteErr, Local: localErr}
 	}
@@ -2931,6 +3154,89 @@ func (c *Client) Logout(ctx context.Context) error {
 	c.accepting.Store(true)
 	return nil
 }
+
+func (c *Client) clearSessionData(ctx context.Context) error {
+	oldClient := c.wa
+	oldClient.Disconnect()
+	// The discarded client may also have a QR-channel handler whose internal
+	// expected-disconnect path does not unregister itself.
+	oldClient.RemoveEventHandlers()
+	var clearErr error
+	// A failed remote unlink leaves the device store live. Mark it deleted
+	// before touching SQLite so queued whatsmeow work can only hit NoopStore and
+	// cannot repopulate the database after the purge.
+	if oldClient.Store.ID != nil && !oldClient.Store.Deleted {
+		if err := oldClient.Store.Delete(ctx); err != nil {
+			// Continue with the full-table fallback below. Device.Delete is useful
+			// for its normal cascade, but its failure must not leave recoverable
+			// session bytes behind when the fallback can still purge them.
+			clearErr = errors.Join(clearErr, fmt.Errorf("delete active whatsmeow device: %w", err))
+		}
+	}
+	// Device.Delete swaps the account-scoped stores but leaves the container's
+	// global LID map attached. Retire that store too, and also retire an
+	// unpaired device so an in-flight QR flow cannot save after the purge.
+	retireDevice(oldClient.Store)
+
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT name
+		FROM sqlite_master
+		WHERE type='table' AND name LIKE 'whatsmeow_%' AND name<>'whatsmeow_version'
+		ORDER BY name`)
+	if err != nil {
+		return errors.Join(clearErr, fmt.Errorf("list whatsmeow data tables: %w", err))
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err = rows.Scan(&table); err != nil {
+			rows.Close()
+			return errors.Join(clearErr, fmt.Errorf("scan whatsmeow data table: %w", err))
+		}
+		tables = append(tables, table)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return errors.Join(clearErr, fmt.Errorf("list whatsmeow data tables: %w", err))
+	}
+	if err = rows.Close(); err != nil {
+		return errors.Join(clearErr, fmt.Errorf("close whatsmeow table list: %w", err))
+	}
+
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.Join(clearErr, fmt.Errorf("begin whatsmeow data clear: %w", err))
+	}
+	defer tx.Rollback()
+	for _, table := range tables {
+		quoted := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
+		if _, err = tx.ExecContext(ctx, `DELETE FROM `+quoted); err != nil {
+			return errors.Join(clearErr, fmt.Errorf("clear %s: %w", table, err))
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return errors.Join(clearErr, fmt.Errorf("commit whatsmeow data clear: %w", err))
+	}
+	if err = sqliteprivacy.PurgeDeletedData(ctx, c.db); err != nil {
+		return errors.Join(clearErr, fmt.Errorf("purge deleted whatsmeow data: %w", err))
+	}
+
+	// Re-wrap (without closing) the same database handle to discard container
+	// caches such as the account-specific LID map, then give pairing a fresh,
+	// non-deleted device store.
+	c.sessions = sqlstore.NewWithDB(c.db, "sqlite3", nil)
+	c.bindWhatsmeow(whatsmeow.NewClient(c.sessions.NewDevice(), nil))
+	return clearErr
+}
+
+func retireDevice(device *wastore.Device) {
+	retiredStore := &wastore.NoopStore{Error: wastore.ErrDeviceDeleted}
+	device.Deleted = true
+	device.SetAllStores(retiredStore)
+	device.LIDs = retiredStore
+	device.Container = retiredStore
+}
+
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		c.wa.Disconnect()
@@ -2941,18 +3247,21 @@ func (c *Client) Close() {
 	})
 }
 
-func (c *Client) handleEvent(raw any) {
+func (c *Client) handleEvent(source *whatsmeow.Client, sourceGeneration uint64, raw any) {
+	c.eventMu.Lock()
+	defer c.eventMu.Unlock()
+	if !c.accepting.Load() || c.generation.Load() != sourceGeneration {
+		return
+	}
 	switch evt := raw.(type) {
 	case *events.Connected:
 		c.sink(Event{Kind: "connection", Detail: "connected"})
 		// WhatsApp only delivers chat-presence (typing) updates to clients
-		// that have marked themselves available.
-		go func() {
-			if err := c.wa.SendPresence(c.ctx, types.PresenceAvailable); err != nil {
-				c.log.Warn("send available presence", "error", err)
-			}
-		}()
-		go c.reconcileChatState()
+		// that have marked themselves available. Use the client that emitted
+		// this event: logout may install a fresh unpaired client before this
+		// goroutine runs.
+		go c.sendPresence(source, sourceGeneration)
+		go c.reconcileChatStateForGeneration(sourceGeneration, source.FetchAppState)
 	case *events.Disconnected:
 		c.sink(Event{Kind: "connection", Detail: "offline"})
 	case *events.LoggedOut:
@@ -2997,15 +3306,19 @@ func (c *Client) handleEvent(raw any) {
 }
 
 func (c *Client) reconcileChatState() {
+	c.reconcileChatStateForGeneration(c.generation.Load(), c.fetchAppStateFn)
+}
+
+func (c *Client) reconcileChatStateForGeneration(generation uint64, fetch func(context.Context, appstate.WAPatchName, bool, bool) error) {
 	c.appStateProjection.Lock()
 	defer c.appStateProjection.Unlock()
-	if c.store == nil || c.fetchAppStateFn == nil {
+	if c.generation.Load() != generation || !c.accepting.Load() || c.store == nil || fetch == nil {
 		return
 	}
 	if c.projectionComplete {
 		return
 	}
-	if err := c.fetchAppStateFn(c.ctx, appstate.WAPatchRegularLow, true, false); err != nil {
+	if err := fetch(c.ctx, appstate.WAPatchRegularLow, true, false); err != nil {
 		c.log.Error("reconcile WhatsApp chat state", "error", err)
 		return
 	}
@@ -3014,6 +3327,23 @@ func (c *Client) reconcileChatState() {
 		return
 	}
 	c.projectionComplete = true
+}
+
+func (c *Client) sendPresence(source *whatsmeow.Client, generation uint64) {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.wa != source || c.generation.Load() != generation || !c.accepting.Load() {
+		return
+	}
+	var err error
+	if c.sendPresenceFn == nil {
+		err = source.SendPresence(c.ctx, types.PresenceAvailable)
+	} else {
+		err = c.sendPresenceFn(c.ctx, source, types.PresenceAvailable)
+	}
+	if err != nil {
+		c.log.Warn("send available presence", "error", err)
+	}
 }
 
 func (c *Client) clearContactCache() {
@@ -3781,41 +4111,72 @@ func (c *Client) reduceArchive(evt *events.Archive) {
 // the background so it never blocks the caller (typically a chat-list
 // request) — the resolved name arrives shortly after via a "chat" event.
 func (c *Client) BackfillGroupName(chatID, addressJID string) {
-	if c.wa == nil {
-		return
-	}
 	jid, err := types.ParseJID(addressJID)
 	if err != nil || jid.Server != types.GroupServer {
 		return
 	}
 	key := jid.String()
 	c.groupNameFetchMu.Lock()
-	if c.groupNameFetches[key] {
+	// Logout changes accepting/generation and installs the fresh client under
+	// this same mutex boundary. Capture all three together so an old client can
+	// never be registered as work for the new account generation.
+	if !c.accepting.Load() || c.wa == nil {
 		c.groupNameFetchMu.Unlock()
 		return
 	}
-	c.groupNameFetches[key] = true
+	generation := c.generation.Load()
+	client := c.wa
+	if c.groupNameFetches[key] != nil {
+		c.groupNameFetchMu.Unlock()
+		return
+	}
+	job := &groupNameFetch{generation: generation, done: make(chan struct{})}
+	c.groupNameFetches[key] = job
+	getGroupInfo := c.getGroupInfoFn
 	c.groupNameFetchMu.Unlock()
 	go func() {
-		defer func() {
-			c.groupNameFetchMu.Lock()
-			delete(c.groupNameFetches, key)
-			c.groupNameFetchMu.Unlock()
-		}()
-		info, infoErr := c.wa.GetGroupInfo(c.ctx, jid)
-		if infoErr != nil {
-			c.log.Warn("backfill group info", "chat_id", chatID, "jid", key, "error", infoErr)
-			return
+		var info *types.GroupInfo
+		var infoErr error
+		if getGroupInfo == nil {
+			info, infoErr = client.GetGroupInfo(c.ctx, jid)
+		} else {
+			info, infoErr = getGroupInfo(c.ctx, client, jid)
 		}
-		if info.Name == "" {
-			return
-		}
-		if err = c.store.UpsertChatName(c.ctx, chatID, info.Name); err != nil {
-			c.log.Error("persist backfilled group name", "chat_id", chatID, "error", err)
-			return
-		}
-		c.emitChat(chatID)
+		c.finishGroupNameBackfill(job, chatID, key, info, infoErr)
 	}()
+}
+
+func (c *Client) finishGroupNameBackfill(job *groupNameFetch, chatID, key string, info *types.GroupInfo, infoErr error) {
+	defer close(job.done)
+	c.groupNameFetchMu.Lock()
+	// A new account may already have registered the same group key. Requiring
+	// pointer identity prevents the old result from writing or deleting the new
+	// account's deduplication marker even if generations are accidentally equal.
+	if c.groupNameFetches[key] != job {
+		c.groupNameFetchMu.Unlock()
+		return
+	}
+	defer func() {
+		if c.groupNameFetches[key] == job {
+			delete(c.groupNameFetches, key)
+		}
+		c.groupNameFetchMu.Unlock()
+	}()
+	if c.generation.Load() != job.generation || !c.accepting.Load() {
+		return
+	}
+	if infoErr != nil {
+		c.log.Warn("backfill group info", "chat_id", chatID, "jid", key, "error", infoErr)
+		return
+	}
+	if info.Name == "" {
+		return
+	}
+	if err := c.store.UpsertChatName(c.ctx, chatID, info.Name); err != nil {
+		c.log.Error("persist backfilled group name", "chat_id", chatID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
 }
 
 // reduceJoinedGroup handles being added to (or creating) a group. Without

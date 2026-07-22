@@ -95,6 +95,114 @@ func TestMediaCapacityDoesNotBlockNonMediaRequest(t *testing.T) {
 	}
 }
 
+func TestLogoutWaitsForActiveMediaJob(t *testing.T) {
+	ctx := context.Background()
+	s := &Server{ctx: ctx, mediaSlots: make(chan struct{}, 2)}
+	jobDone := make(chan struct{})
+	s.mediaWG.Add(1)
+	go func() {
+		defer s.mediaWG.Done()
+		<-jobDone
+	}()
+	invoked := make(chan struct{}, 1)
+	s.logoutFn = func(context.Context) error {
+		invoked <- struct{}{}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.dispatch(&bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_Logout{Logout: &bridgev1.LogoutRequest{}}})
+		done <- err
+	}()
+
+	select {
+	case <-invoked:
+		t.Fatal("logout ran while a media slot was still occupied")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(jobDone)
+	select {
+	case <-invoked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("logout did not run after the media operation finished")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLogoutWaitsForMediaJobQueuedOutsideSlots(t *testing.T) {
+	ctx := context.Background()
+	s := &Server{ctx: ctx, mediaSlots: make(chan struct{}, 1)}
+	// Fill capacity, then register a media job before launching it, exactly as
+	// Run does. The job is tracked even while it is queued outside mediaSlots.
+	s.mediaSlots <- struct{}{}
+	finish := make(chan struct{})
+	started := make(chan struct{})
+	s.mediaWG.Add(1)
+	go func() {
+		defer s.mediaWG.Done()
+		s.mediaSlots <- struct{}{}
+		close(started)
+		<-finish
+		<-s.mediaSlots
+	}()
+	invoked := make(chan struct{}, 1)
+	s.logoutFn = func(context.Context) error {
+		invoked <- struct{}{}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.dispatch(&bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_Logout{Logout: &bridgev1.LogoutRequest{}}})
+		done <- err
+	}()
+
+	select {
+	case <-invoked:
+		t.Fatal("logout ran while a media job was queued")
+	case <-time.After(50 * time.Millisecond):
+	}
+	<-s.mediaSlots
+	<-started
+	select {
+	case <-invoked:
+		t.Fatal("logout ran while the queued media job was active")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(finish)
+	select {
+	case <-invoked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("logout did not run after queued media completed")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLogoutMediaWaitCancellationReturnsIsolationError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{ctx: ctx, mediaSlots: make(chan struct{}, 2), logoutFn: func(context.Context) error {
+		t.Fatal("logout ran after isolation cancellation")
+		return nil
+	}}
+	s.mediaWG.Add(1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.dispatch(&bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_Logout{Logout: &bridgev1.LogoutRequest{}}})
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	err := <-done
+	var logoutErr *wa.LogoutError
+	if !errors.As(err, &logoutErr) || logoutErr.Stage != "isolation" {
+		t.Fatalf("error=%v, want logout isolation error", err)
+	}
+	s.mediaWG.Done()
+}
+
 func TestAttachmentRequestValidation(t *testing.T) {
 	s := &Server{ctx: context.Background()}
 	validID := "b0bca7f5-a85f-4a8c-8956-1722cf35ffbc"

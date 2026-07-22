@@ -26,6 +26,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	waSyncAction "go.mau.fi/whatsmeow/proto/waSyncAction"
 	waWeb "go.mau.fi/whatsmeow/proto/waWeb"
+	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -54,6 +55,13 @@ func TestNewRestrictsWhatsMeowDatabaseMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	var journalMode string
+	if err = client.db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatal(err)
+	}
+	if journalMode != "wal" {
+		t.Fatalf("session journal mode=%q want wal", journalMode)
+	}
 
 	info, err := os.Stat(sessionPath)
 	if err != nil {
@@ -1455,6 +1463,7 @@ func TestChatStateProjectionRetriesThenRunsOnlyOncePerProcess(t *testing.T) {
 		reducer:     make(chan func(), 4),
 		reducerDone: make(chan struct{}),
 	}
+	c.accepting.Store(true)
 	stop := startTestReducer(c)
 	defer stop()
 	attempts := 0
@@ -1500,6 +1509,107 @@ func TestStartPairingIsIdempotentWhileQRStreamIsActive(t *testing.T) {
 	}
 }
 
+func TestOldPairingAttemptCannotResetOrEmitIntoNewGeneration(t *testing.T) {
+	oldCtx, oldCancel := context.WithCancel(context.Background())
+	defer oldCancel()
+	newCtx, newCancel := context.WithCancel(context.Background())
+	defer newCancel()
+	oldAttempt := &pairingAttempt{generation: 1, cancel: oldCancel, done: make(chan struct{})}
+	newAttempt := &pairingAttempt{generation: 2, cancel: newCancel, done: make(chan struct{})}
+	emitted := 0
+	c := &Client{
+		pairing:        true,
+		pairingAttempt: newAttempt,
+		sink:           func(Event) { emitted++ },
+	}
+	c.accepting.Store(true)
+	c.generation.Store(2)
+	c.finishPairing(oldAttempt)
+	if !c.pairing || c.pairingAttempt != newAttempt {
+		t.Fatal("old pairing finalizer cleared the new account's pairing attempt")
+	}
+	if c.emitPairingEvent(oldAttempt, Event{Kind: "qr", QR: "stale"}) {
+		t.Fatal("old pairing attempt emitted into the new account generation")
+	}
+	if emitted != 0 {
+		t.Fatalf("old pairing attempt emitted %d events", emitted)
+	}
+	select {
+	case <-oldCtx.Done():
+	default:
+		t.Fatal("old pairing attempt was not cancelled")
+	}
+	select {
+	case <-newCtx.Done():
+		t.Fatal("new pairing attempt was cancelled")
+	default:
+	}
+}
+
+func TestCancelPairingJoinsBlockedQRConsumer(t *testing.T) {
+	pairingCtx, cancel := context.WithCancel(context.Background())
+	attempt := &pairingAttempt{generation: 1, cancel: cancel, done: make(chan struct{})}
+	c := &Client{pairing: true, pairingAttempt: attempt}
+	go func() {
+		<-pairingCtx.Done()
+		close(attempt.done)
+	}()
+	if err := c.cancelAndWaitPairing(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.pairing || c.pairingAttempt != nil {
+		t.Fatal("cancelled pairing attempt remained active")
+	}
+}
+
+func TestPairingConnectFailureReplacesRetiredClientBeforeRetry(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	client, err := New(ctx, directory, productStore, func(Event) {}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	injectedErr := errors.New("injected pairing connection failure")
+	var sources []*whatsmeow.Client
+	client.connectFn = func(_ context.Context, source *whatsmeow.Client) error {
+		sources = append(sources, source)
+		return injectedErr
+	}
+
+	firstSource := client.wa
+	started, err := client.StartPairing(ctx)
+	if started || !errors.Is(err, injectedErr) {
+		t.Fatalf("first pairing started=%v err=%v", started, err)
+	}
+	secondSource := client.wa
+	if secondSource == firstSource || !client.accepting.Load() {
+		t.Fatal("failed pairing did not publish an accepting fresh client")
+	}
+	if !firstSource.Store.Deleted {
+		t.Fatal("failed pairing source was not retired")
+	}
+	if _, lidErr := firstSource.Store.LIDs.GetPNForLID(ctx, types.JID{User: "1", Server: types.HiddenUserServer}); !errors.Is(lidErr, wastore.ErrDeviceDeleted) {
+		t.Fatalf("failed pairing LID store error=%v, want ErrDeviceDeleted", lidErr)
+	}
+
+	started, err = client.StartPairing(ctx)
+	if started || !errors.Is(err, injectedErr) {
+		t.Fatalf("retry pairing started=%v err=%v", started, err)
+	}
+	if len(sources) != 2 || sources[0] != firstSource || sources[1] != secondSource {
+		t.Fatalf("pairing sources=%p want [%p %p]", sources, firstSource, secondSource)
+	}
+	if client.wa == secondSource || !client.accepting.Load() {
+		t.Fatal("retry failure did not leave another accepting fresh client")
+	}
+}
+
 func TestLogoutAlreadyRemoteLoggedOutStillClearsLocalData(t *testing.T) {
 	ctx := context.Background()
 	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
@@ -1508,7 +1618,7 @@ func TestLogoutAlreadyRemoteLoggedOutStillClearsLocalData(t *testing.T) {
 	}
 	defer productStore.Close()
 	seedPrivateMessage(t, ctx, productStore)
-	c := &Client{ctx: ctx, store: productStore, reducer: make(chan func(), 4), reducerDone: make(chan struct{}), logoutFn: func(context.Context) error { return whatsmeow.ErrNotLoggedIn }, clearAccountDataFn: productStore.ClearAccountData}
+	c := &Client{ctx: ctx, store: productStore, reducer: make(chan func(), 4), reducerDone: make(chan struct{}), logoutFn: func(context.Context) error { return whatsmeow.ErrNotLoggedIn }, clearSessionDataFn: func(context.Context) error { return nil }, clearAccountDataFn: productStore.ClearAccountData}
 	c.accepting.Store(true)
 	cleanup := startTestReducer(c)
 	defer cleanup()
@@ -1547,6 +1657,7 @@ func TestLogoutRetryClearsAfterRemoteSuccessLocalFailure(t *testing.T) {
 		}
 		return whatsmeow.ErrNotLoggedIn
 	}
+	c.clearSessionDataFn = func(context.Context) error { return nil }
 	c.clearAccountDataFn = func(clearCtx context.Context) error {
 		clearCalls++
 		if clearCalls == 1 {
@@ -1575,6 +1686,415 @@ func TestLogoutRetryClearsAfterRemoteSuccessLocalFailure(t *testing.T) {
 	if !c.accepting.Load() {
 		t.Fatal("admission not restored after successful retry")
 	}
+}
+
+func TestLogoutPhysicallyPurgesSQLiteAndKeepsPairingStoreUsable(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	clientPath := filepath.Join(directory, "client.db")
+	sessionPath := filepath.Join(directory, "session.db")
+	productStore, err := store.Open(ctx, clientPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	client, err := New(ctx, directory, productStore, func(Event) {}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	oldID, _ := types.ParseJID("15550000000:1@s.whatsapp.net")
+	client.wa.Store.ID = &oldID
+	client.wa.Store.Account = &waAdv.ADVSignedDeviceIdentity{
+		Details: []byte{1}, AccountSignatureKey: make([]byte, 32), AccountSignature: make([]byte, 64), DeviceSignature: make([]byte, 64),
+	}
+	if err = client.wa.Store.Save(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := "logout-session-sentinel-" + strings.Repeat("private-session-", 64)
+	contact, _ := types.ParseJID("15551234567@s.whatsapp.net")
+	if err = client.wa.Store.Contacts.PutContactName(ctx, contact, sentinel, sentinel); err != nil {
+		t.Fatal(err)
+	}
+	if err = client.wa.Store.PrivacyTokens.PutPrivacyTokens(ctx, wastore.PrivacyToken{
+		User: contact, Token: []byte(sentinel), Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lid := types.JID{User: "999900001111", Server: types.HiddenUserServer}
+	pn := types.JID{User: "15551234567", Server: types.DefaultUserServer}
+	if err = client.wa.Store.LIDs.PutLIDMapping(ctx, lid, pn); err != nil {
+		t.Fatal(err)
+	}
+	if err = productStore.ApplyMessage(ctx, domain.Message{
+		ID: "private", ChatJID: "old@g.us", SenderJID: contact.String(), Text: sentinel,
+		Timestamp: time.Now(), Kind: "text",
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if !sqliteFilesContain(t, sessionPath, []byte(sentinel)) || !sqliteFilesContain(t, clientPath, []byte(sentinel)) {
+		t.Fatal("sentinel was not persisted in both databases before logout")
+	}
+
+	// ErrNotLoggedIn returns before whatsmeow deletes device rows. Rust Meow
+	// must still force the local session clear without making a network request.
+	client.logoutFn = func(context.Context) error { return whatsmeow.ErrNotLoggedIn }
+	if err = client.Logout(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sqliteFilesContain(t, sessionPath, []byte(sentinel)) || sqliteFilesContain(t, clientPath, []byte(sentinel)) {
+		t.Fatal("logout left recoverable sentinel bytes in SQLite files")
+	}
+
+	for _, table := range []string{"whatsmeow_device", "whatsmeow_contacts", "whatsmeow_privacy_tokens", "whatsmeow_lid_map"} {
+		var count int
+		if err = client.db.QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s retained %d rows", table, count)
+		}
+	}
+	var secureDelete, freePages, versionRows int
+	if err = client.db.QueryRowContext(ctx, `PRAGMA secure_delete`).Scan(&secureDelete); err != nil {
+		t.Fatal(err)
+	}
+	if err = client.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freePages); err != nil {
+		t.Fatal(err)
+	}
+	if err = client.db.QueryRowContext(ctx, `SELECT count(*) FROM whatsmeow_version`).Scan(&versionRows); err != nil {
+		t.Fatal(err)
+	}
+	if secureDelete != 1 || freePages != 0 || versionRows == 0 {
+		t.Fatalf("secure_delete=%d freelist_count=%d version_rows=%d", secureDelete, freePages, versionRows)
+	}
+	if info, statErr := os.Stat(sessionPath + "-wal"); statErr == nil && info.Size() != 0 {
+		t.Fatalf("session WAL retained %d bytes after truncation", info.Size())
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		t.Fatal(statErr)
+	}
+	if client.wa.Store.ID != nil || client.wa.Store.Deleted {
+		t.Fatalf("fresh pairing store ID=%v deleted=%v", client.wa.Store.ID, client.wa.Store.Deleted)
+	}
+
+	// Pairing fills these fields before Save. A successful write here proves
+	// the fresh device and still-open container are usable immediately.
+	newID, _ := types.ParseJID("15559999999:2@s.whatsapp.net")
+	client.wa.Store.ID = &newID
+	client.wa.Store.Account = &waAdv.ADVSignedDeviceIdentity{
+		Details: []byte{2}, AccountSignatureKey: make([]byte, 32), AccountSignature: make([]byte, 64), DeviceSignature: make([]byte, 64),
+	}
+	if err = client.wa.Store.Save(ctx); err != nil {
+		t.Fatalf("save fresh pairing store: %v", err)
+	}
+	var devices int
+	if err = client.db.QueryRowContext(ctx, `SELECT count(*) FROM whatsmeow_device`).Scan(&devices); err != nil {
+		t.Fatal(err)
+	}
+	if devices != 1 {
+		t.Fatalf("fresh device rows=%d want 1", devices)
+	}
+}
+
+func TestClearSessionDataPurgesAfterDeviceDeleteFailure(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	sessionPath := filepath.Join(directory, "session.db")
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	client, err := New(ctx, directory, productStore, func(Event) {}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	oldDevice := client.wa.Store
+	oldID, _ := types.ParseJID("15550000000:1@s.whatsapp.net")
+	oldDevice.ID = &oldID
+	oldDevice.Account = &waAdv.ADVSignedDeviceIdentity{
+		Details: []byte{1}, AccountSignatureKey: make([]byte, 32), AccountSignature: make([]byte, 64), DeviceSignature: make([]byte, 64),
+	}
+	if err = oldDevice.Save(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := "failed-device-delete-sentinel-" + strings.Repeat("private-session-", 64)
+	contact, _ := types.ParseJID("15551234567@s.whatsapp.net")
+	if err = oldDevice.Contacts.PutContactName(ctx, contact, sentinel, sentinel); err != nil {
+		t.Fatal(err)
+	}
+	if !sqliteFilesContain(t, sessionPath, []byte(sentinel)) {
+		t.Fatal("sentinel was not persisted before clear")
+	}
+
+	deleteErr := errors.New("injected device delete failure")
+	oldDevice.Container = &wastore.NoopStore{Error: deleteErr}
+	err = client.clearSessionData(ctx)
+	if !errors.Is(err, deleteErr) {
+		t.Fatalf("clear error=%v, want device delete failure", err)
+	}
+	if sqliteFilesContain(t, sessionPath, []byte(sentinel)) {
+		t.Fatal("fallback purge left recoverable sentinel bytes")
+	}
+	if !oldDevice.Deleted {
+		t.Fatal("old device was not retired after delete failure")
+	}
+	if _, err = oldDevice.LIDs.GetPNForLID(ctx, types.JID{User: "1", Server: types.HiddenUserServer}); !errors.Is(err, wastore.ErrDeviceDeleted) {
+		t.Fatalf("old LID store error=%v, want ErrDeviceDeleted", err)
+	}
+	if client.wa.Store == oldDevice || client.wa.Store.ID != nil || client.wa.Store.Deleted {
+		t.Fatalf("fresh pairing store=%p old=%p ID=%v deleted=%v", client.wa.Store, oldDevice, client.wa.Store.ID, client.wa.Store.Deleted)
+	}
+}
+
+func TestLogoutWaitsForAppStateProjectionBeforeClearing(t *testing.T) {
+	ctx := context.Background()
+	c := &Client{
+		reducer:            make(chan func(), 4),
+		reducerDone:        make(chan struct{}),
+		logoutFn:           func(context.Context) error { return whatsmeow.ErrNotLoggedIn },
+		clearAccountDataFn: func(context.Context) error { return nil },
+		groupNameFetches:   make(map[string]*groupNameFetch),
+	}
+	clearStarted := make(chan struct{}, 1)
+	c.clearSessionDataFn = func(context.Context) error {
+		clearStarted <- struct{}{}
+		return nil
+	}
+	c.accepting.Store(true)
+	cleanup := startTestReducer(c)
+	defer cleanup()
+	c.appStateProjection.Lock()
+	done := make(chan error, 1)
+	go func() { done <- c.Logout(ctx) }()
+	select {
+	case <-clearStarted:
+		t.Fatal("logout cleared data while app-state projection lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	c.appStateProjection.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("logout did not resume after app-state projection completed")
+	}
+}
+
+func TestOldGenerationGroupBackfillCannotWriteOrClearNewDeduplication(t *testing.T) {
+	const key = "123@g.us"
+	oldJob := &groupNameFetch{generation: 1, done: make(chan struct{})}
+	newJob := &groupNameFetch{generation: 2, done: make(chan struct{})}
+	c := &Client{
+		// A nil product store makes this test fail by panic if the stale result
+		// reaches the write path.
+		log:              slog.Default(),
+		groupNameFetches: map[string]*groupNameFetch{key: newJob},
+	}
+	c.accepting.Store(true)
+	c.generation.Store(2)
+	c.finishGroupNameBackfill(oldJob, "old-chat", key, &types.GroupInfo{
+		GroupName: types.GroupName{Name: "old account group"},
+	}, nil)
+	if got := c.groupNameFetches[key]; got != newJob {
+		t.Fatal("stale backfill changed the new account's job marker")
+	}
+}
+
+func TestOldGroupBackfillResultCannotCrossLogoutAndCollideWithNewJob(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	oldSource := &whatsmeow.Client{}
+	newSource := &whatsmeow.Client{}
+	oldStarted := make(chan struct{})
+	newStarted := make(chan struct{})
+	releaseOld := make(chan struct{})
+	releaseNew := make(chan struct{})
+	c := &Client{
+		ctx:                ctx,
+		wa:                 oldSource,
+		store:              productStore,
+		sink:               func(Event) {},
+		log:                slog.Default(),
+		reducer:            make(chan func(), 4),
+		reducerDone:        make(chan struct{}),
+		groupNameFetches:   make(map[string]*groupNameFetch),
+		logoutFn:           func(context.Context) error { return whatsmeow.ErrNotLoggedIn },
+		clearAccountDataFn: productStore.ClearAccountData,
+		avatarDir:          filepath.Join(directory, "avatars"),
+		mediaDir:           filepath.Join(directory, "media"),
+	}
+	c.clearSessionDataFn = func(context.Context) error {
+		c.wa = newSource
+		return nil
+	}
+	c.getGroupInfoFn = func(_ context.Context, source *whatsmeow.Client, _ types.JID) (*types.GroupInfo, error) {
+		switch source {
+		case oldSource:
+			close(oldStarted)
+			<-releaseOld
+			return &types.GroupInfo{GroupName: types.GroupName{Name: "old account group"}}, nil
+		case newSource:
+			close(newStarted)
+			<-releaseNew
+			return &types.GroupInfo{GroupName: types.GroupName{Name: "new account group"}}, nil
+		default:
+			return nil, errors.New("unexpected WhatsMeow client")
+		}
+	}
+	c.accepting.Store(true)
+	cleanup := startTestReducer(c)
+	defer cleanup()
+	const group = "123@g.us"
+	c.BackfillGroupName(group, group)
+	select {
+	case <-oldStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old account backfill did not start")
+	}
+	c.groupNameFetchMu.Lock()
+	oldJob := c.groupNameFetches[group]
+	c.groupNameFetchMu.Unlock()
+	if oldJob == nil {
+		t.Fatal("old account job was not registered")
+	}
+	if err = c.Logout(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c.BackfillGroupName(group, group)
+	select {
+	case <-newStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("new account backfill did not start")
+	}
+	c.groupNameFetchMu.Lock()
+	newJob := c.groupNameFetches[group]
+	c.groupNameFetchMu.Unlock()
+	if newJob == nil || newJob == oldJob {
+		t.Fatal("new account did not register a unique backfill job")
+	}
+	close(releaseOld)
+	select {
+	case <-oldJob.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old backfill did not finish")
+	}
+	c.groupNameFetchMu.Lock()
+	gotJob := c.groupNameFetches[group]
+	c.groupNameFetchMu.Unlock()
+	if gotJob != newJob {
+		t.Fatal("old backfill removed the new account's deduplication marker")
+	}
+	if count, countErr := productStore.ChatCount(ctx); countErr != nil || count != 0 {
+		t.Fatalf("old backfill wrote after logout: chats=%d err=%v", count, countErr)
+	}
+	close(releaseNew)
+	select {
+	case <-newJob.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("new backfill did not finish")
+	}
+	chat, err := productStore.Chat(ctx, group)
+	if err != nil || chat.Name != "new account group" {
+		t.Fatalf("new account chat=%+v err=%v", chat, err)
+	}
+}
+
+func TestDelayedOldEventHandlerIsRejectedAfterLogoutGeneration(t *testing.T) {
+	c := &Client{
+		ctx:         context.Background(),
+		sink:        func(Event) { t.Error("stale handler emitted an event") },
+		log:         slog.Default(),
+		reducer:     make(chan func(), 1),
+		reducerDone: make(chan struct{}),
+	}
+	c.accepting.Store(true)
+	c.generation.Store(1)
+	c.eventMu.Lock()
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		c.handleEvent(&whatsmeow.Client{}, 1, &events.Connected{})
+		close(done)
+	}()
+	<-started
+	c.accepting.Store(false)
+	c.generation.Store(2)
+	c.accepting.Store(true)
+	c.eventMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delayed handler did not return")
+	}
+	if len(c.reducer) != 0 {
+		t.Fatal("delayed old handler enqueued reducer work")
+	}
+}
+
+func TestPreparedStartupConnectDoesNotUseFreshClientAfterLogout(t *testing.T) {
+	oldID, _ := types.ParseJID("15550000000:1@s.whatsapp.net")
+	oldSource := &whatsmeow.Client{Store: &wastore.Device{ID: &oldID}}
+	newSource := &whatsmeow.Client{Store: &wastore.Device{}}
+	connectCalls := 0
+	c := &Client{
+		ctx:  context.Background(),
+		wa:   oldSource,
+		sink: func(Event) {},
+		log:  slog.Default(),
+		connectFn: func(_ context.Context, source *whatsmeow.Client) error {
+			connectCalls++
+			if source != oldSource {
+				t.Fatal("prepared startup connect used the fresh client")
+			}
+			return nil
+		},
+	}
+	c.accepting.Store(true)
+	connect := c.PrepareConnect()
+	if connect == nil {
+		t.Fatal("paired startup client did not produce a connect attempt")
+	}
+	c.lifecycleMu.Lock()
+	c.accepting.Store(false)
+	c.generation.Add(1)
+	c.wa = newSource
+	c.accepting.Store(true)
+	c.lifecycleMu.Unlock()
+	if err := connect(); err != nil {
+		t.Fatal(err)
+	}
+	if connectCalls != 0 {
+		t.Fatalf("stale prepared connect ran %d times", connectCalls)
+	}
+}
+
+func sqliteFilesContain(t *testing.T, path string, sentinel []byte) bool {
+	t.Helper()
+	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		data, err := os.ReadFile(candidate)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, sentinel) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMergeContactInfoPreservesSavedNamesAndFillsRemoteFields(t *testing.T) {

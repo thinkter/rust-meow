@@ -39,6 +39,8 @@ type Server struct {
 	handshaken atomic.Bool
 	eventMu    sync.Mutex
 	mediaSlots chan struct{}
+	mediaWG    sync.WaitGroup
+	logoutFn   func(context.Context) error
 }
 type rpcFailure struct {
 	code, message string
@@ -66,12 +68,29 @@ func (s *Server) validateReplyTarget(chatID, messageID string) error {
 func New(ctx context.Context, cancel context.CancelFunc, codec *bridge.Codec, store *store.Store) *Server {
 	return &Server{ctx: ctx, cancel: cancel, codec: codec, store: store, mediaSlots: make(chan struct{}, 4)}
 }
-func (s *Server) SetWhatsApp(client *wa.Client) { s.wa = client }
+func (s *Server) SetWhatsApp(client *wa.Client) {
+	s.wa = client
+	s.logoutFn = client.Logout
+}
 
 func usesMediaSlot(request *bridgev1.RpcRequest) bool {
 	return request.GetGetChatAvatar() != nil || request.GetGetParticipantAvatar() != nil ||
 		request.GetGetMessageImage() != nil || request.GetSendImage() != nil || request.GetSendSticker() != nil ||
 		request.GetGetChatInfo() != nil || request.GetGetMessageAttachment() != nil || request.GetSendAttachment() != nil
+}
+
+func (s *Server) waitForMediaJobs(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.mediaWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Server) Run() error {
@@ -87,7 +106,9 @@ func (s *Server) Run() error {
 		// GetChatInfo joins the media pool because group and about lookups are
 		// network round-trips that must not stall the serialized RPC loop.
 		if s.handshaken.Load() && envelope.GetProtocolVersion() == ProtocolVersion && usesMediaSlot(request) {
+			s.mediaWG.Add(1)
 			go func(envelope *bridgev1.Envelope) {
+				defer s.mediaWG.Done()
 				select {
 				case s.mediaSlots <- struct{}{}:
 				case <-s.ctx.Done():
@@ -551,7 +572,10 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		}
 		return &bridgev1.RpcResponse_MarkRead{MarkRead: &bridgev1.MarkReadResponse{}}, nil
 	case *bridgev1.RpcRequest_Logout:
-		if err := s.wa.Logout(s.ctx); err != nil {
+		if err := s.waitForMediaJobs(s.ctx); err != nil {
+			return nil, &wa.LogoutError{Stage: "isolation", Local: fmt.Errorf("wait for media operations: %w", err)}
+		}
+		if err := s.logoutFn(s.ctx); err != nil {
 			return nil, err
 		}
 		return &bridgev1.RpcResponse_Logout{Logout: &bridgev1.LogoutResponse{}}, nil

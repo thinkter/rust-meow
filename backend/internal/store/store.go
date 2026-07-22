@@ -17,6 +17,7 @@ import (
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
 	"github.com/rust-meow/rust-meow/backend/internal/securefs"
+	"github.com/rust-meow/rust-meow/backend/internal/sqliteprivacy"
 	_ "modernc.org/sqlite"
 )
 
@@ -54,6 +55,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
+	if err = sqliteprivacy.EnableSecureDelete(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("configure database privacy: %w", err)
+	}
 	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000", "PRAGMA synchronous=NORMAL"} {
 		if _, err = db.ExecContext(ctx, pragma); err != nil {
 			db.Close()
@@ -63,6 +68,13 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err = migrate(ctx, db); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// FTS5 maintains its own segments, so core PRAGMA secure_delete does not
+	// cover deleted search terms. This persistent setting must be enabled before
+	// any account writes on both new and already-migrated databases.
+	if _, err = db.ExecContext(ctx, `INSERT INTO message_search(message_search,rank) VALUES('secure-delete',1)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable secure message search deletion: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -75,12 +87,18 @@ func (s *Store) ClearAccountData(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{`DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `DELETE FROM chats`, `DELETE FROM sync_state`} {
+	for _, statement := range []string{`DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM chats`, `DELETE FROM sync_state`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("clear account data: %w", err)
 		}
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit account data clear: %w", err)
+	}
+	if err = sqliteprivacy.PurgeDeletedData(ctx, s.db); err != nil {
+		return fmt.Errorf("purge deleted account data: %w", err)
+	}
+	return nil
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -413,12 +431,16 @@ END;`
 		if _, err = tx.ExecContext(ctx, searchSchema); err != nil {
 			return fmt.Errorf("create message search index: %w", err)
 		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO message_search(message_search,rank) VALUES('secure-delete',1)`); err != nil {
+			return fmt.Errorf("enable secure message search deletion: %w", err)
+		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO message_search(message_search) VALUES('rebuild')`); err != nil {
 			return fmt.Errorf("backfill message search index: %w", err)
 		}
 		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=?`, searchSchemaVersion); err != nil {
 			return fmt.Errorf("record schema v10: %w", err)
 		}
+		currentVersion = searchSchemaVersion
 	}
 	if currentVersion < supportedSchemaVersion {
 		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=?`, supportedSchemaVersion); err != nil {
