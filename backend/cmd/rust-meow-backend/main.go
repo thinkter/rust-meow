@@ -12,6 +12,7 @@ import (
 	"github.com/rust-meow/rust-meow/backend/internal/app"
 	"github.com/rust-meow/rust-meow/backend/internal/bridge"
 	"github.com/rust-meow/rust-meow/backend/internal/logging"
+	"github.com/rust-meow/rust-meow/backend/internal/profilelock"
 	"github.com/rust-meow/rust-meow/backend/internal/securefs"
 	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"github.com/rust-meow/rust-meow/backend/internal/wa"
@@ -43,6 +44,11 @@ func run() error {
 	if err = securefs.EnsurePrivateDirectory(abs); err != nil {
 		return err
 	}
+	profile, err := profilelock.Acquire(abs)
+	if err != nil {
+		return err
+	}
+	defer profile.Close()
 	log, closer, err := logging.New(logFile)
 	if err != nil {
 		return err
