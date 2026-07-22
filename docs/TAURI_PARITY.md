@@ -334,6 +334,29 @@ executable target was missed.
 | pending | pending | Windows x86-64 | NSIS/MSI | pending | pending | pending | pending | pending | pending |
 | pending | pending | macOS arm64 | `.app`/DMG | pending | pending | pending | pending | pending | pending |
 
+## Desktop redesign surfaces
+
+These rows cover work introduced by the 2026-07-22 redesign
+(`docs/UI_REDESIGN.md`). None of them existed in the GPUI client except where
+noted, so "GPUI baseline" is mostly *N/A*: they are new product surface, not
+migration parity. Nothing here is **Proven** — every row still needs desktop QA
+on all three platforms.
+
+| Requirement | GPUI baseline | Tauri state | Proof gate |
+| --- | --- | --- | --- |
+| Token-driven theming with user themes | GPUI light/dark only | UI | **RD-01:** every rule reads `var(--token)`; switching, editing, importing, exporting, and deleting a theme persists and repaints without reload; a malformed or hostile theme file is rejected by `normalizeTheme` and cannot inject CSS beyond a colour value. Supersedes **DS-08** only once system-preference following is implemented — it is not yet. |
+| Custom window chrome (`decorations: false`) | N/A native | UI | **RD-02:** drag, double-click maximise, minimise/maximise/close, and all eight resize edges work on GNOME/KDE/Wayland/X11, Windows, and macOS; the window can still be resized and moved with no OS decorations; snap/tiling still functions. Regressing this makes the app unusable, so it gates release harder than most rows. |
+| Tab strip and two-pane split | Missing | UI | **RD-03:** open/close/reorder/move tabs between panes; both panes receive live messages, receipts, reactions, and typing; drafts and unread counts stay per chat; the workspace restores after reload; closing the last tab of a pane behaves as specified. |
+| Per-chat conversation state | Single active chat | UI | **RD-04:** two panes on two chats simultaneously never cross-contaminate messages, drafts, scroll position, or read receipts; conversation eviction bounds memory with ≥8 chats opened; `chatMerged` remaps every keyed structure. |
+| `Ctrl+Tab` hold-to-cycle switcher | GPUI reference behaviour | UI | **RD-05:** matches `desktop/src/main.rs` — overlay opens on first press, further presses only move the highlight, Ctrl release commits, Escape cancels, window blur cancels rather than commits, and it works when opened from a focused text input. |
+| Docked group member list | Missing | UI | **RD-06:** opens by default for groups, role grouping and counts are correct, a 1000-member group neither janks nor issues 1000 avatar fetches, and it stays consistent with participant changes. |
+| Sender avatars in group messages | GPUI shows sender name only | UI | **RD-07:** avatars appear for incoming group messages, group consecutively within 5 minutes, and the virtualiser's height estimate keeps scroll anchored while they hydrate asynchronously. |
+| Arbitrary emoji reactions | GPUI quick set | UI | **RD-08:** full categorised picker with working keyword search and persisted recents; picking, replacing, and removing a reaction round-trips through the backend; the popover is never clipped by the scroller. |
+| Sticker library from local history | GPUI sticker send only | UI, scope-limited | **RD-09:** stickers from chat history and app-state favourites list, render, and send without re-encoding. **Upstream gap:** WhatsApp does not sync the phone's installed sticker packs to linked devices, so a complete library is not obtainable. The UI must say so plainly rather than appear empty or broken. |
+| Configurable save location | Missing | UI | **RD-10:** `save_media_as` refuses sources outside the managed media cache, reduces the requested name to one path component, never overwrites, and writes only inside the user-chosen directory; an empty setting falls back to the picker. |
+| Compact density | Missing | UI, experimental | **RD-11:** message height estimates match rendered heights so the virtualiser does not drift; the setting persists; layout holds at every UI scale step. |
+| Long-URL containment | Bug: overflowed the pane | UI | **RD-12:** an unbroken 500-character URL wraps inside the bubble, the pane never scrolls horizontally, and the truncated link text still opens the complete URL. |
+
 ## Required verification commands
 
 Run from the repository root unless a command changes directory:
