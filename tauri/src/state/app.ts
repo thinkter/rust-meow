@@ -36,6 +36,7 @@ import {
   bootstrapFailureDecision,
   RequestGeneration,
   RestartEpochQueue,
+  runBoundedRetry,
 } from "./backend-lifecycle";
 import { createPreferences } from "./preferences";
 import { optimisticUnreadCount, shouldRestoreOptimisticUnread } from "./unread";
@@ -379,7 +380,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     }
   }
 
-  async function loadChats(reset = false, supersede = false) {
+  async function loadChats(reset = false, supersede = false, throwOnError = false) {
     if (state.loadingChats && !supersede) return;
     if (!reset && !state.nextChatCursor) return;
     const generation = chatListGeneration.begin();
@@ -398,7 +399,10 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
         setState("nextChatCursor", response.nextCursor);
       });
     } catch (error) {
-      if (chatListGeneration.isCurrent(generation)) toast(normalizeBridgeError(error).message);
+      if (chatListGeneration.isCurrent(generation)) {
+        if (throwOnError) throw error;
+        toast(normalizeBridgeError(error).message);
+      }
     } finally {
       if (chatListGeneration.isCurrent(generation)) setState("loadingChats", false);
     }
@@ -459,7 +463,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   }
 
   /** Fetch (or refetch) a chat's message window and write it into `state.conversations`. */
-  async function loadConversation(chatId: string, aroundMessageId = "") {
+  async function loadConversation(chatId: string, aroundMessageId = "", throwOnError = false) {
     if (!chatId) return;
     ensureConversation(chatId);
     const generation = bumpConversationGeneration(chatId);
@@ -524,7 +528,10 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       void loadAvatar(chatId);
       void bridge.repairRecentReactions(chatId).catch(() => undefined);
     } catch (error) {
-      if (isCurrentGeneration(chatId, generation)) toast(normalizeBridgeError(error).message);
+      if (isCurrentGeneration(chatId, generation)) {
+        if (throwOnError) throw error;
+        toast(normalizeBridgeError(error).message);
+      }
     } finally {
       if (isCurrentGeneration(chatId, generation)) setState("conversations", chatId, "loading", false);
     }
@@ -659,9 +666,12 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     void loadPinnedMessages(chatId);
   }
 
-  async function loadPinnedMessages(chatId: string) {
+  async function loadPinnedMessages(chatId: string, throwOnError = false) {
     try { const response = await bridge.listPinnedMessages(chatId); setState("pinnedMessages", chatId, response.pins); }
-    catch (error) { toast(normalizeBridgeError(error).message); }
+    catch (error) {
+      if (throwOnError) throw error;
+      toast(normalizeBridgeError(error).message);
+    }
   }
 
   /** Close the focused pane's active tab, if any — a convenience over `closeTab`. */
@@ -1603,23 +1613,31 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       try {
         for (let pendingEpoch = restartEpochs.take(); pendingEpoch; pendingEpoch = restartEpochs.take()) {
           try {
-            const [hello, auth] = await Promise.all([bridge.hello(), bridge.getAuthState()]);
-            const openChatIds = activeConversationIds(state.panes);
+            await runBoundedRetry(async (attempt) => {
+              setState("connectionDetail", `Refreshing state (${attempt}/3)`);
+              // Hello is the protocol gate for every fresh process epoch. No
+              // other RPC may race it on a newly restarted bridge.
+              const hello = await bridge.hello();
+              const auth = await bridge.getAuthState();
+              const openChatIds = activeConversationIds(state.panes);
+              batch(() => {
+                setState("backendVersion", hello.backendVersion);
+                setState("connection", auth.connectionState);
+                setState("ownUserId", auth.ownUserId);
+                setState("screen", pairingStartupDecision(auth).screen);
+              });
+              await Promise.all([
+                loadChats(true, true, true),
+                ...openChatIds.flatMap((chatId) => [
+                  loadConversation(chatId, "", true),
+                  loadPinnedMessages(chatId, true),
+                ]),
+              ]);
+            }, 3);
             batch(() => {
-              setState("backendVersion", hello.backendVersion);
-              setState("connection", auth.connectionState);
               setState("connectionDetail", "");
-              setState("ownUserId", auth.ownUserId);
-              setState("screen", pairingStartupDecision(auth).screen);
               setState("fatalError", "");
             });
-            await Promise.all([
-              loadChats(true, true),
-              ...openChatIds.flatMap((chatId) => [
-                loadConversation(chatId),
-                loadPinnedMessages(chatId),
-              ]),
-            ]);
             markBackendReady();
             toast(`Backend reconnected and refreshed (epoch ${pendingEpoch})`, "info");
           } catch (error) {

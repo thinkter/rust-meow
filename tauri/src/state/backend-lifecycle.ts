@@ -75,3 +75,27 @@ export class RequestGeneration {
     return generation === this.current;
   }
 }
+
+/** Retry one epoch refresh a bounded number of times. The injected waiter keeps
+ * the policy deterministic in tests and lets callers use short exponential
+ * delays without hiding the final failure. */
+export async function runBoundedRetry<T>(
+  operation: (attempt: number) => Promise<T>,
+  maxAttempts: number,
+  wait: (delayMs: number) => Promise<void> = (delayMs) =>
+    new Promise((resolve) => window.setTimeout(resolve, delayMs)),
+): Promise<T> {
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new RangeError("maxAttempts must be a positive integer");
+  }
+  let finalError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      finalError = error;
+      if (attempt < maxAttempts) await wait(100 * 2 ** (attempt - 1));
+    }
+  }
+  throw finalError;
+}

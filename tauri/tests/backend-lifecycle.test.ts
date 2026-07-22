@@ -6,6 +6,7 @@ import {
   bootstrapFailureDecision,
   RequestGeneration,
   RestartEpochQueue,
+  runBoundedRetry,
 } from "../src/state/backend-lifecycle.ts";
 
 test("restart lifecycle exposes bounded progress and a fresh resync epoch", () => {
@@ -85,4 +86,33 @@ test("epoch resync refetches every distinct active pane conversation", () => {
     ]),
     ["family", "work"],
   );
+});
+
+test("epoch refresh retries with bounded exponential delays and returns once complete", async () => {
+  const attempts: number[] = [];
+  const delays: number[] = [];
+  const result = await runBoundedRetry(
+    async (attempt) => {
+      attempts.push(attempt);
+      if (attempt < 3) throw new Error(`transient ${attempt}`);
+      return "ready";
+    },
+    3,
+    async (delayMs) => { delays.push(delayMs); },
+  );
+  assert.equal(result, "ready");
+  assert.deepEqual(attempts, [1, 2, 3]);
+  assert.deepEqual(delays, [100, 200]);
+});
+
+test("epoch refresh exposes the final error after its retry budget", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    runBoundedRetry(async () => {
+      attempts += 1;
+      throw new Error(`failed ${attempts}`);
+    }, 2, async () => undefined),
+    /failed 2/,
+  );
+  assert.equal(attempts, 2);
 });
