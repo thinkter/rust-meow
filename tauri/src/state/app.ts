@@ -54,6 +54,7 @@ import {
   recentChatCandidates,
   remapPaneChatId,
   selectTab,
+  uniqueChatPanes,
   writeWorkspaceSnapshot,
   type Pane,
   type Switcher,
@@ -1743,7 +1744,9 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       state.conversations[newId],
       newId,
     );
-    const remappedPanes = state.panes.map((pane) => remapPaneChatId(pane, oldId, newId));
+    const remappedPanes = uniqueChatPanes(
+      state.panes.map((pane) => remapPaneChatId(pane, oldId, newId)),
+    );
     const oldTyping = state.typing[oldId];
     const currentTyping = state.typing[newId];
     const canonicalPins = (state.pinnedMessages[newId] ?? []).map((pin) => ({

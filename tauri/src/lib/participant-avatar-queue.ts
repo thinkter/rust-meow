@@ -21,7 +21,11 @@ export interface ParticipantAvatarQueueOptions {
 export function isRetryableAvatarError(error: unknown): boolean {
   const normalized = avatarErrorShape(error);
   if (!normalized?.retryable) return false;
-  if (normalized.code === "busy" || normalized.code === "timeout") return true;
+  if (
+    normalized.code === "busy"
+    || normalized.code === "timeout"
+    || normalized.code === "avatar_unavailable"
+  ) return true;
   return normalized.code === "transport" && /timed?\s*out|timeout/i.test(normalized.message);
 }
 

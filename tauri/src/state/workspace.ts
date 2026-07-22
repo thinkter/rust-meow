@@ -38,6 +38,23 @@ export function paneContainingChat(panes: readonly Pane[], chatId: string): Pane
   return panes.find((pane) => pane.tabChatIds.includes(chatId));
 }
 
+/** Repair legacy or merged workspaces so one chat cannot drive two independent
+ * pane viewports through one shared conversation window. First pane wins. */
+export function uniqueChatPanes(panes: readonly Pane[]): Pane[] {
+  const seenChats = new Set<string>();
+  return panes.map((pane) => {
+    const tabChatIds = pane.tabChatIds.filter((chatId) => {
+      if (seenChats.has(chatId)) return false;
+      seenChats.add(chatId);
+      return true;
+    });
+    const activeChatId = tabChatIds.includes(pane.activeChatId)
+      ? pane.activeChatId
+      : (tabChatIds[0] ?? "");
+    return { ...pane, tabChatIds, activeChatId };
+  });
+}
+
 /**
  * Load a chat into a pane's currently active tab slot. A chat already open
  * somewhere in this pane is merely focused, matching browser tab behaviour;
@@ -285,22 +302,12 @@ export function normalizeWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | 
     seenIds.add(pane.id);
     panes.push(pane);
   }
-  const seenChats = new Set<string>();
-  for (const pane of panes) {
-    pane.tabChatIds = pane.tabChatIds.filter((chatId) => {
-      if (seenChats.has(chatId)) return false;
-      seenChats.add(chatId);
-      return true;
-    });
-    if (!pane.tabChatIds.includes(pane.activeChatId)) {
-      pane.activeChatId = pane.tabChatIds[0] ?? "";
-    }
-  }
+  const uniquePanes = uniqueChatPanes(panes);
   const focusedPaneId =
-    typeof candidate.focusedPaneId === "string" && panes.some((pane) => pane.id === candidate.focusedPaneId)
+    typeof candidate.focusedPaneId === "string" && uniquePanes.some((pane) => pane.id === candidate.focusedPaneId)
       ? candidate.focusedPaneId
-      : panes[0]!.id;
-  return { panes, focusedPaneId };
+      : uniquePanes[0]!.id;
+  return { panes: uniquePanes, focusedPaneId };
 }
 
 export function readWorkspaceSnapshot(): WorkspaceSnapshot | undefined {

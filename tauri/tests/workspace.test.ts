@@ -12,6 +12,7 @@ import {
   recentChatCandidates,
   remapPaneChatId,
   selectTab,
+  uniqueChatPanes,
   type Pane,
 } from "../src/state/workspace.ts";
 
@@ -234,4 +235,14 @@ test("normalizing a workspace gives each chat one pane-local viewport", () => {
     ],
     focusedPaneId: "pane-2",
   });
+});
+
+test("chat merge deduplicates a canonical chat across panes", () => {
+  assert.deepEqual(uniqueChatPanes([
+    { id: "pane-1", tabChatIds: ["new", "left"], activeChatId: "new" },
+    { id: "pane-2", tabChatIds: ["new", "right"], activeChatId: "new" },
+  ]), [
+    { id: "pane-1", tabChatIds: ["new", "left"], activeChatId: "new" },
+    { id: "pane-2", tabChatIds: ["right"], activeChatId: "right" },
+  ]);
 });

@@ -155,6 +155,23 @@ test("busy and timeout errors retry with backoff while privacy failures are term
   assert.equal(privacyQueue.stats().terminalFailures, 1);
 });
 
+test("retryable backend avatar failures are retried and never session-cached", async () => {
+  let attempts = 0;
+  const queue = new ParticipantAvatarQueue({
+    concurrency: 1,
+    maxAttempts: 2,
+    retryBaseMs: 1,
+    fetchAvatar: async () => {
+      attempts += 1;
+      throw { code: "avatar_unavailable", message: "temporary download failure", retryable: true };
+    },
+    onHydrated: () => assert.fail("failed avatar must not hydrate"),
+  });
+  queue.subscribe("temporary", "group");
+  await waitFor(() => attempts === 2);
+  assert.equal(queue.stats().terminalFailures, 0);
+});
+
 test("retry classification is restricted to retryable busy and timeout failures", () => {
   assert.equal(isRetryableAvatarError({ code: "busy", message: "busy", retryable: true }), true);
   assert.equal(isRetryableAvatarError({ code: "timeout", message: "timeout", retryable: true }), true);
