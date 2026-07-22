@@ -1,4 +1,4 @@
-import { createEffect, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import QRCode from "qrcode";
 import {
   CircleAlert,
@@ -27,10 +27,11 @@ export function StartupScreen() {
 
 export function PairingScreen(props: { model: AppModel }) {
   const { state, actions } = props.model;
-  let canvas: HTMLCanvasElement | undefined;
+  const [canvas, setCanvas] = createSignal<HTMLCanvasElement>();
   createEffect(() => {
-    if (!canvas || !state.qrCode) return;
-    void QRCode.toCanvas(canvas, state.qrCode, {
+    const target = canvas();
+    if (!target || !state.qrCode) return;
+    void QRCode.toCanvas(target, state.qrCode, {
       width: 248,
       margin: 1,
       color: { dark: "#0b141a", light: "#ffffff" },
@@ -44,7 +45,7 @@ export function PairingScreen(props: { model: AppModel }) {
         <h2>Link Rust Meow to WhatsApp</h2>
         <p>Your session and message cache stay on this computer.</p>
         <Show when={state.qrCode} fallback={<div class="qr-frame"><Spinner label="Waiting for a QR code" /></div>}>
-          <div class="qr-frame"><canvas ref={canvas} aria-label="WhatsApp pairing QR code" /></div>
+          <div class="qr-frame"><canvas ref={setCanvas} aria-label="WhatsApp pairing QR code" /></div>
         </Show>
         <ol class="pairing-steps">
           <li>Open WhatsApp on your phone.</li>
