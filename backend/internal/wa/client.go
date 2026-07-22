@@ -3,6 +3,7 @@ package wa
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
@@ -145,6 +146,7 @@ type LogoutError struct {
 var (
 	ErrInvalidAttachment       = errors.New("invalid attachment")
 	errAttachmentDownloadLimit = errors.New("attachment exceeds the 2 GiB download limit")
+	errImageDownloadLimit      = errors.New("image exceeds the 32 MiB download limit")
 )
 
 func (e *LogoutError) Error() string {
@@ -1300,6 +1302,12 @@ func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID
 
 const maxImageBytes = 32 * 1024 * 1024
 
+// WhatsApp downloads encrypted media as AES-CBC ciphertext followed by a
+// 10-byte MAC, then decrypts it in place. PKCS#7 may add a full AES block when
+// the plaintext is block-aligned, so the temporary quota must allow both
+// pieces of wire overhead while still bounding the final image to 32 MiB.
+const maxImageDownloadBytes = maxImageBytes + aes.BlockSize + 10
+
 const maxAttachmentBytes int64 = 2 * 1024 * 1024 * 1024
 const mediaCacheBytes int64 = 512 * 1024 * 1024
 
@@ -2272,6 +2280,9 @@ func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (s
 		}
 		return cachedPath, thumbnailPath, nil
 	}
+	if imageInfo.FileSize > uint64(maxImageBytes) {
+		return "", "", errImageDownloadLimit
+	}
 	if imageInfo.DirectPath == "" || len(imageInfo.MediaKey) == 0 {
 		return "", "", fmt.Errorf("image is not downloadable")
 	}
@@ -2288,26 +2299,32 @@ func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (s
 		temporary.Close()
 		return "", "", err
 	}
+	bounded := &boundedFile{File: temporary, maxSize: maxImageDownloadBytes, limitErr: errImageDownloadLimit}
 	downloadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	err = c.wa.DownloadToFile(downloadCtx, downloadableImage(message.Kind, imageInfo), temporary)
+	err = c.wa.DownloadToFile(downloadCtx, downloadableImage(message.Kind, imageInfo), bounded)
 	cancel()
-	if err != nil {
+	if err != nil && !errors.Is(err, errImageDownloadLimit) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		// History often contains an expired direct path. Ask the primary for the
 		// current descriptor only after a failed fetch, then retry once; this
 		// keeps normal scrolling network-free and avoids infinite retry loops.
 		refreshed, refreshErr := c.recoverImageDescriptor(ctx, message, imageInfo)
 		if refreshErr == nil {
 			imageInfo = refreshed
-			path = c.mediaPath(chatID, messageID, imageInfo.MIMEType)
-			resetErr := temporary.Truncate(0)
-			if resetErr == nil {
-				_, resetErr = temporary.Seek(0, io.SeekStart)
+			if imageInfo.FileSize > uint64(maxImageBytes) {
+				refreshErr = errImageDownloadLimit
+			} else {
+				path = c.mediaPath(chatID, messageID, imageInfo.MIMEType)
 			}
-			if resetErr == nil {
-				downloadCtx, cancel = context.WithTimeout(ctx, 60*time.Second)
-				err = c.wa.DownloadToFile(downloadCtx, downloadableImage(message.Kind, imageInfo), temporary)
-				cancel()
-			}
+		}
+		if refreshErr == nil {
+			refreshErr = resetDownloadFile(bounded)
+		}
+		if refreshErr == nil {
+			downloadCtx, cancel = context.WithTimeout(ctx, 60*time.Second)
+			err = c.wa.DownloadToFile(downloadCtx, downloadableImage(message.Kind, imageInfo), bounded)
+			cancel()
+		} else {
+			err = errors.Join(err, refreshErr)
 		}
 	}
 	if closeErr := temporary.Close(); err == nil {
@@ -2341,7 +2358,17 @@ func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (s
 
 type boundedFile struct {
 	*os.File
-	maxSize int64
+	maxSize  int64
+	limitErr error
+}
+
+var _ whatsmeow.File = (*boundedFile)(nil)
+
+func (file *boundedFile) quotaError() error {
+	if file.limitErr != nil {
+		return file.limitErr
+	}
+	return errAttachmentDownloadLimit
 }
 
 func (file *boundedFile) Write(data []byte) (int, error) {
@@ -2350,26 +2377,26 @@ func (file *boundedFile) Write(data []byte) (int, error) {
 		return 0, err
 	}
 	if offset < 0 || int64(len(data)) > file.maxSize-offset {
-		return 0, errAttachmentDownloadLimit
+		return 0, file.quotaError()
 	}
 	return file.File.Write(data)
 }
 
 func (file *boundedFile) WriteAt(data []byte, offset int64) (int, error) {
 	if offset < 0 || int64(len(data)) > file.maxSize-offset {
-		return 0, errAttachmentDownloadLimit
+		return 0, file.quotaError()
 	}
 	return file.File.WriteAt(data, offset)
 }
 
 func (file *boundedFile) Truncate(size int64) error {
 	if size < 0 || size > file.maxSize {
-		return errAttachmentDownloadLimit
+		return file.quotaError()
 	}
 	return file.File.Truncate(size)
 }
 
-func resetDownloadFile(file *os.File) error {
+func resetDownloadFile(file whatsmeow.File) error {
 	if err := file.Truncate(0); err != nil {
 		return err
 	}
@@ -2507,7 +2534,7 @@ func (c *Client) DownloadAttachment(ctx context.Context, chatID, messageID strin
 		_ = temporary.Close()
 		return "", err
 	}
-	bounded := &boundedFile{File: temporary, maxSize: maxAttachmentBytes + 64}
+	bounded := &boundedFile{File: temporary, maxSize: maxAttachmentBytes + 64, limitErr: errAttachmentDownloadLimit}
 	downloadable, err := downloadableAttachment(message.Kind, attachment)
 	if err != nil {
 		_ = temporary.Close()

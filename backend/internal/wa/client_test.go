@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -569,34 +570,167 @@ func TestDownloadableAttachmentPreservesDescriptors(t *testing.T) {
 	}
 }
 
-func TestBoundedFileRejectsOversizedMutations(t *testing.T) {
-	underlying, err := os.CreateTemp(t.TempDir(), "bounded-*")
+func TestBoundedImageDownloadFileEnforcesTemporaryQuota(t *testing.T) {
+	const quota = int64(4)
+	newFile := func(t *testing.T) *boundedFile {
+		t.Helper()
+		underlying, err := os.CreateTemp(t.TempDir(), "bounded-image-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = underlying.Close() })
+		return &boundedFile{File: underlying, maxSize: quota, limitErr: errImageDownloadLimit}
+	}
+	requireSize := func(t *testing.T, file *boundedFile, want int64) {
+		t.Helper()
+		info, err := file.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() != want || info.Size() > quota {
+			t.Fatalf("size=%d, want %d within quota %d", info.Size(), want, quota)
+		}
+	}
+	requireLimit := func(t *testing.T, n int, err error) {
+		t.Helper()
+		if n != 0 || !errors.Is(err, errImageDownloadLimit) {
+			t.Fatalf("write n=%d err=%v, want image quota error", n, err)
+		}
+	}
+
+	t.Run("ordinary writes", func(t *testing.T) {
+		file := newFile(t)
+		if n, err := file.Write([]byte("12")); err != nil || n != 2 {
+			t.Fatalf("sequential write n=%d err=%v", n, err)
+		}
+		if n, err := file.WriteAt([]byte("34"), 2); err != nil || n != 2 {
+			t.Fatalf("positional write n=%d err=%v", n, err)
+		}
+		if _, err := file.Seek(1, io.SeekStart); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := file.Write([]byte("x")); err != nil || n != 1 {
+			t.Fatalf("overwrite n=%d err=%v", n, err)
+		}
+		if err := file.Truncate(3); err != nil {
+			t.Fatal(err)
+		}
+		requireSize(t, file, 3)
+	})
+
+	t.Run("retry reset", func(t *testing.T) {
+		file := newFile(t)
+		if _, err := file.Write([]byte("1234")); err != nil {
+			t.Fatal(err)
+		}
+		if err := resetDownloadFile(file); err != nil {
+			t.Fatal(err)
+		}
+		requireSize(t, file, 0)
+		if n, err := file.Write([]byte("12")); err != nil || n != 2 {
+			t.Fatalf("write after reset n=%d err=%v", n, err)
+		}
+		requireSize(t, file, 2)
+	})
+
+	t.Run("sequential write", func(t *testing.T) {
+		file := newFile(t)
+		if _, err := file.Write([]byte("1234")); err != nil {
+			t.Fatal(err)
+		}
+		n, err := file.Write([]byte("5"))
+		requireLimit(t, n, err)
+		requireSize(t, file, quota)
+	})
+
+	t.Run("write at", func(t *testing.T) {
+		file := newFile(t)
+		if _, err := file.Write([]byte("12")); err != nil {
+			t.Fatal(err)
+		}
+		n, err := file.WriteAt([]byte("345"), 2)
+		requireLimit(t, n, err)
+		requireSize(t, file, 2)
+	})
+
+	t.Run("seek then write", func(t *testing.T) {
+		file := newFile(t)
+		if _, err := file.Write([]byte("1")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Seek(quota+1, io.SeekStart); err != nil {
+			t.Fatal(err)
+		}
+		n, err := file.Write([]byte("2"))
+		requireLimit(t, n, err)
+		requireSize(t, file, 1)
+	})
+
+	t.Run("truncate", func(t *testing.T) {
+		file := newFile(t)
+		if _, err := file.Write([]byte("12")); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(quota + 1); !errors.Is(err, errImageDownloadLimit) {
+			t.Fatalf("truncate error=%v, want image quota error", err)
+		}
+		requireSize(t, file, 2)
+	})
+}
+
+func TestImageDownloadTemporaryQuotaAllowsCipherOverhead(t *testing.T) {
+	const wantOverhead = int64(26) // one AES block plus WhatsApp's 10-byte MAC
+	if overhead := int64(maxImageDownloadBytes - maxImageBytes); overhead != wantOverhead {
+		t.Fatalf("temporary overhead=%d, want %d", overhead, wantOverhead)
+	}
+	underlying, err := os.CreateTemp(t.TempDir(), "bounded-image-overhead-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer underlying.Close()
-	file := &boundedFile{File: underlying, maxSize: 4}
-	if n, writeErr := file.Write([]byte("1234")); writeErr != nil || n != 4 {
-		t.Fatalf("initial write n=%d err=%v", n, writeErr)
-	}
-	if _, err = file.Write([]byte("5")); !errors.Is(err, errAttachmentDownloadLimit) {
-		t.Fatalf("oversized sequential write error=%v", err)
-	}
-	if _, err = file.WriteAt([]byte("45"), 3); !errors.Is(err, errAttachmentDownloadLimit) {
-		t.Fatalf("oversized positional write error=%v", err)
-	}
-	if err = file.Truncate(5); !errors.Is(err, errAttachmentDownloadLimit) {
-		t.Fatalf("oversized truncate error=%v", err)
-	}
-	if err = file.Truncate(4); err != nil {
+	file := &boundedFile{File: underlying, maxSize: maxImageDownloadBytes, limitErr: errImageDownloadLimit}
+	if err = file.Truncate(maxImageBytes); err != nil {
 		t.Fatal(err)
+	}
+	if _, err = file.Seek(maxImageBytes, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if n, writeErr := file.Write(make([]byte, wantOverhead)); writeErr != nil || n != int(wantOverhead) {
+		t.Fatalf("overhead write n=%d err=%v", n, writeErr)
+	}
+	if n, writeErr := file.Write([]byte{0}); n != 0 || !errors.Is(writeErr, errImageDownloadLimit) {
+		t.Fatalf("post-overhead write n=%d err=%v", n, writeErr)
 	}
 	info, err := file.Stat()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != 4 {
-		t.Fatalf("size=%d, want 4", info.Size())
+	if info.Size() != maxImageDownloadBytes {
+		t.Fatalf("temporary size=%d, want %d", info.Size(), maxImageDownloadBytes)
+	}
+}
+
+func TestDownloadImageRejectsOversizedMetadataBeforeDownload(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	message := domain.Message{
+		ID: "oversized-image", ChatJID: "123@g.us", Timestamp: time.Now(), Kind: "image",
+		Image: &domain.Image{
+			MIMEType: "image/jpeg", DirectPath: "/mms/image", MediaKey: []byte{1},
+			FileSize: uint64(maxImageBytes + 1),
+		},
+	}
+	if err = productStore.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{store: productStore, mediaDir: filepath.Join(directory, "media")}
+	if _, _, err = client.DownloadImage(ctx, message.ChatJID, message.ID); !errors.Is(err, errImageDownloadLimit) {
+		t.Fatalf("download error=%v, want image quota error", err)
 	}
 }
 
