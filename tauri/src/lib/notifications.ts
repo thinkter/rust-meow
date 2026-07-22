@@ -1,5 +1,3 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
-
 import { browserMockEnabled } from "./bridge";
 import type { Chat, Message } from "./types";
 import { notificationBody, notificationTitle } from "./notification-policy";
@@ -49,6 +47,7 @@ export async function listenForNotificationActions(
     const messageId = notification.extra?.messageId;
     if (typeof chatId !== "string" || typeof messageId !== "string" || !chatId || !messageId) return;
     void (async () => {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
       const window = getCurrentWindow();
       await window.show().catch(() => undefined);
       await window.setFocus().catch(() => undefined);
