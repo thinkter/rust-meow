@@ -29,9 +29,8 @@ use gpui::{
     uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
-    VirtualListScrollHandle,
-    avatar::Avatar,
+    ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, Root, Sizable as _, Theme,
+    ThemeMode, VirtualListScrollHandle,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -3376,14 +3375,12 @@ impl RustMeow {
                                             };
                                             let selected = this.store.selected_chat_id.as_deref()
                                                 == Some(chat.id.as_str());
-                                            let avatar = Avatar::new()
-                                                .name(chat.title.clone())
-                                                .with_size(px(42. * ui_scale));
-                                            let avatar = if chat.avatar_path.is_empty() {
-                                                avatar
-                                            } else {
-                                                avatar.src(PathBuf::from(chat.avatar_path.clone()))
-                                            };
+                                            let avatar = avatar_element(
+                                                &chat.title,
+                                                &chat.avatar_path,
+                                                px(42. * ui_scale),
+                                                cx,
+                                            );
                                             let typing_preview = this.typing_label(
                                                 &chat.id,
                                                 chat.kind() == proto::ChatKind::Group,
@@ -3409,6 +3406,7 @@ impl RustMeow {
                                             .flex()
                                             .items_center()
                                             .gap_3()
+                                            .overflow_hidden()
                                             .when(selected, |row| row.bg(selected_background))
                                             .hover(move |style| style.bg(hover_background))
                                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -3423,24 +3421,36 @@ impl RustMeow {
                                                     .gap_1()
                                                     .child(
                                                         h_flex()
-                                                            .justify_between()
+                                                            .w_full()
+                                                            .items_center()
+                                                            .gap_2()
                                                             .child(
                                                                 div()
+                                                                    .flex_1()
+                                                                    .min_w_0()
                                                                     .truncate()
                                                                     .font_weight(
                                                                         gpui::FontWeight::SEMIBOLD,
                                                                     )
-                                                                    .child(chat.title.clone()),
+                                                                    .child(one_line(&chat.title)),
                                                             )
                                                             .when(chat.unread_count > 0, |line| {
                                                                 line.child(
                                                                     div()
+                                                                        .flex_shrink_0()
+                                                                        .min_w(px(18.))
+                                                                        .h(px(18.))
+                                                                        .px_1()
+                                                                        .rounded_full()
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
+                                                                        .bg(rgb(0x25d366))
                                                                         .text_xs()
-                                                                        .text_color(if dark {
-                                                                            rgb(0x25d366)
-                                                                        } else {
-                                                                            rgb(DARK_GREEN)
-                                                                        })
+                                                                        .font_weight(
+                                                                            gpui::FontWeight::SEMIBOLD,
+                                                                        )
+                                                                        .text_color(rgb(0x0b141a))
                                                                         .child(
                                                                             chat.unread_count
                                                                                 .to_string(),
@@ -3450,6 +3460,8 @@ impl RustMeow {
                                                     )
                                                     .child(
                                                         div()
+                                                            .w_full()
+                                                            .min_w_0()
                                                             .truncate()
                                                             .text_sm()
                                                             .text_color(if row_typing {
@@ -3463,7 +3475,7 @@ impl RustMeow {
                                                             } else {
                                                                 cx.theme().muted_foreground
                                                             })
-                                                            .child(preview),
+                                                            .child(one_line(&preview)),
                                                     ),
                                             )
                                         })
@@ -3642,6 +3654,7 @@ impl RustMeow {
                     h_flex()
                         .id(("search-contact", result_index))
                         .h(px(58. * self.ui_scale))
+                        .overflow_hidden()
                         .px_3()
                         .gap_3()
                         .items_center()
@@ -3654,26 +3667,27 @@ impl RustMeow {
                             this.search_highlighted = result_index;
                             this.activate_search_result(window, cx);
                         }))
-                        .child(
-                            Avatar::new()
-                                .name(contact.display_name.clone())
-                                .with_size(px(38.)),
-                        )
+                        .child(avatar_element(&contact.display_name, "", px(38.), cx))
                         .child(
                             v_flex()
                                 .min_w_0()
+                                .flex_1()
                                 .child(
                                     div()
+                                        .w_full()
+                                        .min_w_0()
                                         .truncate()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(contact.display_name),
+                                        .child(one_line(&contact.display_name)),
                                 )
                                 .child(
                                     div()
+                                        .w_full()
+                                        .min_w_0()
                                         .truncate()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(subtitle),
+                                        .child(one_line(&subtitle)),
                                 ),
                         )
                         .into_any_element(),
@@ -3693,6 +3707,7 @@ impl RustMeow {
                     h_flex()
                         .id(("search-group", result_index))
                         .h(px(58. * self.ui_scale))
+                        .overflow_hidden()
                         .px_3()
                         .gap_3()
                         .items_center()
@@ -3705,23 +3720,27 @@ impl RustMeow {
                             this.search_highlighted = result_index;
                             this.activate_search_result(window, cx);
                         }))
-                        .child(Avatar::new().name(chat.title.clone()).with_size(px(38.)))
+                        .child(avatar_element(&chat.title, "", px(38.), cx))
                         .child(
                             v_flex()
                                 .min_w_0()
                                 .flex_1()
                                 .child(
                                     div()
+                                        .w_full()
+                                        .min_w_0()
                                         .truncate()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(chat.title),
+                                        .child(one_line(&chat.title)),
                                 )
                                 .child(
                                     div()
+                                        .w_full()
+                                        .min_w_0()
                                         .truncate()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(preview),
+                                        .child(one_line(&preview)),
                                 ),
                         )
                         .child(
@@ -3748,6 +3767,7 @@ impl RustMeow {
                     v_flex()
                         .id(("search-message", result_index))
                         .h(px(68. * self.ui_scale))
+                        .overflow_hidden()
                         .px_3()
                         .py_2()
                         .cursor_pointer()
@@ -3769,22 +3789,24 @@ impl RustMeow {
                                         .flex_1()
                                         .truncate()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(message.chat_title),
+                                        .child(one_line(&message.chat_title)),
                                 )
                                 .child(
                                     div()
                                         .flex_none()
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(meta),
+                                        .child(one_line(&meta)),
                                 ),
                         )
                         .child(
                             div()
+                                .w_full()
+                                .min_w_0()
                                 .truncate()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(message.snippet),
+                                .child(one_line(&message.snippet)),
                         )
                         .into_any_element(),
                 )
@@ -3917,14 +3939,8 @@ impl RustMeow {
                 },
             )
         });
-        let header_avatar = Avatar::new()
-            .name(chat.title.clone())
-            .with_size(px(38. * self.ui_scale));
-        let header_avatar = if chat.avatar_path.is_empty() {
-            header_avatar
-        } else {
-            header_avatar.src(PathBuf::from(chat.avatar_path.clone()))
-        };
+        let header_avatar =
+            avatar_element(&chat.title, &chat.avatar_path, px(38. * self.ui_scale), cx);
         v_flex()
             .flex_1()
             .h_full()
@@ -4475,12 +4491,7 @@ impl RustMeow {
                                             reaction.sender_avatar_path.as_str()
                                         };
                                         let avatar =
-                                            Avatar::new().name(name.clone()).with_size(px(38.));
-                                        let avatar = if avatar_path.is_empty() {
-                                            avatar
-                                        } else {
-                                            avatar.src(PathBuf::from(avatar_path))
-                                        };
+                                            avatar_element(&name, &avatar_path, px(38.), cx);
                                         h_flex()
                                             .id(("reaction-detail-row", index))
                                             .h(px(58.))
@@ -4685,12 +4696,7 @@ impl RustMeow {
                 .map(|chat| chat.phone_number.clone())
                 .unwrap_or_default()
         };
-        let identity_avatar = Avatar::new().name(title.clone()).with_size(px(96.));
-        let identity_avatar = if avatar_path.is_empty() {
-            identity_avatar
-        } else {
-            identity_avatar.src(PathBuf::from(avatar_path))
-        };
+        let identity_avatar = avatar_element(&title, &avatar_path, px(96.), cx);
 
         let mut body = v_flex()
             .id("chat-info-body")
@@ -4830,17 +4836,13 @@ impl RustMeow {
                         } else {
                             participant.display_name.clone()
                         };
-                        let member_avatar =
-                            Avatar::new().name(display_name.clone()).with_size(px(32.));
-                        let member_avatar = match self
+                        let member_avatar_path = self
                             .store
                             .participant_avatar_path(&participant.participant_id)
-                        {
-                            Some(path) if !path.is_empty() => {
-                                member_avatar.src(PathBuf::from(path))
-                            }
-                            _ => member_avatar,
-                        };
+                            .filter(|path| !path.is_empty())
+                            .unwrap_or_default();
+                        let member_avatar =
+                            avatar_element(&display_name, member_avatar_path, px(32.), cx);
                         let badge = if participant.is_super_admin {
                             Some("Owner")
                         } else if participant.is_admin {
@@ -5069,20 +5071,19 @@ impl RustMeow {
                         } else {
                             chat.last_message_preview.clone()
                         };
-                        let avatar = Avatar::new()
-                            .name(chat.title.clone())
-                            .with_size(px(40. * self.ui_scale));
-                        let avatar = if chat.avatar_path.is_empty() {
-                            avatar
-                        } else {
-                            avatar.src(PathBuf::from(chat.avatar_path.clone()))
-                        };
+                        let avatar = avatar_element(
+                            &chat.title,
+                            &chat.avatar_path,
+                            px(40. * self.ui_scale),
+                            cx,
+                        );
                         h_flex()
                             .id(("recent-chat", index))
                             .h(px(64. * self.ui_scale))
                             .px_4()
                             .gap_3()
                             .items_center()
+                            .overflow_hidden()
                             .cursor_pointer()
                             .when(index == highlighted, |row| row.bg(selected_background))
                             .hover(move |style| style.bg(hover_background))
@@ -5097,16 +5098,20 @@ impl RustMeow {
                                     .flex_1()
                                     .child(
                                         div()
+                                            .w_full()
+                                            .min_w_0()
                                             .truncate()
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child(chat.title),
+                                            .child(one_line(&chat.title)),
                                     )
                                     .child(
                                         div()
+                                            .w_full()
+                                            .min_w_0()
                                             .truncate()
                                             .text_sm()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(preview),
+                                            .child(one_line(&preview)),
                                     ),
                             )
                             .when(chat.archived, |row| {
@@ -5383,10 +5388,18 @@ impl RustMeow {
                 .store
                 .selected_chat()
                 .is_some_and(|chat| chat.kind() == proto::ChatKind::Group);
-        let status = if message.from_me {
-            format!(" · {}", message_status(message.status()))
-        } else {
-            String::new()
+        let meta_text = {
+            let mut segments: Vec<&str> = Vec::new();
+            if message.edited {
+                segments.push("edited");
+            }
+            if message.from_me {
+                let status = message_status(message.status());
+                if !status.is_empty() {
+                    segments.push(status);
+                }
+            }
+            segments.join(" · ")
         };
         h_flex()
             .w_full()
@@ -5394,9 +5407,6 @@ impl RustMeow {
             .gap_2()
             .when(message.from_me, |row| row.justify_end())
             .when(group_incoming, |row| {
-                let avatar = Avatar::new()
-                    .name(message.sender_name.clone())
-                    .with_size(px(30.));
                 let avatar_path = if message.sender_avatar_path.is_empty() {
                     self.store
                         .participant_avatar_path(&message.sender_id)
@@ -5404,11 +5414,12 @@ impl RustMeow {
                 } else {
                     message.sender_avatar_path.as_str()
                 };
-                row.child(if avatar_path.is_empty() {
-                    avatar
-                } else {
-                    avatar.src(PathBuf::from(avatar_path))
-                })
+                row.child(avatar_element(
+                    &message.sender_name,
+                    avatar_path,
+                    px(34.),
+                    cx,
+                ))
             })
             .child(
                 v_flex()
@@ -5429,6 +5440,31 @@ impl RustMeow {
                         }
                     } else {
                         cx.theme().background
+                    })
+                    .when(group_incoming, |bubble| {
+                        let name_color = cx.theme().blue.hue(identity_hue(&message.sender_name));
+                        let show_number = !message.sender_phone_number.is_empty()
+                            && message.sender_phone_number != message.sender_name;
+                        bubble.child(
+                            h_flex()
+                                .items_baseline()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(name_color)
+                                        .child(message.sender_name.clone()),
+                                )
+                                .when(show_number, |header| {
+                                    header.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(message.sender_phone_number.clone()),
+                                    )
+                                }),
+                        )
                     })
                     .when(!reply_target_id.is_empty(), |bubble| {
                         let target_id = reply_target_id.clone();
@@ -5654,30 +5690,21 @@ impl RustMeow {
                     })
                     .child(
                         h_flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "{}{}{}{}",
-                                        message.sender_name,
-                                        if group_incoming
-                                            && !message.sender_phone_number.is_empty()
-                                            && message.sender_phone_number != message.sender_name
-                                        {
-                                            format!(" · {}", message.sender_phone_number)
-                                        } else {
-                                            String::new()
-                                        },
-                                        if message.edited { " · edited" } else { "" },
-                                        status
-                                    )),
-                            )
+                            .items_center()
+                            .gap_1()
+                            .when(!meta_text.is_empty(), |footer| {
+                                footer.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(meta_text.clone()),
+                                )
+                            })
                             .when(reply_count > 0, |footer| {
                                 let reply_id = first_reply_id.clone().unwrap_or_default();
                                 footer.child(
                                     Button::new(("view-replies", index))
+                                        .ghost()
                                         .small()
                                         .label(if reply_count == 1 {
                                             "1 reply".to_string()
@@ -5692,8 +5719,10 @@ impl RustMeow {
                             })
                             .child(
                                 Button::new(("reply-message", index))
+                                    .ghost()
                                     .small()
-                                    .label("Reply")
+                                    .icon(IconName::Undo)
+                                    .tooltip("Reply")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.start_reply(reply_action_message_id.clone());
                                         cx.notify();
@@ -5701,8 +5730,10 @@ impl RustMeow {
                             )
                             .child(
                                 Button::new(("react-message", index))
+                                    .ghost()
                                     .small()
-                                    .label("React")
+                                    .icon(IconName::Heart)
+                                    .tooltip("React")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.open_reaction_picker(
                                             chat_id.clone(),
@@ -5780,12 +5811,24 @@ impl RustMeow {
                 } else {
                     px(54. * self.ui_scale)
                 };
+                // Group messages carry a sender name/number line above the body.
+                let sender_header_height = if !self.store.messages[index].from_me
+                    && self
+                        .store
+                        .selected_chat()
+                        .is_some_and(|chat| chat.kind() == proto::ChatKind::Group)
+                {
+                    px(22. * self.ui_scale)
+                } else {
+                    px(0.)
+                };
                 let height = text_height
                     + image_height
                     + link_preview_height
                     + px(40. * self.ui_scale)
                     + reaction_height
-                    + reply_height;
+                    + reply_height
+                    + sender_header_height;
                 self.store.cache_message_height(id, width_bucket, height);
                 height
             };
@@ -5978,6 +6021,87 @@ impl Render for RustMeow {
 
 // Civil-date conversion (Howard Hinnant's algorithm). Renders a UTC date like
 // "12 Apr 2024" for the group "created" caption without a date dependency.
+/// Collapses every run of whitespace — including the newlines carried by
+/// multi-line messages — into single spaces, so a title or preview always
+/// renders on one line. `truncate()` only sets `white-space: nowrap`, which
+/// leaves hard `\n` breaks intact and would otherwise overflow fixed-height
+/// rows and collide with the row below.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Up to two uppercase initials for an avatar, or `None` when the name has no
+/// alphabetic characters to draw from (e.g. a bare phone number) — the caller
+/// then falls back to a glyph so nothing renders off-centre or truncated.
+fn avatar_initials(name: &str) -> Option<String> {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    let mut initials: String = words
+        .iter()
+        .filter_map(|word| word.chars().find(|character| character.is_alphabetic()))
+        .take(2)
+        .collect();
+    if initials.chars().count() < 2 {
+        if let Some(word) = words
+            .iter()
+            .find(|word| word.chars().any(char::is_alphabetic))
+        {
+            initials = word
+                .chars()
+                .filter(|character| character.is_alphabetic())
+                .take(2)
+                .collect();
+        }
+    }
+    (!initials.is_empty()).then(|| initials.to_uppercase())
+}
+
+/// Stable hue in the 0..1 range derived from an identity key, so each
+/// participant keeps the same colour across their avatar and name label.
+fn identity_hue(key: &str) -> f32 {
+    (gpui::hash(&key) % 24) as f32 * 15.0 / 360.0
+}
+
+/// A round avatar that always centres its content: the cached photo when we
+/// have one, otherwise tinted initials, otherwise a person glyph. Replaces the
+/// stock component so contactless senders no longer show off-centre initials.
+fn avatar_element(name: &str, avatar_path: &str, size: Pixels, cx: &App) -> gpui::Div {
+    let base = div()
+        .flex_shrink_0()
+        .size(size)
+        .rounded_full()
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .justify_center();
+    if !avatar_path.is_empty() {
+        return base.child(
+            img(PathBuf::from(avatar_path.to_owned()))
+                .size(size)
+                .rounded_full()
+                .object_fit(ObjectFit::Cover),
+        );
+    }
+    match avatar_initials(name) {
+        Some(initials) => {
+            let color = cx.theme().blue.hue(identity_hue(name));
+            base.bg(color.opacity(0.18))
+                .text_color(color)
+                .text_size(size * 0.4)
+                .line_height(size)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(initials)
+        }
+        None => base
+            .bg(cx.theme().secondary)
+            .text_color(cx.theme().muted_foreground)
+            .child(
+                Icon::new(IconName::User)
+                    .with_size(size * 0.55)
+                    .text_color(cx.theme().muted_foreground),
+            ),
+    }
+}
+
 fn format_epoch_date(timestamp_ms: i64) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -6335,6 +6459,25 @@ mod reaction_details_ui_tests {
             ..Default::default()
         };
         assert_eq!(image_render_size(&sticker), (px(220.), px(110.)));
+    }
+
+    #[test]
+    fn one_line_flattens_newlines_and_collapses_whitespace() {
+        assert_eq!(
+            one_line("Paid using Google Pay! ✅\nCrores of Indians trust"),
+            "Paid using Google Pay! ✅ Crores of Indians trust"
+        );
+        assert_eq!(one_line("  spaced   out \t line  "), "spaced out line");
+        assert_eq!(one_line("single"), "single");
+    }
+
+    #[test]
+    fn avatar_initials_prefer_word_boundaries_and_skip_number_only_names() {
+        assert_eq!(avatar_initials("Jason Lee").as_deref(), Some("JL"));
+        assert_eq!(avatar_initials("diya").as_deref(), Some("DI"));
+        assert_eq!(avatar_initials("  ashman  ").as_deref(), Some("AS"));
+        assert_eq!(avatar_initials("+91 93104 78203"), None);
+        assert_eq!(avatar_initials(""), None);
     }
 
     #[test]
