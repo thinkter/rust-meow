@@ -2106,6 +2106,26 @@ html[data-appearance="light"] .message-sender {
   margin: 0 calc(-20px * var(--scale)) calc(-14px * var(--scale));
 }
 
+.participant-virtual-list {
+  position: relative;
+  min-height: 0;
+  margin: 0 calc(-20px * var(--scale)) calc(-14px * var(--scale));
+  overflow-x: hidden;
+  overflow-y: auto;
+  contain: strict;
+}
+
+.participant-virtual-list.fill {
+  width: 100%;
+  margin: 0;
+  flex: 1;
+}
+
+.member-panel-scroll {
+  display: flex;
+  overflow: hidden;
+}
+
 .participant-row {
   display: flex;
   width: 100%;

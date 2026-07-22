@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BoundedSet, boundWindowAround, indexMessages } from "../src/lib/performance.ts";
+import { participantDomBudget, participantRosterRows } from "../src/lib/participant-roster.ts";
 import type { Message } from "../src/lib/types.ts";
 
 test("BoundedSet evicts the least recently inserted value", () => {
@@ -54,6 +55,20 @@ test("canonical message windows stay bounded around the requested target", () =>
     droppedBefore: true,
     droppedAfter: true,
   });
+});
+
+test("the 1,000-member roster keeps its mounted DOM budget bounded", () => {
+  const participants = Array.from({ length: 1_000 }, (_, index) => ({
+    participantId: `member-${index}`,
+    displayName: `Member ${index}`,
+    phoneNumber: `${index}`,
+    isAdmin: index < 5,
+    isSuperAdmin: index === 0,
+    isMe: false,
+  }));
+  assert.equal(participantRosterRows(participants, true).length, 1_002);
+  assert.ok(participantDomBudget(720) <= 28, "720px viewport should mount at most 28 roster rows");
+  assert.ok(participantDomBudget(720) < participants.length / 30);
 });
 
 function message(id: string, replyToMessageId = ""): Message {

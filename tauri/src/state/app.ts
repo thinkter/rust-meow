@@ -2,6 +2,7 @@ import { batch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { bridge, normalizeBridgeError, openFile } from "../lib/bridge";
 import { BoundedSet, boundWindowAround } from "../lib/performance";
+import { ParticipantAvatarQueue } from "../lib/participant-avatar-queue";
 import {
   ensureNotificationPermission,
   listenForNotificationActions,
@@ -242,7 +243,6 @@ export function createAppModel() {
   const pendingAttachments = new Set<string>();
   const pendingAvatars = new Set<string>();
   const attemptedAvatars = new BoundedSet<string>(MAX_AVATAR_ATTEMPTS);
-  const attemptedParticipantAvatars = new BoundedSet<string>(MAX_PARTICIPANT_AVATARS);
   const participantAvatarKeys = new BoundedSet<string>(MAX_PARTICIPANT_AVATARS);
   const failedImageKeys = new BoundedSet<string>(MAX_MEDIA_FAILURES);
   const failedAttachmentKeys = new BoundedSet<string>(MAX_MEDIA_FAILURES);
@@ -258,6 +258,16 @@ export function createAppModel() {
   const notifiedMessages = new Set<string>();
   let disposeNotificationActions: (() => void) | undefined;
   const notificationActivations = new NotificationActivationQueue(openNotificationTarget);
+  const participantAvatarQueue = new ParticipantAvatarQueue({
+    fetchAvatar: async (participantId) => (await bridge.getParticipantAvatar(participantId)).avatarPath,
+    onHydrated: (participantId, avatarPath) => {
+      const evicted = participantAvatarKeys.add(participantId);
+      batch(() => {
+        if (evicted) setState("participantAvatars", evicted, undefined!);
+        setState("participantAvatars", participantId, avatarPath);
+      });
+    },
+  });
 
   async function bootstrap() {
     try {
@@ -544,7 +554,11 @@ export function createAppModel() {
 
   function syncSelectedChatId() {
     const pane = state.panes.find((candidate) => candidate.id === state.focusedPaneId);
-    setState("selectedChatId", pane?.activeChatId ?? "");
+    const selectedChatId = pane?.activeChatId ?? "";
+    if (state.selectedChatId && state.selectedChatId !== selectedChatId) {
+      participantAvatarQueue.cancelScope(state.selectedChatId);
+    }
+    setState("selectedChatId", selectedChatId);
   }
 
   function writePane(paneId: string, pane: Pane) {
@@ -1070,28 +1084,9 @@ export function createAppModel() {
     }
   }
 
-  async function loadParticipantAvatar(participantId: string) {
-    if (
-      !participantId ||
-      state.participantAvatars[participantId] ||
-      attemptedParticipantAvatars.has(participantId)
-    ) return;
-    attemptedParticipantAvatars.add(participantId);
-    try {
-      const response = await bridge.getParticipantAvatar(participantId);
-      if (response.avatarPath) {
-        const evicted = participantAvatarKeys.add(participantId);
-        batch(() => {
-          if (evicted) {
-            setState("participantAvatars", evicted, undefined!);
-            attemptedParticipantAvatars.delete(evicted);
-          }
-          setState("participantAvatars", participantId, response.avatarPath);
-        });
-      }
-    } catch {
-      // Optional presentation data.
-    }
+  function loadParticipantAvatar(participantId: string, rosterId = state.selectedChatId) {
+    if (!participantId || !rosterId || state.participantAvatars[participantId]) return () => undefined;
+    return participantAvatarQueue.subscribe(participantId, rosterId);
   }
 
   // ---------------------------------------------------------------------
@@ -1283,6 +1278,7 @@ export function createAppModel() {
   function dispose() {
     disposeNotificationActions?.();
     disposeNotificationActions = undefined;
+    participantAvatarQueue.clear();
   }
 
   async function logout() {
@@ -1305,7 +1301,7 @@ export function createAppModel() {
       conversationGenerations.clear();
       conversationLastFocusedAt.clear();
       attemptedAvatars.clear();
-      attemptedParticipantAvatars.clear();
+      participantAvatarQueue.clear();
       participantAvatarKeys.clear();
       failedImageKeys.clear();
       failedAttachmentKeys.clear();

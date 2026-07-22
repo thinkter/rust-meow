@@ -23,12 +23,12 @@ import {
   X,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
-import type { ChatParticipant } from "../lib/types";
 import { ChatKind } from "../lib/types";
 import { formatDay } from "../lib/format";
 import { normalizeBridgeError, openFile } from "../lib/bridge";
 import { exportTheme, THEME_TOKENS, type Theme, type ThemeToken } from "../lib/theme";
 import { Avatar } from "./Avatar";
+import { ParticipantList } from "./ParticipantList";
 import { IconButton, Spinner } from "./Primitives";
 
 export function ChatInfoPanel(props: { model: AppModel }) {
@@ -112,11 +112,11 @@ export function ChatInfoPanel(props: { model: AppModel }) {
 
                 <section class="info-section">
                   <h3>{value().participantCount || value().participants.length} participants</h3>
-                  <div class="participant-list">
-                    <For each={value().participants}>
-                      {(participant) => <ParticipantRow participant={participant} model={props.model} />}
-                    </For>
-                  </div>
+                  <ParticipantList
+                    model={props.model}
+                    participants={value().participants}
+                    label="Group participants"
+                  />
                 </section>
               </Show>
 
@@ -133,44 +133,6 @@ export function ChatInfoPanel(props: { model: AppModel }) {
         </Show>
       </div>
     </aside>
-  );
-}
-
-/**
- * A single participant entry, shared between the on-demand chat info sheet
- * and the always-docked member list. It stays purely presentational and
- * prop-driven so both callers can render it identically.
- */
-export function ParticipantRow(props: { participant: ChatParticipant; model: AppModel }) {
-  const { state, actions, preferences } = props.model;
-  queueMicrotask(() => void actions.loadParticipantAvatar(props.participant.participantId));
-  return (
-    <button
-      type="button"
-      class="participant-row"
-      disabled={props.participant.isMe}
-      onClick={() =>
-        void actions.openContact({
-          contactJid: props.participant.participantId,
-          chatId: "",
-          displayName: props.participant.displayName,
-          secondaryName: "",
-          phoneNumber: props.participant.phoneNumber,
-        })
-      }
-    >
-      <Avatar
-        name={props.participant.displayName || props.participant.phoneNumber}
-        path={state.participantAvatars[props.participant.participantId]}
-        size={39 * preferences.uiScale}
-      />
-      <span class="participant-row-copy">
-        <strong>{props.participant.isMe ? "You" : props.participant.displayName || props.participant.phoneNumber}</strong>
-        <span>{props.participant.phoneNumber}</span>
-      </span>
-      <Show when={props.participant.isSuperAdmin}><span class="role-badge">Owner</span></Show>
-      <Show when={!props.participant.isSuperAdmin && props.participant.isAdmin}><span class="role-badge">Admin</span></Show>
-    </button>
   );
 }
 
