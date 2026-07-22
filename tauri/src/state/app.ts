@@ -503,6 +503,7 @@ export function createAppModel() {
   async function selectChat(chatId: string, aroundMessageId = "", paneId = state.focusedPaneId) {
     const pane = state.panes.find((candidate) => candidate.id === paneId);
     if (!chatId || !pane) return;
+    const alreadyHydrated = Boolean(state.conversations[chatId]);
     stopTyping();
     batch(() => {
       writePane(paneId, selectTab(pane, chatId));
@@ -519,7 +520,15 @@ export function createAppModel() {
     touchConversationFocus(chatId);
     pruneConversations();
     persistWorkspace();
-    await loadConversation(chatId, aroundMessageId);
+    if (aroundMessageId || !alreadyHydrated) {
+      await loadConversation(chatId, aroundMessageId);
+    } else {
+      // Open tabs receive live upserts even while inactive. Reuse that bounded
+      // window instead of flashing a loading state and doing an avoidable RPC
+      // every time the user cycles through tabs.
+      void markChatRead(chatId);
+      void loadAvatar(chatId);
+    }
   }
 
   /** Close the focused pane's active tab, if any — a convenience over `closeTab`. */

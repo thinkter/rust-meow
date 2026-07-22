@@ -4,6 +4,7 @@ import {
   createSignal,
   For,
   on,
+  onCleanup,
   Show,
 } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
@@ -22,6 +23,11 @@ import type { AppModel } from "../state/app";
 import type { Density } from "../state/preferences";
 import { ChatKind, ConnectionState, type Message } from "../lib/types";
 import { connectionLabel, dayKey, formatDay, messageText } from "../lib/format";
+import {
+  captureScrollSnapshot,
+  resolveScrollRestore,
+  type ScrollSnapshot,
+} from "../state/scroll-restoration";
 import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
 import { MessageBubble } from "./MessageBubble";
@@ -37,11 +43,14 @@ import { IconButton, Spinner } from "./Primitives";
  * `Composer` API only expose against the *focused* pane; see the BUBBLE
  * agent report for that residual gap.
  */
-export function Conversation(props: { model: AppModel; chatId: string }) {
+export function Conversation(props: { model: AppModel; chatId: string; paneId: string }) {
   const { state, actions, preferences } = props.model;
   let scrollRef: HTMLDivElement | undefined;
   let inChatSearchInput: HTMLInputElement | undefined;
-  let initializedChat = "";
+  let initializedViewportKey = "";
+  let restoringViewport = false;
+  let captureFrame: number | undefined;
+  const viewportSnapshots = new Map<string, ScrollSnapshot>();
   const [newMessages, setNewMessages] = createSignal(0);
   const [farFromBottom, setFarFromBottom] = createSignal(false);
   const [searchOpen, setSearchOpen] = createSignal(false);
@@ -101,6 +110,8 @@ export function Conversation(props: { model: AppModel; chatId: string }) {
     on(
       () => props.chatId,
       () => {
+        restoringViewport = true;
+        if (captureFrame !== undefined) cancelAnimationFrame(captureFrame);
         setNewMessages(0);
         setFarFromBottom(false);
       },
@@ -114,16 +125,35 @@ export function Conversation(props: { model: AppModel; chatId: string }) {
         setSearchOpen(false);
         setSearchQuery("");
         setSearchHighlight("");
-        if (!currentChatId || loading || messages().length === 0 || initializedChat === currentChatId) return;
-        initializedChat = currentChatId;
+        const viewportKey = `${props.paneId}:${currentChatId}`;
+        if (!currentChatId || loading || messages().length === 0 || initializedViewportKey === viewportKey) return;
+        initializedViewportKey = viewportKey;
         setNewMessages(0);
         setFarFromBottom(false);
         requestAnimationFrame(() => {
-          const unreadId = conversation().firstUnreadMessageId;
-          const unreadIndex = unreadId ? messages().findIndex((message) => message.id === unreadId) : -1;
-          virtualizer.scrollToIndex(unreadIndex >= 0 ? unreadIndex : messages().length - 1, {
-            align: unreadIndex >= 0 ? "start" : "end",
-          });
+          const target = resolveScrollRestore(
+            messages().map((message) => message.id),
+            viewportSnapshots.get(viewportKey),
+            conversation().firstUnreadMessageId,
+          );
+          if (target.kind === "anchor") {
+            virtualizer.scrollToIndex(target.index, { align: "start" });
+            requestAnimationFrame(() => {
+              if (scrollRef) scrollRef.scrollTop -= target.offset;
+              restoringViewport = false;
+            });
+          } else if (target.kind === "unread") {
+            virtualizer.scrollToIndex(target.index, { align: "start" });
+            requestAnimationFrame(() => { restoringViewport = false; });
+          } else if (target.kind === "latest") {
+            virtualizer.scrollToIndex(target.index, { align: "end" });
+            requestAnimationFrame(() => {
+              scrollToLatest();
+              restoringViewport = false;
+            });
+          } else {
+            restoringViewport = false;
+          }
         });
       },
     ),
@@ -239,6 +269,7 @@ export function Conversation(props: { model: AppModel; chatId: string }) {
           const distance = scrollRef.scrollHeight - scrollRef.scrollTop - scrollRef.clientHeight;
           if (distance < 80) setNewMessages(0);
           setFarFromBottom(distance > scrollRef.clientHeight * 1.5);
+          scheduleViewportCapture();
         }}
       >
         <Show when={conversation().loading}>
@@ -320,8 +351,11 @@ export function Conversation(props: { model: AppModel; chatId: string }) {
           type="button"
           class="floating-jump"
           onClick={() => {
-            if (conversation().hasNewer) void actions.jumpToLatest(props.chatId);
-            else scrollToLatest("smooth");
+            if (conversation().hasNewer) {
+              void actions.jumpToLatest(props.chatId).then(() => {
+                requestAnimationFrame(() => scrollToLatest("smooth"));
+              });
+            } else scrollToLatest("smooth");
             setNewMessages(0);
             setFarFromBottom(false);
           }}
@@ -350,6 +384,26 @@ export function Conversation(props: { model: AppModel; chatId: string }) {
     if (!scrollRef) return;
     scrollRef.scrollTo({ top: scrollRef.scrollHeight, behavior });
   }
+
+  function scheduleViewportCapture() {
+    if (!scrollRef || restoringViewport || captureFrame !== undefined) return;
+    captureFrame = requestAnimationFrame(() => {
+      captureFrame = undefined;
+      if (!scrollRef || restoringViewport) return;
+      const snapshot = captureScrollSnapshot(
+        messages().map((message) => message.id),
+        virtualizer.getVirtualItems(),
+        scrollRef.scrollTop,
+        scrollRef.scrollHeight,
+        scrollRef.clientHeight,
+      );
+      if (snapshot) viewportSnapshots.set(`${props.paneId}:${props.chatId}`, snapshot);
+    });
+  }
+
+  onCleanup(() => {
+    if (captureFrame !== undefined) cancelAnimationFrame(captureFrame);
+  });
 
   function scrollToMessage(messageId: string) {
     const index = messages().findIndex((message) => message.id === messageId);

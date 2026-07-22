@@ -107,7 +107,7 @@ export default function App() {
                     >
                       <Tabs model={model} pane={pane} />
                       <Show when={pane.activeChatId} fallback={<EmptyConversation />}>
-                        <Conversation model={model} chatId={pane.activeChatId} />
+                        <Conversation model={model} chatId={pane.activeChatId} paneId={pane.id} />
                       </Show>
                     </div>
                   </>
