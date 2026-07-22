@@ -52,7 +52,8 @@ export type BackendSubscription =
 
 export interface FilePickerOptions {
   multiple?: false;
-  directory?: false;
+  /** Directory selection backs the configurable save location in settings. */
+  directory?: boolean;
   title?: string;
   filters?: Array<{ name: string; extensions: string[] }>;
 }
@@ -250,6 +251,12 @@ export interface BridgeApi {
     messageId: string,
   ): Promise<GetMessageAttachmentResponse>;
   openMediaPath(path: string): Promise<void>;
+  /** Copy one cached media file into the user's configured save location. */
+  saveMediaAs(
+    sourcePath: string,
+    destinationDir: string,
+    fileName: string,
+  ): Promise<string>;
   markRead(
     chatId: string,
     throughMessageId: string,
@@ -388,6 +395,8 @@ const nativeBridge: BridgeApi = {
       messageId,
     }),
   openMediaPath: (path) => invokeCommand<void>("open_media_path", { path }),
+  saveMediaAs: (sourcePath, destinationDir, fileName) =>
+    invokeCommand<string>("save_media_as", { sourcePath, destinationDir, fileName }),
   markRead: (chatId, throughMessageId) =>
     invokeCommand<MarkReadResponse>("mark_read", {
       chatId,
