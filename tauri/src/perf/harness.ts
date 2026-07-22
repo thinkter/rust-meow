@@ -77,7 +77,11 @@ export function installPerformanceHarness(): PerformanceHarness | undefined {
 
   let prepared: Promise<void> | undefined;
   const prepare = () => prepared ??= (async () => {
-    await waitFor(() => usableAt > 0 && Boolean(window.__RUST_MEOW_PERF_INSPECT__));
+    await waitFor(
+      () => usableAt > 0 && Boolean(window.__RUST_MEOW_PERF_INSPECT__),
+      30_000,
+      "initial usable chat list",
+    );
     await hydrateFixture();
   })();
 
@@ -118,13 +122,21 @@ async function hydrateFixture(): Promise<void> {
   const unread = [...document.querySelectorAll<HTMLButtonElement>(".chat-filters button")]
     .find((button) => button.textContent?.trim() === "Unread");
   unread?.click();
-  await waitFor(() => window.__RUST_MEOW_PERF_INSPECT__?.chatCount() === 10_000, 60_000);
+  await waitFor(
+    () => window.__RUST_MEOW_PERF_INSPECT__?.chatCount() === 10_000,
+    60_000,
+    "all 10,000 chats",
+  );
   const all = [...document.querySelectorAll<HTMLButtonElement>(".chat-filters button")]
     .find((button) => button.textContent?.trim() === "All");
   all?.click();
   await selectChat("Weekend plans 0");
-  await waitFor(() => document.querySelectorAll(".message-row").length > 0);
-  await waitFor(() => window.__RUST_MEOW_PERF_INSPECT__?.participantCount() === 1_000);
+  await waitFor(() => document.querySelectorAll(".message-row").length > 0, 30_000, "initial messages");
+  await waitFor(
+    () => window.__RUST_MEOW_PERF_INSPECT__?.participantCount() === 1_000,
+    30_000,
+    "all 1,000 participants",
+  );
   const scroller = requiredElement<HTMLElement>(".message-scroller");
   // Forty 50-row pages cover the complete 2,000-message fixture. Wait for
   // each page rather than relying on timing so a slow IPC round trip cannot
@@ -133,7 +145,11 @@ async function hydrateFixture(): Promise<void> {
     const before = window.__RUST_MEOW_PERF_INSPECT__!.messageCount();
     scroller.scrollTop = 0;
     scroller.dispatchEvent(new Event("scroll"));
-    await waitFor(() => window.__RUST_MEOW_PERF_INSPECT__!.messageCount() > before, 2_000);
+    await waitFor(
+      () => window.__RUST_MEOW_PERF_INSPECT__!.messageCount() > before,
+      2_000,
+      `message page after ${before} rows`,
+    );
   }
   if (window.__RUST_MEOW_PERF_INSPECT__!.messageCount() !== 2_000) {
     throw new Error("performance fixture did not hydrate all 2,000 messages");
@@ -167,7 +183,11 @@ async function measureIncomingRows(
   const samples: number[] = [];
   while (samples.length < trials) {
     const event = await takeIncoming(incoming);
-    await waitFor(() => Boolean(document.querySelector(`[data-message-id="${event.messageId}"]`)), 10_000);
+    await waitFor(
+      () => Boolean(document.querySelector(`[data-message-id="${event.messageId}"]`)),
+      10_000,
+      `visible live row ${event.messageId}`,
+    );
     await nextPaint();
     samples.push(performance.now() - event.receivedAt);
   }
@@ -177,7 +197,7 @@ async function measureIncomingRows(
 async function takeIncoming(
   incoming: Array<{ messageId: string; receivedAt: number }>,
 ): Promise<{ messageId: string; receivedAt: number }> {
-  await waitFor(() => incoming.length > 0, 10_000);
+  await waitFor(() => incoming.length > 0, 10_000, "incoming fake message event");
   return incoming.shift()!;
 }
 
@@ -188,6 +208,8 @@ async function selectChat(title: string): Promise<void> {
   row.click();
   await waitFor(
     () => document.querySelector(".conversation-heading")?.textContent?.trim().startsWith(title) ?? false,
+    30_000,
+    `conversation ${title}`,
   );
 }
 
@@ -217,10 +239,14 @@ function requiredElement<T extends Element>(selector: string): T {
   return element;
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 30_000): Promise<void> {
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 30_000,
+  label = "performance condition",
+): Promise<void> {
   const deadline = performance.now() + timeoutMs;
   while (!predicate()) {
-    if (performance.now() >= deadline) throw new Error("performance harness timed out");
+    if (performance.now() >= deadline) throw new Error(`performance harness timed out waiting for ${label}`);
     await delay(16);
   }
 }

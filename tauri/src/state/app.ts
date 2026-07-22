@@ -1264,6 +1264,12 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     // because all of its matches are beyond the first page.
     let previousCursor = "";
     for (let page = 0; page < 100 && state.nextChatCursor; page += 1) {
+      // The virtualizer may already be fetching the next page when a filter is
+      // selected. Wait for that owner instead of treating its temporary
+      // loading guard as a repeated cursor and abandoning the full hydrate.
+      while (state.loadingChats) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      }
       const cursor = state.nextChatCursor;
       if (cursor === previousCursor) return;
       previousCursor = cursor;
