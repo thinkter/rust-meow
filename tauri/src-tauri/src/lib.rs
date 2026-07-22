@@ -95,6 +95,41 @@ struct BridgeLifecycle {
     message: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PerformanceCaptureConfig {
+    power_mode: &'static str,
+    capture_kind: &'static str,
+    scroll_ms: u64,
+    launched_at_ms: u64,
+}
+
+fn performance_capture_config() -> Option<PerformanceCaptureConfig> {
+    let idle = std::env::var_os("RUST_MEOW_PERF_IDLE_READY").is_some();
+    if !idle && std::env::var_os("RUST_MEOW_PERF_OUTPUT").is_none() {
+        return None;
+    }
+    let power_mode = match std::env::var("RUST_MEOW_PERF_MODE").as_deref() {
+        Ok("battery") => "battery",
+        _ => "normal",
+    };
+    let scroll_ms = std::env::var("RUST_MEOW_PERF_SCROLL_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(30_000);
+    let launched_at_ms = std::env::var("RUST_MEOW_PERF_LAUNCHED_AT_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
+    Some(PerformanceCaptureConfig {
+        power_mode,
+        capture_kind: if idle { "idle" } else { "renderer" },
+        scroll_ms,
+        launched_at_ms,
+    })
+}
+
 impl FrontendEvent {
     fn local(event: FrontendEventKind) -> Self {
         Self { sequence: 0, event }
@@ -1339,14 +1374,64 @@ async fn logout(
     expect_response!(result, Logout)
 }
 
+#[tauri::command]
+fn complete_performance_capture(
+    app: tauri::AppHandle,
+    payload: serde_json::Value,
+) -> Result<(), CommandError> {
+    let output = std::env::var_os("RUST_MEOW_PERF_OUTPUT")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| CommandError::invalid_argument("performance capture is not enabled"))?;
+    let parent = output
+        .parent()
+        .ok_or_else(|| CommandError::invalid_argument("performance output has no parent"))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        CommandError::open_failed(format!("create performance output directory: {error}"))
+    })?;
+    let temporary = output.with_extension(format!("{}.tmp", std::process::id()));
+    let mut encoded = serde_json::to_vec_pretty(&payload).map_err(|error| {
+        CommandError::invalid_argument(format!("encode performance result: {error}"))
+    })?;
+    encoded.push(b'\n');
+    std::fs::write(&temporary, encoded)
+        .map_err(|error| CommandError::open_failed(format!("write performance result: {error}")))?;
+    std::fs::rename(&temporary, &output).map_err(|error| {
+        CommandError::open_failed(format!("publish performance result: {error}"))
+    })?;
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+fn mark_performance_idle_ready() -> Result<(), CommandError> {
+    let output = std::env::var_os("RUST_MEOW_PERF_IDLE_READY")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| CommandError::invalid_argument("idle performance capture is not enabled"))?;
+    std::fs::write(output, b"ready\n").map_err(|error| {
+        CommandError::open_failed(format!("write idle performance readiness: {error}"))
+    })
+}
+
 pub fn run() {
     let args = std::env::args().collect::<Vec<_>>();
-    let app = tauri::Builder::default()
+    let performance_config = performance_capture_config();
+    let isolated_performance_process = performance_config.is_some()
+        || std::env::var("RUST_MEOW_PERF_ISOLATED").as_deref() == Ok("1");
+    let mut builder = tauri::Builder::default()
         .manage(native_notifications::NotificationActivationStore::from_args(&args))
-        .manage(native_notifications::NativeNotificationService::default())
+        .manage(native_notifications::NativeNotificationService::default());
+    if let Some(config) = &performance_config {
+        let encoded = serde_json::to_string(&config).expect("serialize performance config");
+        builder = builder.append_invoke_initialization_script(format!(
+            "window.__RUST_MEOW_PERF_CONFIG__ = {encoded};"
+        ));
+    }
+    if !isolated_performance_process {
         // This must be the first plugin: a second process must exit before the
         // setup hook starts another sidecar against the same data directory.
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(target) = native_notifications::target_from_args(&args) {
                 app.state::<native_notifications::NotificationActivationStore>()
                     .push(target.clone());
@@ -1356,7 +1441,9 @@ pub fn run() {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-        }))
+        }));
+    }
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -1401,6 +1488,8 @@ pub fn run() {
             set_message_pin,
             list_pinned_messages,
             logout,
+            complete_performance_capture,
+            mark_performance_idle_ready,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Rust Meow");

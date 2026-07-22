@@ -30,6 +30,8 @@ LINUX_BUNDLE_DIR := $(TAURI_CRATE_DIR)/target/$(LINUX_TARGET)/release/bundle/deb
 	sidecar-linux release release-linux legacy-check legacy-test legacy-build \
 	legacy-release clean
 
+.PHONY: perf-test perf-linux perf-linux-normal perf-linux-battery
+
 help:
 	@echo "Rust Meow (Tauri primary desktop)"
 	@echo "  make dev-fake       Run the deterministic 10,000-chat UI"
@@ -39,6 +41,8 @@ help:
 	@echo "  make build          Unbundled size-optimized Tauri release"
 	@echo "  make release-linux  Native Linux .deb with bundled Go sidecar"
 	@echo "  make legacy-test    Test the GPUI behavioral reference"
+	@echo "  make perf-linux     Capture the Linux normal-mode budget report"
+	@echo "  make perf-linux-battery  Capture while a battery host is discharging"
 
 deps:
 	pnpm --dir $(TAURI_DIR) install --frozen-lockfile
@@ -62,8 +66,23 @@ backend-test:
 
 tauri-test: deps
 	pnpm --dir $(TAURI_DIR) test
+	pnpm --dir $(TAURI_DIR) perf:test
 	pnpm --dir $(TAURI_DIR) build
 	cd $(TAURI_CRATE_DIR) && cargo test --locked
+
+perf-test: deps
+	pnpm --dir $(TAURI_DIR) perf:test
+
+perf-linux: perf-linux-normal
+
+perf-linux-normal: guard-linux build
+	pnpm --dir $(TAURI_DIR) perf:renderer -- --mode normal --output ../perf-results/renderer-normal.json
+	node scripts/perf/collect.mjs --mode normal --renderer perf-results/renderer-normal.json --output perf-results/linux-normal.json
+
+perf-linux-battery: guard-linux build
+	node scripts/perf/power.mjs --require-battery
+	pnpm --dir $(TAURI_DIR) perf:renderer -- --mode battery --output ../perf-results/renderer-battery.json
+	node scripts/perf/collect.mjs --mode battery --renderer perf-results/renderer-battery.json --output perf-results/linux-battery.json
 
 backend:
 	mkdir -p $(BUILD_DIR)

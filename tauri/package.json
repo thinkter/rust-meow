@@ -8,6 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
+    "perf:test": "node --test ../scripts/perf/*.test.mjs",
+    "perf:renderer": "node ../scripts/perf/capture-native.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

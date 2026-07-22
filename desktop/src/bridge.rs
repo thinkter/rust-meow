@@ -157,13 +157,15 @@ impl BackendClient {
         let (incoming_tx, incoming) = async_channel::bounded(1024);
         let event_sequence = Arc::new(Mutex::new(1_u64));
         let handshaken = Arc::new(AtomicBool::new(false));
-        let live_incoming = incoming_tx.clone();
-        let live_sequence = event_sequence.clone();
-        let live_handshaken = handshaken.clone();
-        thread::Builder::new()
-            .name("fake-live-events".into())
-            .spawn(move || fake_live_loop(live_incoming, live_sequence, live_handshaken))
-            .expect("spawn fake live events");
+        if env::var("RUST_MEOW_FAKE_LIVE_EVENTS").as_deref() != Ok("0") {
+            let live_incoming = incoming_tx.clone();
+            let live_sequence = event_sequence.clone();
+            let live_handshaken = handshaken.clone();
+            thread::Builder::new()
+                .name("fake-live-events".into())
+                .spawn(move || fake_live_loop(live_incoming, live_sequence, live_handshaken))
+                .expect("spawn fake live events");
+        }
         thread::Builder::new()
             .name("fake-backend".into())
             .spawn(move || fake_loop(outgoing_rx, incoming_tx, event_sequence, handshaken))
@@ -306,6 +308,8 @@ fn fake_loop(
     handshaken: Arc<AtomicBool>,
 ) {
     let pairing = env::var_os("RUST_MEOW_FAKE_PAIRING").is_some();
+    let performance_fixture = env::var_os("RUST_MEOW_PERF_FIXTURE").is_some();
+    let message_total = if performance_fixture { 2_000 } else { 1_000 };
     while let Ok(envelope) = outgoing.recv_blocking() {
         let request_id = envelope.request_id;
         let Some(envelope::Body::Request(request)) = envelope.body else {
@@ -363,7 +367,7 @@ fn fake_loop(
             }
             Some(rpc_request::Request::ListMessages(request)) => {
                 let end = if request.before_timestamp_ms == 0 {
-                    1_000
+                    message_total
                 } else {
                     request.before_timestamp_ms as usize
                 };
@@ -377,15 +381,15 @@ fn fake_loop(
                 })
             }
             Some(rpc_request::Request::OpenMessageWindow(request)) => {
-                let anchor = 950_usize;
+                let anchor = message_total.saturating_sub(50);
                 let start = anchor.saturating_sub(25);
-                let end = (anchor + 26).min(1_000);
+                let end = (anchor + 26).min(message_total);
                 rpc_response::Result::OpenMessageWindow(proto::OpenMessageWindowResponse {
                     messages: (start..end)
                         .map(|id| fake_message(&request.chat_id, id))
                         .collect(),
                     has_older: start > 0,
-                    has_newer: end < 1_000,
+                    has_newer: end < message_total,
                     first_unread_message_id: format!("message-{anchor}"),
                 })
             }
@@ -395,12 +399,12 @@ fn fake_loop(
                     .strip_prefix("message-")
                     .and_then(|value| value.parse::<usize>().ok())
                     .map_or(0, |id| id + 1);
-                let end = (start + request.limit as usize).min(1_000);
+                let end = (start + request.limit as usize).min(message_total);
                 rpc_response::Result::ListMessagesAfter(proto::ListMessagesAfterResponse {
                     messages: (start..end)
                         .map(|id| fake_message(&request.chat_id, id))
                         .collect(),
-                    has_more: end < 1_000,
+                    has_more: end < message_total,
                 })
             }
             Some(rpc_request::Request::SearchLocal(request)) => {
@@ -427,7 +431,7 @@ fn fake_loop(
                     .take(6)
                     .collect();
                 let messages = if query.chars().count() >= 3 {
-                    (975..1_000)
+                    (message_total.saturating_sub(25)..message_total)
                         .map(|id| {
                             let chat = fake_chat(id % 20);
                             proto::MessageSearchResult {
@@ -470,13 +474,13 @@ fn fake_loop(
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(500);
                 let start = anchor.saturating_sub(25);
-                let end = (anchor + 26).min(1_000);
+                let end = (anchor + 26).min(message_total);
                 rpc_response::Result::ListMessagesAround(proto::ListMessagesAroundResponse {
                     messages: (start..end)
                         .map(|id| fake_message(&request.chat_id, id))
                         .collect(),
                     has_older: start > 0,
-                    has_newer: end < 1_000,
+                    has_newer: end < message_total,
                     anchor_message_id: request.message_id,
                 })
             }
@@ -501,7 +505,7 @@ fn fake_loop(
                 let chat = fake_chat(id);
                 let group = chat.kind == proto::ChatKind::Group as i32;
                 let participants: Vec<proto::ChatParticipant> = if group {
-                    (0..12)
+                    (0..if performance_fixture { 1_000 } else { 12 })
                         .map(|index| proto::ChatParticipant {
                             participant_id: format!("1555{index:07}@s.whatsapp.net"),
                             display_name: format!("Meow friend {index}"),

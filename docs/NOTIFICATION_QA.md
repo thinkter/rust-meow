@@ -28,8 +28,11 @@ rust-meow \
 ```
 
 The running instance must focus and route the exact target once. This command
-is also the deterministic packaged smoke path when an OS notification server
-cannot be scripted safely.
+is the deterministic packaged smoke path for the second-instance/argument
+queue. It does **not** substitute for clicking an OS notification after the
+originating process has exited: the current native action callback is owned by
+that process, so true cold-start relaunch remains a platform release blocker
+until each packaged target supplies and proves its persistent activation hook.
 
 ## Packaged DS-03 matrix
 

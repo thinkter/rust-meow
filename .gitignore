@@ -5,6 +5,8 @@
 /tauri/dist/
 /tauri/src-tauri/gen/
 /tauri/src-tauri/target/
+/perf-results/renderer-*.json
+/perf-results/parser-probe.json
 *.db
 *.db-shm
 *.db-wal

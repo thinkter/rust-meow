@@ -1484,6 +1484,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       case "messageUpserted":
         if (event.payload.message) {
           const message = event.payload.message;
+          window.__RUST_MEOW_PERF_EVENT_RECEIVED__?.(message.id, performance.now());
           const chat = state.chats.find((candidate) => candidate.id === message.chatId);
           if (chat) void notifyForMessage(message, chat);
           else if (!message.fromMe) pendingNotifications.set(message.chatId, message);

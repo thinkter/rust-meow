@@ -318,6 +318,11 @@ in the evidence table below.
   in-memory window; visible/overscan rows grow with the viewport, not dataset
   size.
 
+`scripts/perf/` now captures every target as machine-readable, independently
+named budget evidence. See [`PERFORMANCE.md`](PERFORMANCE.md) for Linux
+normal/battery capture and the documented Windows/macOS runners. A report with
+a missing metric fails rather than silently omitting that target.
+
 AppImage is recorded separately. Tauri AppImage bundles can exceed 70 MiB
 because they include runtime libraries, so `.deb`/`.rpm` are the primary Linux
 size comparison and AppImage is a convenience artifact, not evidence that the
