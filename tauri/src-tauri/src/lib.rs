@@ -104,7 +104,7 @@ struct PerformanceCaptureConfig {
     launched_at_ms: u64,
 }
 
-fn performance_capture_config() -> Option<PerformanceCaptureConfig> {
+fn performance_capture_config_from_env() -> Option<PerformanceCaptureConfig> {
     let idle = std::env::var_os("RUST_MEOW_PERF_IDLE_READY").is_some();
     if !idle && std::env::var_os("RUST_MEOW_PERF_OUTPUT").is_none() {
         return None;
@@ -128,6 +128,11 @@ fn performance_capture_config() -> Option<PerformanceCaptureConfig> {
         scroll_ms,
         launched_at_ms,
     })
+}
+
+#[tauri::command]
+fn get_performance_capture_config() -> Option<PerformanceCaptureConfig> {
+    performance_capture_config_from_env()
 }
 
 impl FrontendEvent {
@@ -1416,18 +1421,12 @@ fn mark_performance_idle_ready() -> Result<(), CommandError> {
 
 pub fn run() {
     let args = std::env::args().collect::<Vec<_>>();
-    let performance_config = performance_capture_config();
+    let performance_config = performance_capture_config_from_env();
     let isolated_performance_process = performance_config.is_some()
         || std::env::var("RUST_MEOW_PERF_ISOLATED").as_deref() == Ok("1");
     let mut builder = tauri::Builder::default()
         .manage(native_notifications::NotificationActivationStore::from_args(&args))
         .manage(native_notifications::NativeNotificationService::default());
-    if let Some(config) = &performance_config {
-        let encoded = serde_json::to_string(&config).expect("serialize performance config");
-        builder = builder.append_invoke_initialization_script(format!(
-            "window.__RUST_MEOW_PERF_CONFIG__ = {encoded};"
-        ));
-    }
     if !isolated_performance_process {
         // This must be the first plugin: a second process must exit before the
         // setup hook starts another sidecar against the same data directory.
@@ -1490,6 +1489,7 @@ pub fn run() {
             logout,
             complete_performance_capture,
             mark_performance_idle_ready,
+            get_performance_capture_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Rust Meow");

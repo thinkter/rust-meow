@@ -60,28 +60,44 @@ function captureTrial({ executable: app, profile, resultPath, timeoutMs, env }) 
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`native performance trial timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    child.once("error", (error) => {
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("exit", async (code, signal) => {
-      clearTimeout(timeout);
+      clearInterval(resultPoll);
+      if (child.exitCode === null) child.kill("SIGTERM");
+      callback();
+    };
+    const readResult = async () => {
       try {
         const payload = JSON.parse(await readFile(resultPath, "utf8"));
         if (typeof payload.error === "string") throw new Error(payload.error);
         if (!payload.result) throw new Error("native app returned no performance result");
-        resolve(payload.result);
+        finish(() => resolve(payload.result));
+        return true;
       } catch (error) {
-        reject(new Error(
-          `native performance trial exited ${code ?? signal}: ${error.message}\n${stderr || stdout}`,
-        ));
+        if (error?.code === "ENOENT") return false;
+        finish(() => reject(error));
+        return true;
       }
+    };
+    const resultPoll = setInterval(() => { void readResult(); }, 100);
+    const timeout = setTimeout(() => {
+      finish(() => reject(new Error(
+        `native performance trial timed out after ${timeoutMs}ms\n${stderr || stdout}`,
+      )));
+    }, timeoutMs);
+    child.once("error", (error) => {
+      finish(() => reject(error));
+    });
+    child.once("exit", async (code, signal) => {
+      if (await readResult()) return;
+      finish(() => reject(new Error(
+        `native performance trial exited ${code ?? signal} without a result\n${stderr || stdout}`,
+      )));
     });
   });
 }

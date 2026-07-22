@@ -15,7 +15,7 @@ export interface RendererPerformanceResult {
   display: { width: number; height: number; deviceScaleFactor: number };
 }
 
-interface PerformanceCaptureConfig {
+export interface PerformanceCaptureConfig {
   powerMode: "normal" | "battery";
   captureKind: "renderer" | "idle";
   scrollMs: number;
@@ -42,12 +42,13 @@ declare global {
 }
 
 /**
- * Install before Solid renders. The packaged Tauri app injects the capture
- * config as an initialization script only for an explicitly requested perf
- * process, so ordinary launches pay no observer or benchmark cost.
+ * Install before Solid renders. The packaged Tauri app returns a config only
+ * for an explicitly requested perf process, so ordinary launches pay no
+ * observer or benchmark cost.
  */
-export function installPerformanceHarness(): PerformanceHarness | undefined {
-  const config = window.__RUST_MEOW_PERF_CONFIG__;
+export function installPerformanceHarness(
+  config = window.__RUST_MEOW_PERF_CONFIG__,
+): PerformanceHarness | undefined {
   if (!config) return undefined;
   const stored = JSON.parse(localStorage.getItem("rust-meow-preferences") ?? "{}");
   localStorage.setItem(
@@ -202,10 +203,13 @@ async function takeIncoming(
 }
 
 async function selectChat(title: string): Promise<void> {
-  const row = [...document.querySelectorAll<HTMLButtonElement>(".chat-row")]
-    .find((candidate) => candidate.querySelector(".chat-title")?.textContent?.trim() === title);
-  if (!row) throw new Error(`performance fixture did not render ${title}`);
-  row.click();
+  let row: HTMLButtonElement | undefined;
+  await waitFor(() => {
+    row = [...document.querySelectorAll<HTMLButtonElement>(".chat-row")]
+      .find((candidate) => candidate.querySelector(".chat-title")?.textContent?.trim() === title);
+    return Boolean(row);
+  }, 30_000, `chat row ${title}`);
+  row!.click();
   await waitFor(
     () => document.querySelector(".conversation-heading")?.textContent?.trim().startsWith(title) ?? false,
     30_000,
