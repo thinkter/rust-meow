@@ -48,6 +48,41 @@ export interface MessageIndex {
   readonly firstReplyIdById: ReadonlyMap<string, string>;
 }
 
+export interface BoundedWindow<T> {
+  readonly items: T[];
+  readonly droppedBefore: boolean;
+  readonly droppedAfter: boolean;
+}
+
+/**
+ * Keep a bounded slice around an important row. Canonical conversation
+ * refetches use this instead of blindly retaining every previously visited
+ * search/pin window, while still guaranteeing that the requested anchor is
+ * present after trimming.
+ */
+export function boundWindowAround<T>(
+  items: readonly T[],
+  capacity: number,
+  anchorIndex: number,
+): BoundedWindow<T> {
+  if (!Number.isInteger(capacity) || capacity < 1) {
+    throw new RangeError("window capacity must be a positive integer");
+  }
+  if (items.length <= capacity) {
+    return { items: [...items], droppedBefore: false, droppedAfter: false };
+  }
+
+  const anchor = Math.max(0, Math.min(anchorIndex, items.length - 1));
+  const preferredStart = anchor - Math.floor(capacity / 2);
+  const start = Math.max(0, Math.min(preferredStart, items.length - capacity));
+  const end = start + capacity;
+  return {
+    items: items.slice(start, end),
+    droppedBefore: start > 0,
+    droppedAfter: end < items.length,
+  };
+}
+
 /**
  * Build all reply/quote lookups in one linear pass per message-window update.
  * Visible bubbles can then render in O(1) instead of each scanning as many as

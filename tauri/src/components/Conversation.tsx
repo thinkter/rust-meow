@@ -124,13 +124,25 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
 
   createEffect(
     on(
-      () => [props.chatId, conversation().loading] as const,
-      ([currentChatId, loading]) => {
+      () => [props.chatId, conversation().loading, conversation().highlightedMessageId] as const,
+      ([currentChatId, loading, highlightedMessageId]) => {
         setSearchOpen(false);
         setSearchQuery("");
         setSearchHighlight("");
         const viewportKey = `${props.paneId}:${currentChatId}`;
-        if (!currentChatId || loading || messages().length === 0 || initializedViewportKey === viewportKey) return;
+        if (!currentChatId || loading || messages().length === 0) return;
+        if (highlightedMessageId) {
+          const highlightedIndex = messages().findIndex((message) => message.id === highlightedMessageId);
+          if (highlightedIndex >= 0) {
+            initializedViewportKey = viewportKey;
+            requestAnimationFrame(() => {
+              virtualizer.scrollToIndex(highlightedIndex, { align: "center" });
+              restoringViewport = false;
+            });
+          }
+          return;
+        }
+        if (initializedViewportKey === viewportKey) return;
         initializedViewportKey = viewportKey;
         setNewMessages(0);
         setFarFromBottom(false);
@@ -428,7 +440,7 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
       virtualizer.scrollToIndex(index, { align: "center" });
       return;
     }
-    showNotYet("That message is outside the loaded history. Use global search to jump to it.");
+    void actions.selectChat(props.chatId, messageId, props.paneId);
   }
 
   function openSearch() {
@@ -467,10 +479,6 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
     virtualizer.scrollToIndex(match.index, { align: "center" });
   }
 
-  function showNotYet(message: string) {
-    // Keep unsupported actions honest without interrupting the current chat.
-    console.info(message);
-  }
 }
 
 /** The left-gutter avatar for a group message — its own component so the

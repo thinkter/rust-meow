@@ -442,6 +442,7 @@ function AttachmentMessage(props: {
   chatId: string;
 }) {
   const [playbackFailed, setPlaybackFailed] = createSignal(false);
+  let videoRef: HTMLVideoElement | undefined;
   const source = () => assetUrl(props.attachment.localPath);
   const isAudio = () => props.attachment.kind === "audio" || props.attachment.voiceNote;
   const isVideo = () => props.attachment.kind === "video";
@@ -449,18 +450,25 @@ function AttachmentMessage(props: {
   const failure = () => props.model.state.attachmentFailures[`${props.chatId}\u0000${props.message.id}`];
   const icon = () => (isAudio() ? <FileAudio size={23} /> : isVideo() ? <FileVideo size={23} /> : <FileText size={23} />);
 
+  createEffect(() => {
+    if (!videoRef || !isGif()) return;
+    if (props.model.preferences.batterySaver) videoRef.pause();
+    else void videoRef.play().catch(() => undefined);
+  });
+
   return (
     <>
       <Show when={isVideo() && !playbackFailed() ? source() : undefined}>
         {(url) => (
           <video
+            ref={videoRef}
             class={`message-image ${isGif() ? "gif" : ""}`}
-            controls={!isGif()}
-            autoplay={isGif()}
+            controls={!isGif() || props.model.preferences.batterySaver}
+            autoplay={isGif() && !props.model.preferences.batterySaver}
             loop={isGif()}
             muted={isGif()}
             playsinline
-            preload={isGif() ? "auto" : "metadata"}
+            preload={isGif() && !props.model.preferences.batterySaver ? "auto" : "metadata"}
             src={url()}
             aria-label={props.attachment.fileName || (isGif() ? "Animated GIF" : "Video")}
             onError={() => setPlaybackFailed(true)}

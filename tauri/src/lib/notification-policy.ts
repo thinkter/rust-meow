@@ -1,4 +1,5 @@
 import type { Chat, Message } from "./types.ts";
+import type { Pane } from "../state/workspace.ts";
 
 export interface NotificationPolicyInput {
   enabled: boolean;
@@ -14,6 +15,22 @@ export function shouldNotify(input: NotificationPolicyInput): boolean {
     input.incoming &&
     !input.muted &&
     !(input.visible && input.chatVisible)
+  );
+}
+
+/**
+ * At compact widths CSS renders only the focused split pane. Treating the
+ * hidden pane as visible would silently suppress its notifications and mark
+ * incoming messages read even though the user cannot see them.
+ */
+export function isChatActuallyVisible(
+  panes: readonly Pane[],
+  focusedPaneId: string,
+  chatId: string,
+  compactSplit: boolean,
+): boolean {
+  return panes.some(
+    (pane) => pane.activeChatId === chatId && (!compactSplit || pane.id === focusedPaneId),
   );
 }
 

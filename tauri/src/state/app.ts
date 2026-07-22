@@ -1,13 +1,13 @@
 import { batch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { bridge, normalizeBridgeError, openFile } from "../lib/bridge";
-import { BoundedSet } from "../lib/performance";
+import { BoundedSet, boundWindowAround } from "../lib/performance";
 import {
   ensureNotificationPermission,
   listenForNotificationActions,
   sendMessageNotification,
 } from "../lib/notifications";
-import { shouldNotify } from "../lib/notification-policy";
+import { isChatActuallyVisible, shouldNotify } from "../lib/notification-policy";
 import {
   AttachmentKind,
   ChatKind,
@@ -375,7 +375,8 @@ export function createAppModel() {
   }
 
   function isChatVisible(chatId: string): boolean {
-    return state.panes.some((pane) => pane.activeChatId === chatId);
+    const compactSplit = window.matchMedia?.("(max-width: 900px)").matches ?? false;
+    return isChatActuallyVisible(state.panes, state.focusedPaneId, chatId, compactSplit);
   }
 
   /** Evict conversations that are no longer open anywhere, then trim to the LRU cap. */
@@ -413,19 +414,27 @@ export function createAppModel() {
         const response = await bridge.listMessagesAround(chatId, aroundMessageId);
         if (!isCurrentGeneration(chatId, generation)) return;
         const highlightId = response.anchorMessageId || aroundMessageId;
+        const merged = sortMessages(
+          mergeMessages(state.conversations[chatId]?.messages ?? [], response.messages),
+        );
+        const requestedAnchorIndex = merged.findIndex((message) => message.id === highlightId);
+        const anchorIndex = requestedAnchorIndex >= 0 ? requestedAnchorIndex : merged.length - 1;
+        const bounded = boundWindowAround(merged, MAX_ACTIVE_MESSAGES, anchorIndex);
         batch(() => {
           setState(
             "conversations",
             chatId,
             "messages",
-            reconcile(
-              sortMessages(mergeMessages(state.conversations[chatId]?.messages ?? [], response.messages)),
-              { key: "id" },
-            ),
+            reconcile(bounded.items, { key: "id" }),
           );
-          setState("conversations", chatId, "hasOlder", response.hasOlder);
-          setState("conversations", chatId, "hasNewer", response.hasNewer);
-          setState("conversations", chatId, "highlightedMessageId", highlightId);
+          setState("conversations", chatId, "hasOlder", response.hasOlder || bounded.droppedBefore);
+          setState("conversations", chatId, "hasNewer", response.hasNewer || bounded.droppedAfter);
+          setState(
+            "conversations",
+            chatId,
+            "highlightedMessageId",
+            requestedAnchorIndex >= 0 ? highlightId : "",
+          );
         });
         window.setTimeout(() => {
           if (state.conversations[chatId]?.highlightedMessageId === highlightId) {
@@ -435,18 +444,19 @@ export function createAppModel() {
       } else {
         const response = await bridge.openMessageWindow(chatId);
         if (!isCurrentGeneration(chatId, generation)) return;
+        const merged = sortMessages(
+          mergeMessages(state.conversations[chatId]?.messages ?? [], response.messages),
+        );
+        const bounded = boundWindowAround(merged, MAX_ACTIVE_MESSAGES, merged.length - 1);
         batch(() => {
           setState(
             "conversations",
             chatId,
             "messages",
-            reconcile(
-              sortMessages(mergeMessages(state.conversations[chatId]?.messages ?? [], response.messages)),
-              { key: "id" },
-            ),
+            reconcile(bounded.items, { key: "id" }),
           );
-          setState("conversations", chatId, "hasOlder", response.hasOlder);
-          setState("conversations", chatId, "hasNewer", response.hasNewer);
+          setState("conversations", chatId, "hasOlder", response.hasOlder || bounded.droppedBefore);
+          setState("conversations", chatId, "hasNewer", response.hasNewer || bounded.droppedAfter);
           setState("conversations", chatId, "firstUnreadMessageId", response.firstUnreadMessageId);
         });
       }
