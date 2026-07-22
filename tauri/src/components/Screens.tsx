@@ -1,7 +1,8 @@
-import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import QRCode from "qrcode";
 import {
   CircleAlert,
+  Download,
   LockKeyhole,
   MessageCircleMore,
   RefreshCw,
@@ -46,7 +47,7 @@ export function PairingScreen(props: { model: AppModel }) {
   return (
     <main class="pairing-screen">
       <div class="pairing-card">
-        <LockKeyhole size={38} color="var(--accent-bright)" />
+        <LockKeyhole size={38} color="var(--accent)" />
         <h2>Link Rust Meow to WhatsApp</h2>
         <p>Your session and message cache stay on this computer.</p>
         <Show
@@ -115,6 +116,12 @@ export function FatalScreen(props: { model: AppModel }) {
   );
 }
 
+/** The final path segment, used as the suggested file name when saving media. */
+function basename(path: string): string {
+  const segments = path.split(/[\\/]/);
+  return segments.at(-1) || "file";
+}
+
 export function ImageViewer(props: { model: AppModel }) {
   const viewer = () => props.model.state.imageViewer;
   const close = () => props.model.actions.closeImage();
@@ -123,10 +130,29 @@ export function ImageViewer(props: { model: AppModel }) {
   };
   window.addEventListener("keydown", handleKey);
   onCleanup(() => window.removeEventListener("keydown", handleKey));
+
+  async function saveToFolder(path: string) {
+    // `saveMediaAs` is landing on `AppModel["actions"]` alongside the CORE
+    // agent's save-location work; call it defensively so this button degrades
+    // to a no-op rather than a type error until that lands.
+    const actions = props.model.actions as AppModel["actions"] & {
+      saveMediaAs?: (path: string, suggestedName: string) => Promise<void>;
+    };
+    if (!actions.saveMediaAs) return;
+    try {
+      await actions.saveMediaAs(path, basename(path));
+    } catch (error) {
+      console.error("Could not save the media file", error);
+    }
+  }
+
   return (
     <Show when={viewer()}>
       {(value) => (
         <div class="modal-backdrop" role="dialog" aria-modal="true" aria-label={value().sticker ? "Sticker" : "Photo"} onClick={close}>
+          <div style={{ position: "fixed", top: "18px", right: "62px" }} onClick={(event) => event.stopPropagation()}>
+            <IconButton label="Save to folder" onClick={() => void saveToFolder(value().path)}><Download size={20} /></IconButton>
+          </div>
           <IconButton label="Close image" class="modal-close" onClick={close}><X size={21} /></IconButton>
           <div class="image-viewer" onClick={(event) => event.stopPropagation()}>
             <img src={assetUrl(value().path)} alt={value().caption || (value().sticker ? "Sticker" : "Photo")} />
@@ -180,13 +206,15 @@ export function LogoutDialog(props: { model: AppModel }) {
 export function Toasts(props: { model: AppModel }) {
   return (
     <div class="toast-stack" aria-live="assertive">
-      {props.model.state.toasts.map((toast) => (
-        <div class={`toast ${toast.kind}`}>
-          <CircleAlert size={19} />
-          <span>{toast.message}</span>
-          <IconButton label="Dismiss" onClick={() => props.model.actions.dismissToast(toast.id)}><X size={16} /></IconButton>
-        </div>
-      ))}
+      <For each={props.model.state.toasts}>
+        {(toast) => (
+          <div class={`toast ${toast.kind}`}>
+            <CircleAlert size={19} />
+            <span>{toast.message}</span>
+            <IconButton label="Dismiss" onClick={() => props.model.actions.dismissToast(toast.id)}><X size={16} /></IconButton>
+          </div>
+        )}
+      </For>
     </div>
   );
 }
