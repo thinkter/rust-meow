@@ -52,6 +52,34 @@ type Message struct {
 	Contacts     []Contact
 	Location     *Location
 	LinkPreview  *LinkPreview
+	Poll         *Poll
+}
+
+type Poll struct {
+	Question               string
+	Options                []PollOption
+	SelectableOptionsCount uint32
+	TotalVoters            uint32
+}
+
+type PollOption struct {
+	Name         string
+	VoteCount    uint32
+	SelectedByMe bool
+}
+
+type PollVote struct {
+	ChatJID, PollMessageID, VoterJID string
+	SelectedOptions                  []string
+	Timestamp                        time.Time
+	FromMe                           bool
+}
+
+type PinnedMessage struct {
+	MessageID string
+	PinnedAt  time.Time
+	PinnedBy  string
+	Message   *Message
 }
 
 type LinkPreview struct {

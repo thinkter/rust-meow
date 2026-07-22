@@ -15,7 +15,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -701,6 +701,56 @@ fn fake_loop(
                     attempts: 0,
                 })
             }
+            Some(rpc_request::Request::CreatePoll(request)) => {
+                let mut message = fake_message(&request.chat_id, 1_001);
+                message.from_me = true;
+                message.content = Some(proto::message::Content::Poll(proto::PollContent {
+                    question: request.question,
+                    options: request
+                        .options
+                        .into_iter()
+                        .map(|name| proto::PollOption {
+                            name,
+                            vote_count: 0,
+                            selected_by_me: false,
+                        })
+                        .collect(),
+                    selectable_options_count: request.selectable_options_count,
+                    total_voters: 0,
+                }));
+                rpc_response::Result::CreatePoll(proto::CreatePollResponse {
+                    message: Some(message),
+                })
+            }
+            Some(rpc_request::Request::VotePoll(request)) => {
+                let mut message = fake_message(&request.chat_id, 1_001);
+                message.id = request.poll_message_id;
+                message.content = Some(proto::message::Content::Poll(proto::PollContent {
+                    question: "Fake poll".into(),
+                    options: request
+                        .selected_options
+                        .into_iter()
+                        .map(|name| proto::PollOption {
+                            name,
+                            vote_count: 1,
+                            selected_by_me: true,
+                        })
+                        .collect(),
+                    selectable_options_count: 1,
+                    total_voters: 1,
+                }));
+                rpc_response::Result::VotePoll(proto::VotePollResponse {
+                    message: Some(message),
+                })
+            }
+            Some(rpc_request::Request::SetMessagePin(_)) => {
+                rpc_response::Result::SetMessagePin(proto::SetMessagePinResponse {})
+            }
+            Some(rpc_request::Request::ListPinnedMessages(_)) => {
+                rpc_response::Result::ListPinnedMessages(proto::ListPinnedMessagesResponse {
+                    pins: Vec::new(),
+                })
+            }
             Some(rpc_request::Request::MarkRead(_)) => {
                 rpc_response::Result::MarkRead(proto::MarkReadResponse {})
             }
@@ -1081,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn fake_attachment_responses_match_v14_contract() {
+    fn fake_attachment_responses_match_v15_contract() {
         let request = |kind, caption: &str, voice_note| proto::SendAttachmentRequest {
             client_message_id: "request-id".into(),
             chat_id: "chat-id".into(),

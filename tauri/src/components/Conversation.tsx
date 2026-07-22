@@ -18,6 +18,7 @@ import {
   MoreVertical,
   Search,
   X,
+  Pin,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import type { Density } from "../state/preferences";
@@ -277,6 +278,20 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
         <div class="connection-banner">
           <CircleAlert size={15} />
           <span>{connectionLabel(state.connection)}{state.connectionDetail ? ` · ${state.connectionDetail}` : ""}</span>
+        </div>
+      </Show>
+
+      <Show when={(state.pinnedMessages[props.chatId]?.length ?? 0) > 0}>
+        <div class="pinned-message-strip" aria-label="Pinned messages">
+          <Pin size={15} />
+          <For each={state.pinnedMessages[props.chatId] ?? []}>{(pin) => (
+            <span class="pinned-message-chip">
+              <button type="button" disabled={!pin.available} title={pin.available ? "Open pinned message" : "Pinned message is unavailable"} onClick={() => scrollToMessage(pin.messageId)}>
+                {pin.message ? messageText(pin.message).slice(0, 64) || "Pinned message" : "Unavailable message"}
+              </button>
+              <button type="button" aria-label="Unpin message" onClick={() => void actions.setMessagePin(pin.messageId, false, props.chatId)}><X size={13} /></button>
+            </span>
+          )}</For>
         </div>
       </Show>
 

@@ -75,6 +75,7 @@ export function messageText(message: Message): string {
   if ("location" in content) {
     return content.location.name || content.location.address || "Location";
   }
+  if ("poll" in content) return `Poll: ${content.poll.question}`;
   return content.unsupported.fallbackText || content.unsupported.typeName || "Message";
 }
 

@@ -44,7 +44,7 @@ release even if the visible UI appears correct.
   processes or read arbitrary local files.
 - Tauri and the sidecar communicate only through one coordinated protocol
   version using four-byte big-endian length, protobuf payload, and a maximum
-  frame size of 8 MiB. Attachment work advanced the wire contract to v14; both
+  frame size of 8 MiB. Poll and pinned-message work advanced the wire contract to v15; both
   processes must always be rebuilt together at that version.
 - `Hello` is the first request. Normal requests are not sent before its version
   handshake succeeds.
@@ -95,7 +95,7 @@ Known foundation blockers at this snapshot:
   must be accepted explicitly rather than inferred from the smaller size;
 - the Makefile now makes Tauri the default development/build/check path; GPUI
   regressions remain an explicit migration gate;
-- protocol v14 and both attachment RPCs are wired through the Go backend,
+- protocol v15 and attachment, poll, and pinned-message RPCs are wired through the Go backend,
   shared fake bridge, Tauri commands, and typed frontend, but the end-to-end
   document/audio/video gates remain unproven.
 
@@ -104,7 +104,7 @@ Known foundation blockers at this snapshot:
 | Capability | GPUI baseline | Tauri state | Proof required before cutover |
 | --- | --- | --- | --- |
 | Sidecar is sole state owner | GPUI | Core | **TR-01:** inspect open files while paired; only the Go PID may hold `session.db`/`client.db`; webview and Tauri code contain no SQL/session access. |
-| Protocol v14 Hello-first handshake | Shared GPUI bridge at v14 | Core | **TR-02:** both processes declare v14; valid Hello succeeds; request-before-Hello and incompatible versions fail closed in backend tests and a packaged-app smoke test. |
+| Protocol v15 Hello-first handshake | Shared GPUI bridge at v15 | Core | **TR-02:** both processes declare v15; valid Hello succeeds; request-before-Hello and incompatible versions fail closed in backend tests and a packaged-app smoke test. |
 | 8 MiB framed protobuf codec | GPUI | Core | **TR-03:** round-trip, zero-length, truncated, corrupt, and oversized frame tests pass on both sides. |
 | Concurrent request correlation | GPUI | Core | **TR-04:** issue mixed read/write RPCs with deliberately reordered responses; each promise completes once with its own response. |
 | Per-operation timeouts | GPUI | Core | **TR-05:** control/read/write stalls produce typed errors; late replies are ignored and pending entries are removed. |
@@ -205,7 +205,7 @@ Known foundation blockers at this snapshot:
 | Video/GIF attachment and playback | Backend/Core/UI path | UI loops downloaded GIF-playback media inline and falls back to the OS player on codec failure; proof pending | **CP-11:** transcoding/thumbnail/duration, range playback, codec fallback, caption, bounded cache, and registered typed Tauri calls. |
 | Audio file and voice-note recording | Stored-attachment path; no recorder | Partial; recorder missing | **CP-12:** microphone permission, waveform/duration, cancel/lock/pause, upload, playback speed, seeking, background behavior, and registered typed Tauri calls. |
 | Contact and location message | Placeholder only | Missing | **CP-13:** render and send structured contact/location with safe external actions and privacy review. |
-| Poll create/vote/results | Placeholder only | Read-only creation/options and result-snapshot presentation; create/vote reduction missing | **CP-14:** single/multi-select, encrypted vote updates, retraction, live totals, and history replay. |
+| Poll create/vote/results | Placeholder only | Core/UI: single/multi-select creation, encrypted full-state voting/retraction, live totals, durable replay, and stale-intent rollback | **CP-14:** single/multi-select, encrypted vote updates, retraction, live totals, and history replay. |
 | Edit sent message | Missing | Missing | **CP-15:** eligibility window, optimistic edit, rejection rollback, edit event, and multi-device convergence. |
 | Delete for me/everyone | Missing | Missing | **CP-16:** eligibility/admin rules, confirmation, persistence, media-cache cleanup, and remote revoke result. |
 | Forward/share messages | Missing | Missing | **CP-17:** multi-select targets, forwarded metadata, media reuse/reupload, partial failure, and no wrong-chat sends. |
@@ -222,7 +222,7 @@ Known foundation blockers at this snapshot:
 | Disappearing timer display | GPUI | Core data | **IN-04:** off and supported durations render human-readable values. |
 | Set disappearing timer | Missing | Missing | **IN-05:** supported durations update remote/app state and emit system-state change. |
 | Archive/unarchive action | Read-only archived view | Missing | **IN-06:** mutation persists across devices and moves row between views without losing the active conversation. |
-| Pin/unpin action | Sorts existing pinned state | Missing | **IN-07:** app-state limits/errors and ordering persist across restart. |
+| Pin/unpin action | Sorts existing pinned state | Core/UI: admin-aware mutation, durable ordered pinned browser, unavailable-target fallback, exact navigation | **IN-07:** app-state limits/errors and ordering persist across restart. |
 | Mute/unmute action | Displays backend field indirectly | Missing | **IN-08:** duration/forever semantics drive notification suppression and app-state sync. |
 | Clear/delete chat | Missing | Missing | **IN-09:** explicit confirmation, remote/local semantics, message/media cleanup, and selected-chat fallback pass. |
 | Block/unblock/report | Missing | Missing | **IN-10:** privacy state, reporting confirmation, transport errors, and composer availability update correctly. |

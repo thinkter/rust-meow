@@ -25,7 +25,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 14
+const ProtocolVersion uint32 = 15
 const maxTextBytes = 65_536
 const maxConcurrentMediaJobs = 4
 const maxMediaJobsInFlight = 32
@@ -210,6 +210,8 @@ func (s *Server) Emit(event wa.Event) {
 		body.Event = &bridgev1.BackendEvent_Problem{Problem: &bridgev1.BackendProblem{Code: "WHATSAPP", Message: event.Detail}}
 	case "stickers":
 		body.Event = &bridgev1.BackendEvent_StickersChanged{StickersChanged: &bridgev1.StickersChanged{}}
+	case "pins":
+		body.Event = &bridgev1.BackendEvent_PinnedMessagesChanged{PinnedMessagesChanged: &bridgev1.PinnedMessagesChanged{ChatId: event.ChatJID}}
 	default:
 		return
 	}
@@ -571,6 +573,79 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, err
 		}
 		return &bridgev1.RpcResponse_SendStickerFromLibrary{SendStickerFromLibrary: &bridgev1.SendStickerFromLibraryResponse{Message: s.wireMessage(message)}}, nil
+	case *bridgev1.RpcRequest_CreatePoll:
+		poll := req.CreatePoll
+		if poll.GetChatId() == "" || poll.GetClientMessageId() == "" || strings.TrimSpace(poll.GetQuestion()) == "" || len(poll.GetOptions()) < 2 || len(poll.GetOptions()) > 12 {
+			return nil, fail("invalid_argument", "poll requires a chat, UUID, question, and 2-12 options", false)
+		}
+		if _, err := uuid.Parse(poll.GetClientMessageId()); err != nil {
+			return nil, fail("invalid_argument", "client_message_id must be a UUID", false)
+		}
+		if poll.GetSelectableOptionsCount() < 1 || int(poll.GetSelectableOptionsCount()) > len(poll.GetOptions()) {
+			return nil, fail("invalid_argument", "selectable_options_count must be between 1 and the option count", false)
+		}
+		seen := map[string]bool{}
+		normalizedOptions := make([]string, 0, len(poll.GetOptions()))
+		for _, option := range poll.GetOptions() {
+			option = strings.TrimSpace(option)
+			if option == "" || len(option) > 100 || seen[option] {
+				return nil, fail("invalid_argument", "poll options must be unique non-empty strings up to 100 bytes", false)
+			}
+			seen[option] = true
+			normalizedOptions = append(normalizedOptions, option)
+		}
+		if !s.wa.IsConnected() {
+			return nil, fail("not_connected", "WhatsApp is not connected", true)
+		}
+		message, err := s.wa.SendPoll(s.ctx, poll.GetClientMessageId(), poll.GetChatId(), strings.TrimSpace(poll.GetQuestion()), normalizedOptions, int(poll.GetSelectableOptionsCount()))
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_CreatePoll{CreatePoll: &bridgev1.CreatePollResponse{Message: s.wireMessage(message)}}, nil
+	case *bridgev1.RpcRequest_VotePoll:
+		vote := req.VotePoll
+		if vote.GetChatId() == "" || vote.GetPollMessageId() == "" {
+			return nil, fail("invalid_argument", "chat_id and poll_message_id are required", false)
+		}
+		if !s.wa.IsConnected() {
+			return nil, fail("not_connected", "WhatsApp is not connected", true)
+		}
+		message, err := s.wa.VotePoll(s.ctx, vote.GetChatId(), vote.GetPollMessageId(), vote.GetSelectedOptions())
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_VotePoll{VotePoll: &bridgev1.VotePollResponse{Message: s.wireMessage(message)}}, nil
+	case *bridgev1.RpcRequest_SetMessagePin:
+		pin := req.SetMessagePin
+		if pin.GetChatId() == "" || pin.GetMessageId() == "" {
+			return nil, fail("invalid_argument", "chat_id and message_id are required", false)
+		}
+		if !s.wa.IsConnected() {
+			return nil, fail("not_connected", "WhatsApp is not connected", true)
+		}
+		if err := s.wa.SetMessagePin(s.ctx, pin.GetChatId(), pin.GetMessageId(), pin.GetPinned()); errors.Is(err, wa.ErrPinNotPermitted) {
+			return nil, fail("permission_denied", err.Error(), false)
+		} else if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_SetMessagePin{SetMessagePin: &bridgev1.SetMessagePinResponse{}}, nil
+	case *bridgev1.RpcRequest_ListPinnedMessages:
+		if req.ListPinnedMessages.GetChatId() == "" {
+			return nil, fail("invalid_argument", "chat_id is required", false)
+		}
+		pins, err := s.store.PinnedMessages(s.ctx, req.ListPinnedMessages.GetChatId())
+		if err != nil {
+			return nil, err
+		}
+		response := &bridgev1.ListPinnedMessagesResponse{Pins: make([]*bridgev1.PinnedMessage, 0, len(pins))}
+		for _, pin := range pins {
+			wire := &bridgev1.PinnedMessage{MessageId: pin.MessageID, PinnedAtMs: pin.PinnedAt.UnixMilli(), PinnedBy: pin.PinnedBy, Available: pin.Message != nil}
+			if pin.Message != nil {
+				wire.Message = s.wireMessage(*pin.Message)
+			}
+			response.Pins = append(response.Pins, wire)
+		}
+		return &bridgev1.RpcResponse_ListPinnedMessages{ListPinnedMessages: response}, nil
 	case *bridgev1.RpcRequest_GetMessageImage:
 		if req.GetMessageImage.GetChatId() == "" || req.GetMessageImage.GetMessageId() == "" {
 			return nil, fail("invalid_argument", "chat_id and message_id are required", false)
@@ -870,6 +945,12 @@ func wireMessage(m domain.Message) *bridgev1.Message {
 				JpegThumbnail: preview.JPEGThumbnail, ThumbnailWidth: preview.ThumbnailWidth, ThumbnailHeight: preview.ThumbnailHeight}
 		}
 		message.Content = &bridgev1.Message_Text{Text: text}
+	} else if m.Poll != nil {
+		poll := &bridgev1.PollContent{Question: m.Poll.Question, SelectableOptionsCount: m.Poll.SelectableOptionsCount, TotalVoters: m.Poll.TotalVoters}
+		for _, option := range m.Poll.Options {
+			poll.Options = append(poll.Options, &bridgev1.PollOption{Name: option.Name, VoteCount: option.VoteCount, SelectedByMe: option.SelectedByMe})
+		}
+		message.Content = &bridgev1.Message_Poll{Poll: poll}
 	} else {
 		message.Content = &bridgev1.Message_Unsupported{Unsupported: &bridgev1.UnsupportedContent{TypeName: m.Kind, FallbackText: m.Text}}
 	}

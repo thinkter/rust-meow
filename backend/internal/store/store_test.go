@@ -1507,3 +1507,72 @@ func TestFavoriteStickerUpsertAndRemove(t *testing.T) {
 		t.Fatalf("err=%v, want sql.ErrNoRows after removal", err)
 	}
 }
+
+func TestPollVotesAndPinsConvergeAndSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "client.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pollMessage := domain.Message{ID: "poll-1", ChatJID: "group@g.us", TransportJID: "group@g.us", SenderJID: "owner@s.whatsapp.net", Kind: "poll", Text: "Lunch?", Timestamp: time.UnixMilli(100), Poll: &domain.Poll{Question: "Lunch?", SelectableOptionsCount: 2, Options: []domain.PollOption{{Name: "Pizza"}, {Name: "Sushi"}}}}
+	if err = s.ApplyMessage(ctx, pollMessage, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "snapshot", ChatJID: "group@g.us", TransportJID: "group@g.us", Kind: "poll", Timestamp: time.UnixMilli(100), Poll: &domain.Poll{Question: "Final lunch result", Options: []domain.PollOption{{Name: "Pizza", VoteCount: 4}, {Name: "Sushi", VoteCount: 2}}, TotalVoters: 4}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "target", ChatJID: "group@g.us", TransportJID: "group@g.us", Kind: "text", Text: "important", Timestamp: time.UnixMilli(101)}, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, vote := range []domain.PollVote{
+		{ChatJID: "group@g.us", PollMessageID: "poll-1", VoterJID: "alice", SelectedOptions: []string{"Pizza"}, Timestamp: time.UnixMilli(200)},
+		{ChatJID: "group@g.us", PollMessageID: "poll-1", VoterJID: "me", SelectedOptions: []string{"Pizza", "Sushi"}, Timestamp: time.UnixMilli(201), FromMe: true},
+		{ChatJID: "group@g.us", PollMessageID: "poll-1", VoterJID: "me", SelectedOptions: nil, Timestamp: time.UnixMilli(202), FromMe: true},
+		// A stale response must not restore the retracted local vote.
+		{ChatJID: "group@g.us", PollMessageID: "poll-1", VoterJID: "me", SelectedOptions: []string{"Sushi"}, Timestamp: time.UnixMilli(201), FromMe: true},
+	} {
+		if _, _, err = s.ApplyPollVote(ctx, vote); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = s.SetMessagePinned(ctx, "group@g.us", "target", "admin", time.UnixMilli(300), true); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetMessagePinned(ctx, "group@g.us", "missing", "admin", time.UnixMilli(301), true); err != nil {
+		t.Fatal(err)
+	}
+	// An older unpin replay cannot remove a newer confirmed pin.
+	if err = s.SetMessagePinned(ctx, "group@g.us", "target", "admin", time.UnixMilli(299), false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	message, err := s.Message(ctx, "group@g.us", "poll-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Poll == nil || message.Poll.TotalVoters != 1 || message.Poll.Options[0].VoteCount != 1 || message.Poll.Options[1].VoteCount != 0 || message.Poll.Options[1].SelectedByMe {
+		t.Fatalf("poll after replay = %+v", message.Poll)
+	}
+	snapshot, err := s.Message(ctx, "group@g.us", "snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Poll == nil || snapshot.Poll.TotalVoters != 4 || snapshot.Poll.Options[0].VoteCount != 4 {
+		t.Fatalf("snapshot after restart = %+v", snapshot.Poll)
+	}
+	pins, err := s.PinnedMessages(ctx, "group@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pins) != 2 || pins[0].MessageID != "missing" || pins[0].Message != nil || pins[1].Message == nil {
+		t.Fatalf("pins after restart = %+v", pins)
+	}
+}

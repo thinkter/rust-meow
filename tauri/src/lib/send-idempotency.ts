@@ -2,7 +2,8 @@ export type SendPayload =
   | readonly ["text", string, string, readonly string[]]
   | readonly ["image", string, string, string]
   | readonly ["sticker", string, string]
-  | readonly ["attachment", string, number, string, string, boolean];
+  | readonly ["attachment", string, number, string, string, boolean]
+  | readonly ["poll", string, readonly string[], number];
 
 interface SendAttempt {
   readonly clientMessageId: string;

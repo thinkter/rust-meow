@@ -342,6 +342,10 @@ func TestWireRichMessageContent(t *testing.T) {
 	if location == nil || location.GetLatitude() != 12.9 || location.GetName() != "Office" {
 		t.Fatalf("location=%+v", location)
 	}
+	poll := wireMessage(domain.Message{Kind: "poll", Poll: &domain.Poll{Question: "Lunch?", SelectableOptionsCount: 1, TotalVoters: 2, Options: []domain.PollOption{{Name: "Pizza", VoteCount: 2, SelectedByMe: true}, {Name: "Sushi"}}}}).GetPoll()
+	if poll == nil || poll.GetQuestion() != "Lunch?" || poll.GetTotalVoters() != 2 || len(poll.GetOptions()) != 2 || !poll.GetOptions()[0].GetSelectedByMe() {
+		t.Fatalf("poll=%+v", poll)
+	}
 }
 
 func TestReplaceMentionIDsPreservesRawIDsUnlessResolved(t *testing.T) {

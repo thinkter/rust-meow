@@ -160,6 +160,9 @@ export interface UnsupportedContent {
   fallbackText: string;
 }
 
+export interface PollOption { name: string; voteCount: number; selectedByMe: boolean; }
+export interface PollContent { question: string; options: PollOption[]; selectableOptionsCount: number; totalVoters: number; }
+
 /** Serde's externally-tagged representation of the Prost oneof. */
 export type MessageContent =
   | { text: TextContent }
@@ -167,7 +170,8 @@ export type MessageContent =
   | { image: ImageContent }
   | { attachment: AttachmentContent }
   | { contacts: ContactsContent }
-  | { location: LocationContent };
+  | { location: LocationContent }
+  | { poll: PollContent };
 
 export interface Reaction {
   chatId: string;
@@ -264,6 +268,11 @@ export interface ListMessagesAroundResponse {
 export interface SendTextResponse {
   message: Message | null;
 }
+export type CreatePollResponse = SendTextResponse;
+export type VotePollResponse = SendTextResponse;
+export type SetMessagePinResponse = EmptyResponse;
+export interface PinnedMessage { messageId: string; pinnedAtMs: number; pinnedBy: string; message: Message | null; available: boolean; }
+export interface ListPinnedMessagesResponse { pins: PinnedMessage[]; }
 
 export interface SendImageResponse {
   message: Message | null;
@@ -404,6 +413,7 @@ export interface TypingChanged {
   typing: boolean;
   recording: boolean;
 }
+export interface PinnedMessagesChanged { chatId: string; }
 
 export interface BridgeLifecycle {
   epoch: number;
@@ -426,6 +436,7 @@ export type FrontendEventPayload =
   | { type: "recentReactionsRepaired"; payload: RecentReactionsRepaired }
   | { type: "chatMerged"; payload: ChatMerged }
   | { type: "typingChanged"; payload: TypingChanged }
+  | { type: "pinnedMessagesChanged"; payload: PinnedMessagesChanged }
   | { type: "bridgeLifecycle"; payload: BridgeLifecycle };
 
 /** Backend sequences are monotonic and nonzero; shell-local events use zero. */

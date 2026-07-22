@@ -46,6 +46,10 @@ message RpcRequest {
     SendAttachmentRequest send_attachment = 25;
     ListStickersRequest list_stickers = 26;
     SendStickerFromLibraryRequest send_sticker_from_library = 27;
+    CreatePollRequest create_poll = 28;
+    VotePollRequest vote_poll = 29;
+    SetMessagePinRequest set_message_pin = 30;
+    ListPinnedMessagesRequest list_pinned_messages = 31;
   }
 }
 
@@ -80,6 +84,10 @@ message RpcResponse {
     SendAttachmentResponse send_attachment = 34;
     ListStickersResponse list_stickers = 35;
     SendStickerFromLibraryResponse send_sticker_from_library = 36;
+    CreatePollResponse create_poll = 37;
+    VotePollResponse vote_poll = 38;
+    SetMessagePinResponse set_message_pin = 39;
+    ListPinnedMessagesResponse list_pinned_messages = 40;
   }
 }
 
@@ -101,6 +109,7 @@ message BackendEvent {
     ChatMerged chat_merged = 19;
     TypingChanged typing_changed = 20;
     StickersChanged stickers_changed = 21;
+    PinnedMessagesChanged pinned_messages_changed = 22;
   }
 }
 
@@ -364,6 +373,41 @@ message SetTypingRequest {
 }
 message SetTypingResponse {}
 
+message CreatePollRequest {
+  string client_message_id = 1;
+  string chat_id = 2;
+  string question = 3;
+  repeated string options = 4;
+  uint32 selectable_options_count = 5;
+}
+message CreatePollResponse { Message message = 1; }
+
+// Selected options is the complete desired vote. An empty list retracts the
+// caller's vote. Re-sending replaces the previous vote atomically.
+message VotePollRequest {
+  string chat_id = 1;
+  string poll_message_id = 2;
+  repeated string selected_options = 3;
+}
+message VotePollResponse { Message message = 1; }
+
+message SetMessagePinRequest {
+  string chat_id = 1;
+  string message_id = 2;
+  bool pinned = 3;
+}
+message SetMessagePinResponse {}
+message ListPinnedMessagesRequest { string chat_id = 1; }
+message PinnedMessage {
+  string message_id = 1;
+  int64 pinned_at_ms = 2;
+  string pinned_by = 3;
+  Message message = 4;
+  bool available = 5;
+}
+message ListPinnedMessagesResponse { repeated PinnedMessage pins = 1; }
+message PinnedMessagesChanged { string chat_id = 1; }
+
 // A peer started or stopped typing in a chat. Indicators are transient: the
 // desktop must also expire them locally (~10s) because the terminal "paused"
 // update can be lost.
@@ -470,6 +514,7 @@ message Message {
     AttachmentContent attachment = 23;
     ContactsContent contacts = 24;
     LocationContent location = 25;
+    PollContent poll = 26;
   }
 }
 
@@ -571,6 +616,18 @@ message LocationContent {
 message UnsupportedContent {
   string type_name = 1;
   string fallback_text = 2;
+}
+
+message PollOption {
+  string name = 1;
+  uint32 vote_count = 2;
+  bool selected_by_me = 3;
+}
+message PollContent {
+  string question = 1;
+  repeated PollOption options = 2;
+  uint32 selectable_options_count = 3;
+  uint32 total_voters = 4;
 }
 
 message ConnectionChanged {

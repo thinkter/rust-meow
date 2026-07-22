@@ -9,6 +9,7 @@ import {
   Smile,
   Sticker,
   X,
+  ListChecks,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import { openFile } from "../lib/bridge";
@@ -18,13 +19,16 @@ import { IconButton } from "./Primitives";
 import { EmojiPicker } from "./EmojiPicker";
 import { StickerTray } from "./StickerTray";
 
-type PopoverKind = "emoji" | "sticker" | "attachment" | null;
+type PopoverKind = "emoji" | "sticker" | "attachment" | "poll" | null;
 
 export function Composer(props: { model: AppModel; chatId: string }) {
   const { state, actions } = props.model;
   const [openPopover, setOpenPopover] = createSignal<PopoverKind>(null);
   const [mentionRange, setMentionRange] = createSignal<{ start: number; end: number; query: string } | null>(null);
   const [mentionIndex, setMentionIndex] = createSignal(0);
+  const [pollQuestion, setPollQuestion] = createSignal("");
+  const [pollOptions, setPollOptions] = createSignal("Yes\nNo");
+  const [pollMultiple, setPollMultiple] = createSignal(false);
   let textarea: HTMLTextAreaElement | undefined;
   let root: HTMLDivElement | undefined;
 
@@ -126,6 +130,9 @@ export function Composer(props: { model: AppModel; chatId: string }) {
           onClick={() => setOpenPopover((open) => (open === "attachment" ? null : "attachment"))}
         >
           <Paperclip size={22} />
+        </IconButton>
+        <IconButton label="Create poll" active={openPopover() === "poll"} disabled={!connected()} onClick={() => setOpenPopover((open) => open === "poll" ? null : "poll")}>
+          <ListChecks size={22} />
         </IconButton>
 
         <div class="composer-input-wrap">
@@ -234,6 +241,19 @@ export function Composer(props: { model: AppModel; chatId: string }) {
             <MenuItem icon={<FileText size={20} />} label="Document" onClick={() => void chooseAttachment(AttachmentKind.Document)} />
             <MenuItem icon={<FileVideo size={20} />} label="Video" onClick={() => void chooseAttachment(AttachmentKind.Video)} />
             <MenuItem icon={<FileAudio size={20} />} label="Audio" onClick={() => void chooseAttachment(AttachmentKind.Audio)} />
+          </div>
+        </Show>
+        <Show when={openPopover() === "poll"}>
+          <div class="popover poll-composer" role="dialog" aria-label="Create poll">
+            <strong>Create a poll</strong>
+            <input value={pollQuestion()} onInput={(event) => setPollQuestion(event.currentTarget.value)} placeholder="Question" aria-label="Poll question" />
+            <textarea value={pollOptions()} onInput={(event) => setPollOptions(event.currentTarget.value)} rows={5} aria-label="Poll options, one per line" />
+            <label><input type="checkbox" checked={pollMultiple()} onChange={(event) => setPollMultiple(event.currentTarget.checked)} /> Allow multiple answers</label>
+            <button type="button" class="primary-button" disabled={!pollQuestion().trim() || pollOptions().split("\n").filter((value) => value.trim()).length < 2} onClick={() => {
+              const options = [...new Set(pollOptions().split("\n").map((value) => value.trim()).filter(Boolean))];
+              void actions.createPoll(pollQuestion().trim(), options, pollMultiple() ? options.length : 1, props.chatId);
+              setOpenPopover(null); setPollQuestion(""); setPollOptions("Yes\nNo"); setPollMultiple(false);
+            }}>Create poll</button>
           </div>
         </Show>
       </form>

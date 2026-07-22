@@ -10,6 +10,7 @@ const payloads: SendPayload[] = [
   ["image", "/tmp/photo.jpg", "caption", "reply-1"],
   ["sticker", "/tmp/sticker.webp", "reply-1"],
   ["attachment", "/tmp/notes.pdf", 1, "caption", "reply-1", false],
+  ["poll", "Lunch?", ["Pizza", "Sushi"], 1],
 ];
 
 test("every send kind reuses its ID for a failed logical retry", async () => {

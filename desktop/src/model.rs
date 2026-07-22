@@ -543,6 +543,7 @@ pub fn message_text(message: &proto::Message) -> &str {
         Some(proto::message::Content::Unsupported(unsupported)) => {
             unsupported.fallback_text.as_str()
         }
+        Some(proto::message::Content::Poll(poll)) => poll.question.as_str(),
         None => "Unsupported message",
     }
 }

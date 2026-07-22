@@ -13,7 +13,7 @@ boundaries compile, not evidence of WhatsApp Desktop feature parity.
 
 - Tauri 2.11 Rust core
 - SolidJS 1.9, TypeScript, Vite 8, and TanStack Solid Virtual
-- protocol v14 of the existing framed protobuf bridge
+- protocol v15 of the existing framed protobuf bridge
 - the existing statically linked Go/whatsmeow sidecar
 
 ```text
@@ -23,7 +23,7 @@ SolidJS webview
 Tauri Rust core (`src-tauri/src/lib.rs`)
   RPC correlation + dialog/opener + sticker preparation
                     |
-  4-byte BE length + protobuf Envelope (v14, max 8 MiB)
+  4-byte BE length + protobuf Envelope (v15, max 8 MiB)
                     |
 Go sidecar
   WhatsApp + session.db + client.db + media cache + backend.log
@@ -108,13 +108,13 @@ processes and deliberate profile overrides still require operator care.
 The frontend initializes in this order:
 
 1. create a Tauri `Channel` and invoke `subscribe_backend`;
-2. invoke `hello` and require protocol v14 on both sides;
+2. invoke `hello` and require protocol v15 on both sides;
 3. invoke `get_auth_state`;
 4. start pairing or load the first chat page;
 5. apply responses as snapshots and Channel messages as idempotent live
    upserts.
 
-Protocol v14 and attachment RPCs are wired through the Go backend, fake bridge,
+Protocol v15 and attachment, poll, and pinned-message RPCs are wired through the Go backend, fake bridge,
 Tauri handler, and typed frontend. This does not prove the document/audio/video
 UX; real transport, persistence, playback, error, and platform checks remain in
 parity gates `CP-10` through `CP-12`.

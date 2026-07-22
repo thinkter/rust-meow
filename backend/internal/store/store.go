@@ -225,6 +225,22 @@ CREATE TABLE IF NOT EXISTS reactions(
   PRIMARY KEY(chat_jid,message_id,sender_jid)
 );
 CREATE INDEX IF NOT EXISTS reactions_message_idx ON reactions(chat_jid,message_id,timestamp,sender_jid);
+CREATE TABLE IF NOT EXISTS polls(
+  chat_jid TEXT NOT NULL, message_id TEXT NOT NULL, question TEXT NOT NULL,
+  selectable_count INTEGER NOT NULL DEFAULT 1, total_voters INTEGER NOT NULL DEFAULT 0, options_json TEXT NOT NULL,
+  PRIMARY KEY(chat_jid,message_id),
+  FOREIGN KEY(chat_jid,message_id) REFERENCES messages(chat_jid,id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS poll_votes(
+  chat_jid TEXT NOT NULL, poll_message_id TEXT NOT NULL, voter_jid TEXT NOT NULL,
+  selected_json TEXT NOT NULL, timestamp INTEGER NOT NULL, from_me INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(chat_jid,poll_message_id,voter_jid),
+  FOREIGN KEY(chat_jid,poll_message_id) REFERENCES polls(chat_jid,message_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS pinned_messages(
+  chat_jid TEXT NOT NULL, message_id TEXT NOT NULL, pinned_at INTEGER NOT NULL, pinned_by TEXT NOT NULL DEFAULT '', pinned INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(chat_jid,message_id), FOREIGN KEY(chat_jid) REFERENCES chats(jid) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS sync_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outgoing_requests(
   client_request_id TEXT PRIMARY KEY,
@@ -815,6 +831,15 @@ link_preview_thumbnail=CASE WHEN length(excluded.link_preview_thumbnail)>0 THEN 
 link_preview_width=max(messages.link_preview_width,excluded.link_preview_width),link_preview_height=max(messages.link_preview_height,excluded.link_preview_height)`, winner, loser); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO polls(chat_jid,message_id,question,selectable_count,total_voters,options_json) SELECT ?,message_id,question,selectable_count,total_voters,options_json FROM polls WHERE chat_jid=? ON CONFLICT(chat_jid,message_id) DO UPDATE SET question=excluded.question,selectable_count=excluded.selectable_count,total_voters=excluded.total_voters,options_json=excluded.options_json`, winner, loser); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO poll_votes(chat_jid,poll_message_id,voter_jid,selected_json,timestamp,from_me) SELECT ?,poll_message_id,voter_jid,selected_json,timestamp,from_me FROM poll_votes WHERE chat_jid=? ON CONFLICT(chat_jid,poll_message_id,voter_jid) DO UPDATE SET selected_json=excluded.selected_json,timestamp=excluded.timestamp,from_me=excluded.from_me WHERE excluded.timestamp>=poll_votes.timestamp`, winner, loser); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO pinned_messages(chat_jid,message_id,pinned_at,pinned_by,pinned) SELECT ?,message_id,pinned_at,pinned_by,pinned FROM pinned_messages WHERE chat_jid=? ON CONFLICT(chat_jid,message_id) DO UPDATE SET pinned_at=excluded.pinned_at,pinned_by=excluded.pinned_by,pinned=excluded.pinned WHERE excluded.pinned_at>=pinned_messages.pinned_at`, winner, loser); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE chat_jid=?`, loser); err != nil {
 		return err
 	}
@@ -1272,6 +1297,9 @@ FROM messages WHERE chat_jid=? AND kind<>'reaction' AND (timestamp < ? OR (times
 	if err = s.attachReactions(ctx, chatJID, page.Items); err != nil {
 		return page, err
 	}
+	if err = s.attachPolls(ctx, chatJID, page.Items); err != nil {
+		return page, err
+	}
 	return page, nil
 }
 
@@ -1308,6 +1336,9 @@ func (s *Store) MessagesAround(ctx context.Context, chatJID, messageID string, s
 	items = append(items, anchor)
 	items = append(items, newer...)
 	if err = s.attachReactions(ctx, resolved, items); err != nil {
+		return domain.MessageWindow{}, err
+	}
+	if err = s.attachPolls(ctx, resolved, items); err != nil {
 		return domain.MessageWindow{}, err
 	}
 	return domain.MessageWindow{Items: items, HasOlder: hasOlder, HasNewer: hasNewer, AnchorID: anchor.ID}, nil
@@ -1352,6 +1383,9 @@ func (s *Store) MessagesAfter(ctx context.Context, chatJID string, timestampMS i
 		return nil, false, err
 	}
 	if err = s.attachReactions(ctx, resolved, items); err != nil {
+		return nil, false, err
+	}
+	if err = s.attachPolls(ctx, resolved, items); err != nil {
 		return nil, false, err
 	}
 	return items, hasMore, nil
@@ -1579,6 +1613,17 @@ link_preview_thumbnail=excluded.link_preview_thumbnail,link_preview_width=exclud
 	if err != nil {
 		return err
 	}
+	if message.Poll != nil {
+		encoded, marshalErr := json.Marshal(message.Poll.Options)
+		if marshalErr != nil {
+			return fmt.Errorf("encode poll options: %w", marshalErr)
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO polls(chat_jid,message_id,question,selectable_count,total_voters,options_json) VALUES(?,?,?,?,?,?)
+ON CONFLICT(chat_jid,message_id) DO UPDATE SET question=excluded.question,selectable_count=excluded.selectable_count,total_voters=excluded.total_voters,options_json=excluded.options_json`,
+			message.ChatJID, message.ID, message.Poll.Question, message.Poll.SelectableOptionsCount, message.Poll.TotalVoters, string(encoded)); err != nil {
+			return err
+		}
+	}
 	unread := int64(0)
 	if incrementUnread && !message.FromMe && !existed {
 		unread = 1
@@ -1615,7 +1660,151 @@ image_animated,media_file_name,media_duration,media_voice,contacts_json,location
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
 FROM messages WHERE chat_jid=? AND id=? AND kind<>'reaction'`, chatJID, messageID)
 	m, _, err = scanStoredMessage(row)
+	if err == nil && m.Kind == "poll" {
+		m.Poll, err = s.Poll(ctx, chatJID, messageID)
+	}
 	return m, err
+}
+
+func (s *Store) Poll(ctx context.Context, chatJID, messageID string) (*domain.Poll, error) {
+	resolved, err := s.ResolveChat(ctx, chatJID)
+	if err != nil {
+		return nil, err
+	}
+	var question, optionsJSON string
+	var selectable, totalVoters uint32
+	if err = s.db.QueryRowContext(ctx, `SELECT question,selectable_count,total_voters,options_json FROM polls WHERE chat_jid=? AND message_id=?`, resolved, messageID).Scan(&question, &selectable, &totalVoters, &optionsJSON); err != nil {
+		return nil, err
+	}
+	poll := &domain.Poll{Question: question, SelectableOptionsCount: selectable, TotalVoters: totalVoters}
+	if err = json.Unmarshal([]byte(optionsJSON), &poll.Options); err != nil {
+		var legacy []string
+		if legacyErr := json.Unmarshal([]byte(optionsJSON), &legacy); legacyErr != nil {
+			return nil, err
+		}
+		for _, name := range legacy {
+			poll.Options = append(poll.Options, domain.PollOption{Name: name})
+		}
+	}
+	byName := make(map[string]int, len(poll.Options))
+	for i, option := range poll.Options {
+		byName[option.Name] = i
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT selected_json,from_me FROM poll_votes WHERE chat_jid=? AND poll_message_id=?`, resolved, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		var fromMe bool
+		if err = rows.Scan(&raw, &fromMe); err != nil {
+			return nil, err
+		}
+		var selected []string
+		if json.Unmarshal([]byte(raw), &selected) != nil {
+			continue
+		}
+		if len(selected) > 0 {
+			poll.TotalVoters++
+		}
+		for _, name := range selected {
+			if i, ok := byName[name]; ok {
+				poll.Options[i].VoteCount++
+				if fromMe {
+					poll.Options[i].SelectedByMe = true
+				}
+			}
+		}
+	}
+	return poll, rows.Err()
+}
+
+func (s *Store) attachPolls(ctx context.Context, chatID string, messages []domain.Message) error {
+	for i := range messages {
+		if messages[i].Kind != "poll" {
+			continue
+		}
+		poll, err := s.Poll(ctx, chatID, messages[i].ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		messages[i].Poll = poll
+	}
+	return nil
+}
+
+func (s *Store) ApplyPollVote(ctx context.Context, vote domain.PollVote) (domain.Message, bool, error) {
+	resolved, err := s.ResolveChat(ctx, vote.ChatJID)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	vote.ChatJID = resolved
+	encoded, err := json.Marshal(vote.SelectedOptions)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	ts := vote.Timestamp.UnixMilli()
+	if ts <= 0 {
+		ts = time.Now().UnixMilli()
+	}
+	result, err := s.db.ExecContext(ctx, `INSERT INTO poll_votes(chat_jid,poll_message_id,voter_jid,selected_json,timestamp,from_me) VALUES(?,?,?,?,?,?)
+ON CONFLICT(chat_jid,poll_message_id,voter_jid) DO UPDATE SET selected_json=excluded.selected_json,timestamp=excluded.timestamp,from_me=excluded.from_me WHERE excluded.timestamp>=poll_votes.timestamp`, resolved, vote.PollMessageID, vote.VoterJID, string(encoded), ts, vote.FromMe)
+	if err != nil {
+		return domain.Message{}, false, err
+	}
+	changed, _ := result.RowsAffected()
+	message, err := s.Message(ctx, resolved, vote.PollMessageID)
+	return message, changed > 0, err
+}
+
+func (s *Store) SetMessagePinned(ctx context.Context, chatID, messageID, pinnedBy string, at time.Time, pinned bool) error {
+	resolved, err := s.ResolveChat(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO pinned_messages(chat_jid,message_id,pinned_at,pinned_by,pinned) VALUES(?,?,?,?,?) ON CONFLICT(chat_jid,message_id) DO UPDATE SET pinned_at=excluded.pinned_at,pinned_by=excluded.pinned_by,pinned=excluded.pinned WHERE excluded.pinned_at>=pinned_messages.pinned_at`, resolved, messageID, at.UnixMilli(), pinnedBy, pinned)
+	return err
+}
+
+func (s *Store) PinnedMessages(ctx context.Context, chatID string) ([]domain.PinnedMessage, error) {
+	resolved, err := s.ResolveChat(ctx, chatID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT message_id,pinned_at,pinned_by FROM pinned_messages WHERE chat_jid=? AND pinned=1 ORDER BY pinned_at DESC,message_id`, resolved)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pins []domain.PinnedMessage
+	for rows.Next() {
+		var pin domain.PinnedMessage
+		var at int64
+		if err = rows.Scan(&pin.MessageID, &at, &pin.PinnedBy); err != nil {
+			return nil, err
+		}
+		pin.PinnedAt = unixMilli(at)
+		pins = append(pins, pin)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range pins {
+		if msg, messageErr := s.Message(ctx, resolved, pins[i].MessageID); messageErr == nil {
+			pins[i].Message = &msg
+		}
+	}
+	return pins, nil
 }
 
 func (s *Store) SetImageLocalPath(ctx context.Context, chatJID, messageID, localPath string) error {

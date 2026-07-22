@@ -349,6 +349,7 @@ a:focus-visible,
   color: inherit;
   cursor: pointer;
 }
+.poll-option:disabled { cursor: default; opacity: 0.82; }
 
 .tab:hover .tab-close,
 .tab.active .tab-close {
@@ -1419,15 +1420,34 @@ html[data-appearance="light"] .message-sender {
   gap: 9px;
   padding: 7px 4px;
   border-top: 1px solid var(--border);
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
 }
 
-.poll-option > span {
+.poll-option.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.poll-option strong { margin-left: auto; font-variant-numeric: tabular-nums; }
+.poll-composer { width: min(360px, calc(100vw - 32px)); display: grid; gap: 10px; padding: 14px; }
+.poll-card.pending { opacity: 0.78; }
+.poll-composer input:not([type="checkbox"]), .poll-composer textarea { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; background: var(--bg-panel); color: var(--fg); resize: vertical; }
+.poll-composer label { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.pinned-message-strip { display: flex; align-items: center; gap: 7px; padding: 6px 12px; border-bottom: 1px solid var(--border); overflow-x: auto; background: var(--bg-panel); }
+.pinned-message-chip { display: inline-flex; align-items: center; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+.pinned-message-chip button { border: 0; background: transparent; color: var(--fg); padding: 5px 8px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pinned-message-chip button:disabled { color: var(--fg-subtle); }
+
+.poll-option > span:first-child {
   width: 14px;
   height: 14px;
   flex: none;
   border: 2px solid var(--fg-subtle);
   border-radius: var(--radius-full);
 }
+.poll-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 .poll-card small {
   color: var(--fg-subtle);

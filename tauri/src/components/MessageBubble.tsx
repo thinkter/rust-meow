@@ -26,6 +26,7 @@ import type {
   Message,
   Reaction,
   TextContent,
+  PollContent,
 } from "../lib/types";
 import { MessageStatus } from "../lib/types";
 import {
@@ -187,6 +188,12 @@ export function MessageBubble(props: MessageBubbleProps) {
         <IconButton label="Reply" onClick={() => actions.replyTo(props.message.id, props.chatId)}>
           <MessageSquareReply size={15} />
         </IconButton>
+        <Show when={props.message.content && !props.message.revoked}>
+          <IconButton
+            label={props.model.state.pinnedMessages[props.chatId]?.some((pin) => pin.messageId === props.message.id) ? "Unpin message" : "Pin message"}
+            onClick={() => void actions.setMessagePin(props.message.id, !props.model.state.pinnedMessages[props.chatId]?.some((pin) => pin.messageId === props.message.id), props.chatId)}
+          ><Pin size={15} /></IconButton>
+        </Show>
         <Show when={savableMedia()}>
           {(media) => (
             <IconButton label="Save to folder" onClick={() => void actions.saveMediaAs(media().path, media().name)}>
@@ -290,6 +297,9 @@ function MessageContent(props: { message: Message; model: AppModel; chatId: stri
                 );
               })()}
             </Show>
+            <Show when={"poll" in value()}>
+              <PollMessage message={props.message} poll={(value() as { poll: PollContent }).poll} model={props.model} chatId={props.chatId} />
+            </Show>
             <Show when={"unsupported" in value()}>
               <UnsupportedMessage content={(value() as { unsupported: { fallbackText: string; typeName: string } }).unsupported} />
             </Show>
@@ -298,6 +308,30 @@ function MessageContent(props: { message: Message; model: AppModel; chatId: stri
       </Show>
     </Show>
   );
+}
+
+function PollMessage(props: { message: Message; poll: PollContent; model: AppModel; chatId: string }) {
+  const selected = () => props.poll.options.filter((option) => option.selectedByMe).map((option) => option.name);
+  function choose(name: string) {
+    if (props.poll.selectableOptionsCount === 0) return;
+    const current = new Set(selected());
+    if (props.poll.selectableOptionsCount === 1) {
+      void props.model.actions.votePoll(props.message, current.has(name) ? [] : [name], props.chatId);
+    } else {
+      current.has(name) ? current.delete(name) : current.add(name);
+      if (current.size <= props.poll.selectableOptionsCount) void props.model.actions.votePoll(props.message, [...current], props.chatId);
+    }
+  }
+  const pending = () => props.model.state.pendingPollVotes[`${props.chatId}:${props.message.id}`] ?? false;
+  return <section class={`poll-card ${pending() ? "pending" : ""}`} aria-label="Poll" aria-busy={pending()}>
+    <header><ListChecks size={20} /><strong>{props.poll.question}</strong></header>
+    <For each={props.poll.options}>{(option) =>
+      <button type="button" disabled={props.poll.selectableOptionsCount === 0 || pending()} class={`poll-option ${option.selectedByMe ? "selected" : ""}`} aria-pressed={option.selectedByMe} onClick={() => choose(option.name)}>
+        <span aria-hidden="true" /> <span class="poll-option-label">{option.name}</span><strong>{option.voteCount}</strong>
+      </button>
+    }</For>
+    <small>{pending() ? "Saving vote…" : props.poll.selectableOptionsCount === 0 ? "Poll results snapshot" : `${props.poll.totalVoters} ${props.poll.totalVoters === 1 ? "voter" : "voters"} · choose up to ${props.poll.selectableOptionsCount}`}</small>
+  </section>;
 }
 
 function UnsupportedMessage(props: { content: { fallbackText: string; typeName: string } }) {

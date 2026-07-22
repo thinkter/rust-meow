@@ -18,7 +18,7 @@ WhatsApp Desktop replacement; the exact parity and release gates live in
 SolidJS + TanStack Virtual (Tauri webview)
               typed invoke + ordered Channel events
 Tauri Rust core
-              4-byte BE length + protobuf v14 Envelope
+              4-byte BE length + protobuf v15 Envelope
 Go sidecar (whatsmeow)
               session.db + client.db + bounded media cache
 ```
@@ -88,7 +88,7 @@ tauri/src-tauri/target/<target-triple>/release/bundle/deb/
 The bundle-only config is `tauri/src-tauri/tauri.bundle.conf.json`. Keeping
 `externalBin` there means normal fake development does not require a staged Go
 binary. A release is not validated merely because it bundles: unpack it and
-prove the installed app starts its adjacent sidecar and completes protocol v14
+prove the installed app starts its adjacent sidecar and completes protocol v15
 Hello without `RUST_MEOW_BACKEND`.
 
 The 2026-07-22 Linux x86-64 release measurement is:

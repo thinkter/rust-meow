@@ -1956,6 +1956,9 @@ impl RustMeow {
             // The sticker tray lives only in the Tauri desktop shell; this
             // legacy GPUI reference has nothing to refresh in response.
             Some(backend_event::Event::StickersChanged(_)) => {}
+            // Pinned-message browsing is implemented by the primary Tauri
+            // shell; the legacy GPUI behavioral reference has no surface.
+            Some(backend_event::Event::PinnedMessagesChanged(_)) => {}
             Some(backend_event::Event::Problem(problem)) => {
                 if problem.fatal {
                     self.store.screen = Screen::Fatal;

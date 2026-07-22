@@ -3,6 +3,7 @@ import { createStore, reconcile } from "solid-js/store";
 import { bridge, normalizeBridgeError, openFile } from "../lib/bridge";
 import { BoundedSet, boundWindowAround } from "../lib/performance";
 import { ParticipantAvatarQueue } from "../lib/participant-avatar-queue";
+import { optimisticPollVote, preservePendingPollIntent } from "../lib/polls";
 import {
   ensureNotificationPermission,
   listenForNotificationActions,
@@ -26,6 +27,7 @@ import {
   type MessageSearchResult,
   type Reaction,
   type SearchResults,
+  type PinnedMessage,
 } from "../lib/types";
 import { pairingStartupDecision } from "./pairing";
 import {
@@ -144,6 +146,8 @@ export interface AppState {
   drafts: Record<string, Draft>;
   sending: boolean;
   typing: Record<string, Record<string, TypingPresence>>;
+  pinnedMessages: Record<string, PinnedMessage[]>;
+  pendingPollVotes: Record<string, boolean>;
   searchQuery: string;
   searchResults: SearchResults | null;
   searchLoading: boolean;
@@ -223,6 +227,8 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     drafts: {},
     sending: false,
     typing: {},
+    pinnedMessages: {},
+    pendingPollVotes: {},
     searchQuery: "",
     searchResults: null,
     searchLoading: false,
@@ -252,6 +258,8 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   const restartEpochs = new RestartEpochQueue();
   let toastId = 0;
   const pendingImages = new Set<string>();
+  const pollVoteGenerations = new Map<string, number>();
+  const pinGenerations = new Map<string, number>();
   const pendingAttachments = new Set<string>();
   const pendingAvatars = new Set<string>();
   const attemptedAvatars = new BoundedSet<string>(MAX_AVATAR_ATTEMPTS);
@@ -338,7 +346,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     await Promise.all(
       chatIds.map((chatId) => {
         touchConversationFocus(chatId);
-        return loadConversation(chatId).catch(() => undefined);
+        return Promise.all([loadConversation(chatId), loadPinnedMessages(chatId)]).catch(() => undefined);
       }),
     );
   }
@@ -635,6 +643,12 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       void markChatRead(chatId);
       void loadAvatar(chatId);
     }
+    void loadPinnedMessages(chatId);
+  }
+
+  async function loadPinnedMessages(chatId: string) {
+    try { const response = await bridge.listPinnedMessages(chatId); setState("pinnedMessages", chatId, response.pins); }
+    catch (error) { toast(normalizeBridgeError(error).message); }
   }
 
   /** Close the focused pane's active tab, if any — a convenience over `closeTab`. */
@@ -900,6 +914,30 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     } finally {
       setState("sending", false);
     }
+  }
+
+  async function createPoll(question: string, options: string[], selectableOptionsCount: number, chatId = state.selectedChatId) {
+    if (!chatId) return;
+    try { const response = await bridge.createPoll(chatId, question, options, selectableOptionsCount); if (response.message) upsertMessage(response.message, true); }
+    catch (error) { toast(normalizeBridgeError(error).message); }
+  }
+
+  async function votePoll(message: Message, selectedOptions: string[], chatId = message.chatId) {
+    if (!message.content || !("poll" in message.content)) return;
+    const key = mediaKey(chatId, message.id); const generation = (pollVoteGenerations.get(key) ?? 0) + 1; pollVoteGenerations.set(key, generation);
+    const stateKey = `${chatId}:${message.id}`;
+    const previous = structuredClone(message.content.poll); const optimistic = optimisticPollVote(previous, selectedOptions);
+    setState("conversations", chatId, "messages", (candidate) => candidate.id === message.id, "content", { poll: optimistic });
+    setState("pendingPollVotes", stateKey, true);
+    try { const response = await bridge.votePoll(chatId, message.id, selectedOptions); if (pollVoteGenerations.get(key) === generation && response.message) { setState("pendingPollVotes", stateKey, undefined!); upsertMessage(response.message, true); } }
+    catch (error) { if (pollVoteGenerations.get(key) === generation) { setState("conversations", chatId, "messages", (candidate) => candidate.id === message.id, "content", { poll: previous }); toast(normalizeBridgeError(error).message); } }
+    finally { if (pollVoteGenerations.get(key) === generation) setState("pendingPollVotes", stateKey, undefined!); }
+  }
+
+  async function setMessagePin(messageId: string, pinned: boolean, chatId = state.selectedChatId) {
+    if (!chatId) return; const key = mediaKey(chatId, messageId); const generation = (pinGenerations.get(key) ?? 0) + 1; pinGenerations.set(key, generation);
+    try { await bridge.setMessagePin(chatId, messageId, pinned); if (pinGenerations.get(key) === generation) await loadPinnedMessages(chatId); }
+    catch (error) { if (pinGenerations.get(key) === generation) toast(normalizeBridgeError(error).message); }
   }
 
   async function sendImage(path: string, chatId = state.selectedChatId) {
@@ -1425,6 +1463,9 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       case "typingChanged":
         updateTyping(event.payload);
         break;
+      case "pinnedMessagesChanged":
+        void loadPinnedMessages(event.payload.chatId);
+        break;
       case "problem":
         if (event.payload.fatal) fatal(event.payload.message);
         else {
@@ -1515,7 +1556,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     try {
       const openChatIds = activeConversationIds(state.panes);
       await Promise.all([
-        ...openChatIds.map((chatId) => loadConversation(chatId).catch(() => undefined)),
+        ...openChatIds.flatMap((chatId) => [loadConversation(chatId).catch(() => undefined), loadPinnedMessages(chatId).catch(() => undefined)]),
         loadChats(true),
       ]);
       toast("Chat state refreshed after a missed backend event", "info");
@@ -1573,6 +1614,10 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     if (!conversationState) return; // The chat is not open in any pane.
     const existingIndex = conversationState.messages.findIndex((candidate) => candidate.id === message.id);
     const isNew = existingIndex < 0;
+    // A full-state vote request may cross an older response/event in flight.
+    // Keep the newest optimistic intent visible until its own command settles;
+    // that command's generation guard then accepts only its authoritative DTO.
+    if (existingIndex >= 0) message = preservePendingPollIntent(conversationState.messages[existingIndex]!, message, state.pendingPollVotes[`${chatId}:${message.id}`] ?? false);
     const merged = upsertSortedMessage(conversationState.messages, message, existingIndex);
     const trimmed = merged.length > MAX_ACTIVE_MESSAGES;
     setState("conversations", chatId, "messages", reconcile(trimMessages(merged, "older"), { key: "id" }));
@@ -1837,6 +1882,10 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       cancelReply,
       addMention,
       sendCurrentText,
+      createPoll,
+      votePoll,
+      setMessagePin,
+      loadPinnedMessages,
       sendImage,
       sendSticker,
       sendAttachment,

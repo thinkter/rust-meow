@@ -11,6 +11,7 @@ import {
   type Message,
   type MessageContent,
   type Reaction,
+  type PinnedMessage,
 } from "./types";
 import type {
   BackendEventHandler,
@@ -20,7 +21,7 @@ import type {
 } from "./bridge";
 
 const OWN_USER_ID = "919900001111@s.whatsapp.net";
-const PROTOCOL_VERSION = 14;
+const PROTOCOL_VERSION = 15;
 const STARTED_AT = Date.now();
 const MINUTE = 60_000;
 const DAY = 86_400_000;
@@ -124,6 +125,7 @@ class BrowserMockBridge implements BridgeApi {
   private readonly chats = new Map<string, Chat>();
   private readonly messages = new Map<string, Message[]>();
   private readonly info = new Map<string, ChatInfo>();
+  private readonly pins = new Map<string, PinnedMessage[]>();
   private readonly blockedChats = new Set<string>();
   private delivery = Promise.resolve();
   private activeChatId = "";
@@ -497,6 +499,31 @@ class BrowserMockBridge implements BridgeApi {
     this.requireChat(chatId);
     return {};
   }
+
+  async createPoll(chatId: string, question: string, options: string[], selectableOptionsCount: number) {
+    const message = this.outgoing(chatId, { poll: { question, options: options.map((name) => ({ name, voteCount: 0, selectedByMe: false })), selectableOptionsCount, totalVoters: 0 } }, "");
+    return { message: copy(message) };
+  }
+
+  async votePoll(chatId: string, pollMessageId: string, selectedOptions: string[]) {
+    const message = this.requireMessage(chatId, pollMessageId);
+    if (!message.content || !("poll" in message.content)) throw new Error("Target is not a poll");
+    const poll = message.content.poll;
+    const previous = new Set(poll.options.filter((option) => option.selectedByMe).map((option) => option.name));
+    const next = new Set(selectedOptions);
+    for (const option of poll.options) { if (previous.has(option.name) && !next.has(option.name)) option.voteCount--; if (!previous.has(option.name) && next.has(option.name)) option.voteCount++; option.selectedByMe = next.has(option.name); }
+    if (previous.size === 0 && next.size > 0) poll.totalVoters++; else if (previous.size > 0 && next.size === 0) poll.totalVoters--;
+    void this.emit({ type: "messageUpserted", payload: { message: copy(message) } });
+    return { message: copy(message) };
+  }
+
+  async setMessagePin(chatId: string, messageId: string, pinned: boolean) {
+    const message = this.requireMessage(chatId, messageId); const existing = this.pins.get(chatId) ?? [];
+    this.pins.set(chatId, pinned ? [{ messageId, pinnedAtMs: Date.now(), pinnedBy: OWN_USER_ID, message: copy(message), available: true }, ...existing.filter((item) => item.messageId !== messageId)] : existing.filter((item) => item.messageId !== messageId));
+    void this.emit({ type: "pinnedMessagesChanged", payload: { chatId } }); return {};
+  }
+
+  async listPinnedMessages(chatId: string) { this.requireChat(chatId); return { pins: copy(this.pins.get(chatId) ?? []) }; }
 
   async logout() {
     this.paired = false;
@@ -1091,6 +1118,7 @@ function messagePreview(message: Message): string {
   }
   if ("contacts" in message.content) return "Contact";
   if ("location" in message.content) return message.content.location.name || "Location";
+  if ("poll" in message.content) return `Poll: ${message.content.poll.question}`;
   return message.content.unsupported.fallbackText || "Unsupported message";
 }
 

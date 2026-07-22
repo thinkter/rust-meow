@@ -1041,7 +1041,10 @@ func TestDomainMessageDecodesRichContent(t *testing.T) {
 			return m.Kind == "location" && m.Location != nil && m.Location.Latitude == 12.9 && m.Location.Name == "Office"
 		}},
 		{"poll", event("poll", &waE2E.Message{PollCreationMessageV3: &waE2E.PollCreationMessage{Name: proto.String("Lunch"), Options: []*waE2E.PollCreationMessage_Option{{OptionName: proto.String("Pizza")}, {OptionName: proto.String("Sushi")}}}}), func(m domain.Message) bool {
-			return m.Kind == "poll" && m.Text == "📊 Poll: Lunch\n• Pizza\n• Sushi"
+			return m.Kind == "poll" && m.Text == "📊 Poll: Lunch\n• Pizza\n• Sushi" && m.Poll != nil && len(m.Poll.Options) == 2
+		}},
+		{"poll snapshot", event("poll-results", &waE2E.Message{PollResultSnapshotMessage: &waE2E.PollResultSnapshotMessage{Name: proto.String("Lunch"), PollVotes: []*waE2E.PollResultSnapshotMessage_PollVote{{OptionName: proto.String("Pizza"), OptionVoteCount: proto.Int64(4)}, {OptionName: proto.String("Sushi"), OptionVoteCount: proto.Int64(2)}}}}), func(m domain.Message) bool {
+			return m.Kind == "poll" && m.Poll != nil && m.Poll.SelectableOptionsCount == 0 && m.Poll.Options[0].VoteCount == 4
 		}},
 		{"pin target", event("pin", &waE2E.Message{PinInChatMessage: &waE2E.PinInChatMessage{Key: &waCommon.MessageKey{ID: proto.String("pinned-message")}, Type: waE2E.PinInChatMessage_PIN_FOR_ALL.Enum()}}), func(m domain.Message) bool {
 			return m.Kind == "pin" && m.Text == "📌 Pinned a message" && m.ReplyToID == "pinned-message"

@@ -82,6 +82,7 @@ enum FrontendEventKind {
     TypingChanged(proto::TypingChanged),
     StickersChanged(proto::StickersChanged),
     BridgeLifecycle(BridgeLifecycle),
+    PinnedMessagesChanged(proto::PinnedMessagesChanged),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -127,6 +128,7 @@ impl From<proto::BackendEvent> for Option<FrontendEvent> {
             Event::ChatMerged(value) => FrontendEventKind::ChatMerged(value),
             Event::TypingChanged(value) => FrontendEventKind::TypingChanged(value),
             Event::StickersChanged(value) => FrontendEventKind::StickersChanged(value),
+            Event::PinnedMessagesChanged(value) => FrontendEventKind::PinnedMessagesChanged(value),
         };
         Some(FrontendEvent { sequence, event })
     }
@@ -1247,6 +1249,84 @@ async fn set_typing(
 }
 
 #[tauri::command]
+async fn create_poll(
+    state: tauri::State<'_, BridgeService>,
+    client_message_id: String,
+    chat_id: String,
+    question: String,
+    options: Vec<String>,
+    selectable_options_count: u32,
+) -> Result<proto::CreatePollResponse, CommandError> {
+    let result = state
+        .request(
+            rpc_request::Request::CreatePoll(proto::CreatePollRequest {
+                client_message_id: validate_client_message_id(client_message_id)?,
+                chat_id,
+                question,
+                options,
+                selectable_options_count,
+            }),
+            WRITE_TIMEOUT,
+        )
+        .await?;
+    expect_response!(result, CreatePoll)
+}
+
+#[tauri::command]
+async fn vote_poll(
+    state: tauri::State<'_, BridgeService>,
+    chat_id: String,
+    poll_message_id: String,
+    selected_options: Vec<String>,
+) -> Result<proto::VotePollResponse, CommandError> {
+    let result = state
+        .request(
+            rpc_request::Request::VotePoll(proto::VotePollRequest {
+                chat_id,
+                poll_message_id,
+                selected_options,
+            }),
+            WRITE_TIMEOUT,
+        )
+        .await?;
+    expect_response!(result, VotePoll)
+}
+
+#[tauri::command]
+async fn set_message_pin(
+    state: tauri::State<'_, BridgeService>,
+    chat_id: String,
+    message_id: String,
+    pinned: bool,
+) -> Result<proto::SetMessagePinResponse, CommandError> {
+    let result = state
+        .request(
+            rpc_request::Request::SetMessagePin(proto::SetMessagePinRequest {
+                chat_id,
+                message_id,
+                pinned,
+            }),
+            WRITE_TIMEOUT,
+        )
+        .await?;
+    expect_response!(result, SetMessagePin)
+}
+
+#[tauri::command]
+async fn list_pinned_messages(
+    state: tauri::State<'_, BridgeService>,
+    chat_id: String,
+) -> Result<proto::ListPinnedMessagesResponse, CommandError> {
+    let result = state
+        .request(
+            rpc_request::Request::ListPinnedMessages(proto::ListPinnedMessagesRequest { chat_id }),
+            READ_TIMEOUT,
+        )
+        .await?;
+    expect_response!(result, ListPinnedMessages)
+}
+
+#[tauri::command]
 async fn logout(
     state: tauri::State<'_, BridgeService>,
 ) -> Result<proto::LogoutResponse, CommandError> {
@@ -1316,6 +1396,10 @@ pub fn run() {
             get_participant_avatar,
             repair_recent_reactions,
             set_typing,
+            create_poll,
+            vote_poll,
+            set_message_pin,
+            list_pinned_messages,
             logout,
         ])
         .build(tauri::generate_context!())

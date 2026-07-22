@@ -36,6 +36,10 @@ import type {
   SendTextResponse,
   SetTypingResponse,
   StartPairingResponse,
+  CreatePollResponse,
+  VotePollResponse,
+  SetMessagePinResponse,
+  ListPinnedMessagesResponse,
 } from "./types";
 
 export type BackendEventHandler = (
@@ -275,6 +279,10 @@ export interface BridgeApi {
     chatId: string,
   ): Promise<RepairRecentReactionsResponse>;
   setTyping(chatId: string, composing: boolean): Promise<SetTypingResponse>;
+  createPoll(chatId: string, question: string, options: string[], selectableOptionsCount: number): Promise<CreatePollResponse>;
+  votePoll(chatId: string, pollMessageId: string, selectedOptions: string[]): Promise<VotePollResponse>;
+  setMessagePin(chatId: string, messageId: string, pinned: boolean): Promise<SetMessagePinResponse>;
+  listPinnedMessages(chatId: string): Promise<ListPinnedMessagesResponse>;
   logout(): Promise<LogoutResponse>;
   restartApp(): Promise<never>;
 }
@@ -422,6 +430,15 @@ const nativeBridge: BridgeApi = {
     }),
   setTyping: (chatId, composing) =>
     invokeCommand<SetTypingResponse>("set_typing", { chatId, composing }),
+  createPoll: (chatId, question, options, selectableOptionsCount) =>
+    sendIdempotency.run(chatId, ["poll", question, options, selectableOptionsCount], (clientMessageId) =>
+      invokeCommand<CreatePollResponse>("create_poll", { clientMessageId, chatId, question, options, selectableOptionsCount })),
+  votePoll: (chatId, pollMessageId, selectedOptions) =>
+    invokeCommand<VotePollResponse>("vote_poll", { chatId, pollMessageId, selectedOptions }),
+  setMessagePin: (chatId, messageId, pinned) =>
+    invokeCommand<SetMessagePinResponse>("set_message_pin", { chatId, messageId, pinned }),
+  listPinnedMessages: (chatId) =>
+    invokeCommand<ListPinnedMessagesResponse>("list_pinned_messages", { chatId }),
   logout: () => invokeCommand<LogoutResponse>("logout"),
   restartApp: () => invokeCommand<never>("restart_app"),
 };
