@@ -3514,6 +3514,8 @@ func (c *Client) handleEvent(source *whatsmeow.Client, sourceGeneration uint64, 
 		c.enqueue(func() { c.reduceHistory(evt) })
 	case *events.Archive:
 		c.enqueue(func() { c.reduceArchive(evt) })
+	case *events.Mute:
+		c.enqueue(func() { c.reduceMute(evt) })
 	case *events.MarkChatAsRead:
 		c.enqueue(func() { c.reduceMarkChatAsRead(evt) })
 	case *events.JoinedGroup:
@@ -3595,6 +3597,14 @@ func (c *Client) reconcileChatStateForGeneration(generation uint64, fetch func(c
 	}
 	if err := fetch(c.ctx, appstate.WAPatchRegularLow, true, false); err != nil {
 		c.log.Error("reconcile WhatsApp chat state", "error", err)
+		return
+	}
+	// Mute status lives in the high-priority patch. Fetching it on link — with
+	// EmitAppStateEventsOnFullSync set — replays an events.Mute for every chat
+	// the user already muted on their phone, so muted chats do not raise
+	// notifications after a fresh pairing rather than only after a live toggle.
+	if err := fetch(c.ctx, appstate.WAPatchRegularHigh, true, false); err != nil {
+		c.log.Error("reconcile WhatsApp mute state", "error", err)
 		return
 	}
 	if err := c.reducerBarrier(c.ctx); err != nil {
@@ -4380,6 +4390,38 @@ func (c *Client) reduceArchive(evt *events.Archive) {
 	archived := evt.Action.GetArchived()
 	if err = c.store.UpsertChatMetadata(c.ctx, chatID, "", &archived); err != nil {
 		c.log.Error("persist archive state", "chat_id", chatID, "error", err)
+		return
+	}
+	c.emitChat(chatID)
+}
+
+// muteForeverMillis marks a chat muted with no expiry. WhatsApp encodes "mute
+// always" as a non-positive MuteEndTimestamp; a far-future instant keeps
+// MutedUntil.After(now) true indefinitely without a magic zero.
+var muteForeverMillis = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC).UnixMilli()
+
+// reduceMute applies a mute/unmute synced from WhatsApp so muted chats no
+// longer raise desktop notifications. Without this the process never learns a
+// chat's mute state — mute lives in the regular_high app-state patch and has
+// no other delivery path — so muted_until stays zero and every chat reads as
+// unmuted. whatsmeow reports MuteEndTimestamp in Unix milliseconds, matching
+// the store column.
+func (c *Client) reduceMute(evt *events.Mute) {
+	chatID, _, err := c.resolveConversation(evt.JID.String())
+	if err != nil {
+		c.log.Error("resolve muted conversation", "chat_id", evt.JID.String(), "error", err)
+		return
+	}
+	var mutedUntilMillis int64
+	if evt.Action.GetMuted() {
+		if end := evt.Action.GetMuteEndTimestamp(); end > 0 {
+			mutedUntilMillis = end
+		} else {
+			mutedUntilMillis = muteForeverMillis
+		}
+	}
+	if err = c.store.SetChatMute(c.ctx, chatID, mutedUntilMillis); err != nil {
+		c.log.Error("persist mute state", "chat_id", chatID, "error", err)
 		return
 	}
 	c.emitChat(chatID)

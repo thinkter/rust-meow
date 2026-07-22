@@ -1329,6 +1329,54 @@ func TestArchiveEventUpdatesChatAndEmitsIt(t *testing.T) {
 	}
 }
 
+func TestMuteEventDrivesChatMuteStateForNotifications(t *testing.T) {
+	ctx := context.Background()
+	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	var emitted []Event
+	c := &Client{ctx: ctx, store: productStore, sink: func(event Event) { emitted = append(emitted, event) }, log: slog.Default()}
+	jid := types.NewJID("123", types.GroupServer)
+
+	// A timed mute (whatsmeow reports the end in Unix milliseconds) keeps the
+	// chat muted until that instant.
+	future := time.Now().Add(8 * time.Hour).UnixMilli()
+	c.reduceMute(&events.Mute{JID: jid, Action: &waSyncAction.MuteAction{Muted: proto.Bool(true), MuteEndTimestamp: proto.Int64(future)}})
+	chat, err := productStore.Chat(ctx, "123@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chat.MutedUntil.After(time.Now()) {
+		t.Fatalf("timed mute did not persist a future mute-until: %v", chat.MutedUntil)
+	}
+	if len(emitted) != 1 || emitted[0].Kind != "chat" {
+		t.Fatalf("mute did not emit a chat update: %+v", emitted)
+	}
+
+	// "Mute always" arrives as muted with a non-positive end timestamp; it must
+	// still read as muted far into the future rather than as an epoch (unmuted).
+	c.reduceMute(&events.Mute{JID: jid, Action: &waSyncAction.MuteAction{Muted: proto.Bool(true), MuteEndTimestamp: proto.Int64(0)}})
+	chat, err = productStore.Chat(ctx, "123@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chat.MutedUntil.After(time.Now().Add(100 * 365 * 24 * time.Hour)) {
+		t.Fatalf("mute-always did not persist a far-future mute-until: %v", chat.MutedUntil)
+	}
+
+	// Unmuting clears it so notifications resume.
+	c.reduceMute(&events.Mute{JID: jid, Action: &waSyncAction.MuteAction{Muted: proto.Bool(false)}})
+	chat, err = productStore.Chat(ctx, "123@g.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.MutedUntil.After(time.Now()) {
+		t.Fatalf("unmute did not clear the mute state: %v", chat.MutedUntil)
+	}
+}
+
 func TestCrossDeviceReadReceiptClearsOnlyReferencedUnreadMessages(t *testing.T) {
 	ctx := context.Background()
 	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
@@ -1487,8 +1535,11 @@ func TestChatStateProjectionRetriesThenRunsOnlyOncePerProcess(t *testing.T) {
 		t.Fatal("successful projection was not marked complete")
 	}
 	c.reconcileChatState()
-	if attempts != 2 {
-		t.Fatalf("attempts=%d want 2", attempts)
+	// One failed low-patch fetch, then a successful reconcile that fetches both
+	// the low patch (pin/archive) and the high patch (mute): three in total.
+	// The completed projection must not fetch again.
+	if attempts != 3 {
+		t.Fatalf("attempts=%d want 3", attempts)
 	}
 }
 
