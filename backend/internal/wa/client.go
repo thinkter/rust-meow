@@ -14,6 +14,7 @@ import (
 	"image/png"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
@@ -137,6 +139,11 @@ type LogoutError struct {
 	Stage         string
 	Remote, Local error
 }
+
+var (
+	ErrInvalidAttachment       = errors.New("invalid attachment")
+	errAttachmentDownloadLimit = errors.New("attachment exceeds the 2 GiB download limit")
+)
 
 func (e *LogoutError) Error() string {
 	switch e.Stage {
@@ -1175,6 +1182,24 @@ func quotedMessage(message domain.Message) *waE2E.Message {
 			mimeType = message.Image.MIMEType
 		}
 		return &waE2E.Message{StickerMessage: &waE2E.StickerMessage{Mimetype: proto.String(mimeType)}}
+	case "video":
+		attachment := message.Attachment
+		if attachment == nil {
+			return &waE2E.Message{Conversation: proto.String(message.Text)}
+		}
+		return &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Mimetype: proto.String(attachment.MIMEType), Caption: proto.String(attachment.Caption)}}
+	case "audio":
+		attachment := message.Attachment
+		if attachment == nil {
+			return &waE2E.Message{Conversation: proto.String(message.Text)}
+		}
+		return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{Mimetype: proto.String(attachment.MIMEType), PTT: proto.Bool(attachment.VoiceNote)}}
+	case "document":
+		attachment := message.Attachment
+		if attachment == nil {
+			return &waE2E.Message{Conversation: proto.String(message.Text)}
+		}
+		return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Mimetype: proto.String(attachment.MIMEType), FileName: proto.String(attachment.FileName), Caption: proto.String(attachment.Caption)}}
 	default:
 		return &waE2E.Message{Conversation: proto.String(message.Text)}
 	}
@@ -1263,6 +1288,9 @@ func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID
 
 const maxImageBytes = 32 * 1024 * 1024
 
+const maxAttachmentBytes int64 = 2 * 1024 * 1024 * 1024
+const mediaCacheBytes int64 = 512 * 1024 * 1024
+
 // Keep decoded images bounded as well as their compressed representation. At
 // four bytes per pixel this caps a single GPUI decode at roughly 64 MiB.
 const maxImagePixels int64 = 16_000_000
@@ -1344,6 +1372,177 @@ func webpIsAnimated(data []byte) bool {
 		offset = payloadEnd + size%2
 	}
 	return false
+}
+
+type attachmentSource struct {
+	file     *os.File
+	path     string
+	fileName string
+	mimeType string
+	size     int64
+}
+
+func openAttachmentSource(sourcePath, kind string, voiceNote bool) (source attachmentSource, err error) {
+	if voiceNote && kind != "audio" {
+		return source, fmt.Errorf("voice notes must be audio attachments")
+	}
+	if !filepath.IsAbs(sourcePath) {
+		return source, fmt.Errorf("attachment path must be absolute")
+	}
+	resolvedPath, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		return source, fmt.Errorf("resolve attachment path: %w", err)
+	}
+	if !utf8.ValidString(resolvedPath) {
+		return source, fmt.Errorf("attachment path must be valid UTF-8")
+	}
+	file, err := os.Open(resolvedPath)
+	if err != nil {
+		return source, fmt.Errorf("open attachment: %w", err)
+	}
+	keepOpen := false
+	defer func() {
+		if !keepOpen {
+			_ = file.Close()
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return source, fmt.Errorf("inspect attachment: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxAttachmentBytes {
+		return source, fmt.Errorf("attachment must be a regular file between 1 byte and 2 GiB")
+	}
+	fileName := filepath.Base(resolvedPath)
+	if fileName == "." || fileName == string(filepath.Separator) || !utf8.ValidString(fileName) || len(fileName) > 255 {
+		return source, fmt.Errorf("attachment file name is invalid")
+	}
+	header := make([]byte, 512)
+	n, readErr := io.ReadFull(file, header)
+	if readErr != nil && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		return source, fmt.Errorf("inspect attachment content: %w", readErr)
+	}
+	header = header[:n]
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		return source, fmt.Errorf("rewind attachment: %w", err)
+	}
+	mimeType := detectAttachmentMIME(header, resolvedPath, kind)
+	switch kind {
+	case "document":
+		// Documents intentionally allow arbitrary content types: sending media as a
+		// document is a first-class WhatsApp workflow.
+	case "video":
+		if !strings.HasPrefix(mimeType, "video/") {
+			return source, fmt.Errorf("video attachment has content type %s", mimeType)
+		}
+	case "audio":
+		if !strings.HasPrefix(mimeType, "audio/") {
+			return source, fmt.Errorf("audio attachment has content type %s", mimeType)
+		}
+		if voiceNote {
+			if !bytes.HasPrefix(header, []byte("OggS")) || !bytes.Contains(header, []byte("OpusHead")) {
+				return source, fmt.Errorf("voice notes must contain Ogg Opus audio")
+			}
+			mimeType = "audio/ogg; codecs=opus"
+		}
+	default:
+		return source, fmt.Errorf("unsupported attachment kind %q", kind)
+	}
+	keepOpen = true
+	return attachmentSource{file: file, path: resolvedPath, fileName: fileName, mimeType: mimeType, size: info.Size()}, nil
+}
+
+func detectAttachmentMIME(header []byte, sourcePath, kind string) string {
+	detected := strings.TrimSpace(strings.SplitN(http.DetectContentType(header), ";", 2)[0])
+	switch {
+	case bytes.HasPrefix(header, []byte("OggS")):
+		detected = "audio/ogg"
+	case len(header) >= 12 && string(header[4:8]) == "ftyp":
+		if kind == "audio" {
+			detected = "audio/mp4"
+		} else {
+			detected = "video/mp4"
+		}
+	case len(header) >= 4 && bytes.Equal(header[:4], []byte{0x1a, 0x45, 0xdf, 0xa3}):
+		if kind == "audio" {
+			detected = "audio/webm"
+		} else {
+			detected = "video/webm"
+		}
+	}
+	if detected == "application/octet-stream" {
+		if extensionType := mime.TypeByExtension(strings.ToLower(filepath.Ext(sourcePath))); extensionType != "" {
+			detected = strings.TrimSpace(strings.SplitN(extensionType, ";", 2)[0])
+		}
+	}
+	if detected == "" {
+		return "application/octet-stream"
+	}
+	return detected
+}
+
+func validCacheExtension(extension string) bool {
+	if len(extension) < 2 || len(extension) > 12 || extension[0] != '.' {
+		return false
+	}
+	for _, char := range extension[1:] {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func attachmentExtension(mimeType, fileName string) string {
+	if extension := strings.ToLower(filepath.Ext(fileName)); validCacheExtension(extension) {
+		return extension
+	}
+	mediaType, _, err := mime.ParseMediaType(mimeType)
+	if err == nil {
+		if extensions, extensionErr := mime.ExtensionsByType(mediaType); extensionErr == nil {
+			for _, extension := range extensions {
+				extension = strings.ToLower(extension)
+				if validCacheExtension(extension) {
+					return extension
+				}
+			}
+		}
+	}
+	return ".bin"
+}
+
+func attachmentCacheKey(chatID, messageID string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(chatID+"\x00"+messageID)))
+}
+
+func (c *Client) attachmentPath(chatID, messageID string, attachment *domain.Attachment) string {
+	return filepath.Join(c.mediaDir, attachmentCacheKey(chatID, messageID)+attachmentExtension(attachment.MIMEType, attachment.FileName))
+}
+
+func validLocalAttachment(path string, expectedSize uint64) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxAttachmentBytes {
+		return false
+	}
+	return expectedSize == 0 || uint64(info.Size()) == expectedSize
+}
+
+func (c *Client) CachedAttachmentPath(chatID, messageID string, attachment *domain.Attachment) string {
+	if attachment == nil {
+		return ""
+	}
+	if attachment.LocalPath != "" && validLocalAttachment(attachment.LocalPath, attachment.FileSize) {
+		return attachment.LocalPath
+	}
+	path := c.attachmentPath(chatID, messageID, attachment)
+	if validLocalAttachment(path, attachment.FileSize) {
+		return path
+	}
+	_ = os.Remove(path)
+	return ""
 }
 
 func imageExtension(mimeType string) string {
@@ -1471,7 +1670,7 @@ func (c *Client) cachedImagePaths(chatID, messageID, mimeType string, generateTh
 			_ = os.Remove(thumbnailPath)
 			return "", ""
 		}
-		c.pruneMediaCache(512 * 1024 * 1024)
+		c.pruneMediaCache(mediaCacheBytes)
 	}
 	if !validCachedImage(thumbnailPath) {
 		_ = os.Remove(originalPath)
@@ -1523,7 +1722,7 @@ func (c *Client) cacheImageBytes(chatID, messageID, mimeType string, data []byte
 		_ = os.Remove(thumbnailPath)
 		return "", "", err
 	}
-	c.pruneMediaCache(512 * 1024 * 1024)
+	c.pruneMediaCache(mediaCacheBytes)
 	return path, thumbnailPath, nil
 }
 
@@ -1710,6 +1909,185 @@ func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data 
 	return pending, err
 }
 
+func attachmentMediaType(kind string) (whatsmeow.MediaType, error) {
+	switch kind {
+	case "document":
+		return whatsmeow.MediaDocument, nil
+	case "video":
+		return whatsmeow.MediaVideo, nil
+	case "audio":
+		return whatsmeow.MediaAudio, nil
+	default:
+		return "", fmt.Errorf("unsupported attachment kind %q", kind)
+	}
+}
+
+func attachmentFallback(kind, caption, fileName string, voiceNote bool) string {
+	if caption != "" {
+		return caption
+	}
+	switch kind {
+	case "document":
+		if fileName != "" {
+			return fileName
+		}
+		return "📄 Document"
+	case "video":
+		return "🎬 Video"
+	case "audio":
+		if voiceNote {
+			return "🎤 Voice message"
+		}
+		return "🎵 Audio"
+	default:
+		return "Attachment"
+	}
+}
+
+func attachmentPayloadFingerprint(source attachmentSource, kind, caption, replyToID string, voiceNote bool) string {
+	digest := sha256.New()
+	var encodedLength [8]byte
+	for _, value := range []string{kind, source.path, source.mimeType, caption, replyToID} {
+		binary.BigEndian.PutUint64(encodedLength[:], uint64(len(value)))
+		_, _ = digest.Write(encodedLength[:])
+		_, _ = digest.Write([]byte(value))
+	}
+	binary.BigEndian.PutUint64(encodedLength[:], uint64(source.size))
+	_, _ = digest.Write(encodedLength[:])
+	if voiceNote {
+		_, _ = digest.Write([]byte{1})
+	} else {
+		_, _ = digest.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil))
+}
+
+func outgoingAttachmentMessage(kind string, attachment *domain.Attachment, upload whatsmeow.UploadResponse, contextInfo *waE2E.ContextInfo) (*waE2E.Message, error) {
+	switch kind {
+	case "document":
+		return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+			URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(attachment.MIMEType),
+			FileName: proto.String(attachment.FileName), Caption: proto.String(attachment.Caption), ContextInfo: contextInfo,
+		}}, nil
+	case "video":
+		return &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+			URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(attachment.MIMEType),
+			Caption: proto.String(attachment.Caption), ContextInfo: contextInfo,
+		}}, nil
+	case "audio":
+		return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+			URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(attachment.MIMEType),
+			PTT: proto.Bool(attachment.VoiceNote), ContextInfo: contextInfo,
+		}}, nil
+	default:
+		return nil, fmt.Errorf("unsupported attachment kind %q", kind)
+	}
+}
+
+func validUploadResponse(upload whatsmeow.UploadResponse, expectedSize int64) bool {
+	return upload.FileLength == uint64(expectedSize) && upload.URL != "" && upload.DirectPath != "" &&
+		len(upload.MediaKey) == sha256.Size && len(upload.FileSHA256) == sha256.Size && len(upload.FileEncSHA256) == sha256.Size
+}
+
+func (c *Client) SendAttachment(ctx context.Context, clientID, chatID, sourcePath, kind, caption, replyToID string, voiceNote bool) (domain.Message, error) {
+	if !utf8.ValidString(caption) || len(caption) > 4096 {
+		return domain.Message{}, fmt.Errorf("%w: caption must be valid UTF-8 up to 4096 bytes", ErrInvalidAttachment)
+	}
+	if kind == "audio" && caption != "" {
+		return domain.Message{}, fmt.Errorf("%w: audio messages do not support captions", ErrInvalidAttachment)
+	}
+	source, err := openAttachmentSource(sourcePath, kind, voiceNote)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("%w: %v", ErrInvalidAttachment, err)
+	}
+	defer source.file.Close()
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	resolvedChat, _, err := c.resolveConversation(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chatID = resolvedChat
+	resolvedTransport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	chat, err := types.ParseJID(resolvedTransport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	replyContext, err := c.replyContext(ctx, chatID, replyToID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	mediaType, err := attachmentMediaType(kind)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	waID := string(c.wa.GenerateMessageID())
+	attachment := &domain.Attachment{
+		Caption: caption, MIMEType: source.mimeType, LocalPath: source.path, FileSize: uint64(source.size), VoiceNote: voiceNote,
+	}
+	if kind == "document" {
+		attachment.FileName = source.fileName
+	}
+	pending := domain.Message{
+		ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(),
+		Text: attachmentFallback(kind, caption, source.fileName, voiceNote), Timestamp: time.Now(), FromMe: true,
+		Status: domain.StatusPending, Kind: kind, ReplyToID: replyToID, Attachment: attachment,
+	}
+	payloadFingerprint := attachmentPayloadFingerprint(source, kind, caption, replyToID, voiceNote)
+	waID, existed, err := c.store.ReserveOutgoingMessageWithPayload(ctx, clientID, payloadFingerprint, pending)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if existed {
+		return c.store.Message(ctx, chatID, waID)
+	}
+	uploadCtx, cancelUpload := context.WithTimeout(ctx, 10*time.Minute)
+	upload, err := c.wa.UploadReader(uploadCtx, source.file, nil, mediaType)
+	cancelUpload()
+	if err == nil && !validUploadResponse(upload, source.size) {
+		err = fmt.Errorf("WhatsApp returned incomplete attachment upload metadata")
+	}
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, fmt.Errorf("upload %s: %w", kind, err)
+	}
+	attachment.DirectPath = upload.DirectPath
+	attachment.MediaKey = upload.MediaKey
+	attachment.FileSHA256 = upload.FileSHA256
+	attachment.FileEncSHA256 = upload.FileEncSHA256
+	outgoing, err := outgoingAttachmentMessage(kind, attachment, upload, replyContext)
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, err
+	}
+	sendCtx, cancelSend := context.WithTimeout(ctx, 30*time.Second)
+	response, err := c.wa.SendMessage(sendCtx, chat, outgoing, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
+	cancelSend()
+	if err != nil {
+		pending.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, pending, false)
+		c.emitChat(chatID)
+		return pending, err
+	}
+	pending.Timestamp = response.Timestamp
+	pending.Status = domain.StatusSent
+	err = c.store.ApplyMessage(ctx, pending, false)
+	c.emitChat(chatID)
+	return pending, err
+}
+
 func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (string, string, error) {
 	message, err := c.store.Message(ctx, chatID, messageID)
 	if err != nil {
@@ -1796,8 +2174,220 @@ func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (s
 	if err = c.store.SetImageLocalPath(ctx, chatID, messageID, path); err != nil {
 		return "", "", err
 	}
-	c.pruneMediaCache(512 * 1024 * 1024)
+	c.pruneMediaCache(mediaCacheBytes)
 	return path, thumbnailPath, nil
+}
+
+type boundedFile struct {
+	*os.File
+	maxSize int64
+}
+
+func (file *boundedFile) Write(data []byte) (int, error) {
+	offset, err := file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	if offset < 0 || int64(len(data)) > file.maxSize-offset {
+		return 0, errAttachmentDownloadLimit
+	}
+	return file.File.Write(data)
+}
+
+func (file *boundedFile) WriteAt(data []byte, offset int64) (int, error) {
+	if offset < 0 || int64(len(data)) > file.maxSize-offset {
+		return 0, errAttachmentDownloadLimit
+	}
+	return file.File.WriteAt(data, offset)
+}
+
+func (file *boundedFile) Truncate(size int64) error {
+	if size < 0 || size > file.maxSize {
+		return errAttachmentDownloadLimit
+	}
+	return file.File.Truncate(size)
+}
+
+func resetDownloadFile(file *os.File) error {
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+	_, err := file.Seek(0, io.SeekStart)
+	return err
+}
+
+func downloadableAttachment(kind string, attachment *domain.Attachment) (whatsmeow.DownloadableMessage, error) {
+	switch kind {
+	case "document":
+		return &waE2E.DocumentMessage{Mimetype: &attachment.MIMEType, FileName: &attachment.FileName, Caption: &attachment.Caption,
+			DirectPath: &attachment.DirectPath, MediaKey: attachment.MediaKey, FileSHA256: attachment.FileSHA256,
+			FileEncSHA256: attachment.FileEncSHA256, FileLength: &attachment.FileSize}, nil
+	case "video":
+		return &waE2E.VideoMessage{Mimetype: &attachment.MIMEType, Caption: &attachment.Caption, DirectPath: &attachment.DirectPath,
+			MediaKey: attachment.MediaKey, FileSHA256: attachment.FileSHA256, FileEncSHA256: attachment.FileEncSHA256,
+			FileLength: &attachment.FileSize, Width: &attachment.Width, Height: &attachment.Height,
+			Seconds: &attachment.DurationSeconds, GifPlayback: &attachment.Animated}, nil
+	case "audio":
+		return &waE2E.AudioMessage{Mimetype: &attachment.MIMEType, DirectPath: &attachment.DirectPath, MediaKey: attachment.MediaKey,
+			FileSHA256: attachment.FileSHA256, FileEncSHA256: attachment.FileEncSHA256, FileLength: &attachment.FileSize,
+			Seconds: &attachment.DurationSeconds, PTT: &attachment.VoiceNote}, nil
+	default:
+		return nil, fmt.Errorf("message is not a downloadable attachment")
+	}
+}
+
+func attachmentDescriptorChanged(previous, current *domain.Attachment) bool {
+	if current == nil || current.DirectPath == "" || len(current.MediaKey) == 0 {
+		return false
+	}
+	if previous == nil || previous.DirectPath == "" || len(previous.MediaKey) == 0 {
+		return true
+	}
+	return current.DirectPath != previous.DirectPath || !bytes.Equal(current.MediaKey, previous.MediaKey) || !bytes.Equal(current.FileEncSHA256, previous.FileEncSHA256)
+}
+
+func (c *Client) recoverAttachmentDescriptor(ctx context.Context, message domain.Message, previous *domain.Attachment) (*domain.Attachment, error) {
+	if !c.wa.IsConnected() {
+		return nil, fmt.Errorf("attachment metadata is missing and WhatsApp is offline")
+	}
+	chat, err := types.ParseJID(message.TransportJID)
+	if err != nil {
+		return nil, err
+	}
+	sender := types.EmptyJID
+	if !message.FromMe {
+		sender, err = types.ParseJID(message.SenderJID)
+		if err != nil {
+			return nil, err
+		}
+		sender = sender.ToNonAD()
+	}
+	requestCtx, cancelRequest := context.WithTimeout(ctx, 20*time.Second)
+	_, err = c.wa.SendPeerMessage(requestCtx, c.wa.BuildUnavailableMessageRequest(chat, sender, message.ID))
+	cancelRequest()
+	if err != nil {
+		return nil, fmt.Errorf("request attachment metadata from primary phone: %w", err)
+	}
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, fmt.Errorf("primary phone did not return attachment metadata in time")
+		case <-ticker.C:
+			refreshed, loadErr := c.store.Message(ctx, message.ChatJID, message.ID)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			if attachmentDescriptorChanged(previous, refreshed.Attachment) {
+				return refreshed.Attachment, nil
+			}
+		}
+	}
+}
+
+func (c *Client) DownloadAttachment(ctx context.Context, chatID, messageID string) (string, error) {
+	message, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return "", err
+	}
+	if message.Revoked {
+		return "", fmt.Errorf("attachment was deleted")
+	}
+	chatID = message.ChatJID
+	attachment := message.Attachment
+	if attachment == nil {
+		return "", fmt.Errorf("message is not an attachment")
+	}
+	if path := c.CachedAttachmentPath(chatID, messageID, attachment); path != "" {
+		if attachment.LocalPath != path {
+			_ = c.store.SetAttachmentLocalPath(ctx, chatID, messageID, path)
+		}
+		return path, nil
+	}
+	if attachment.FileSize > uint64(maxAttachmentBytes) {
+		return "", fmt.Errorf("attachment exceeds the 2 GiB download limit")
+	}
+	if attachment.DirectPath == "" || len(attachment.MediaKey) == 0 {
+		attachment, err = c.recoverAttachmentDescriptor(ctx, message, attachment)
+		if err != nil {
+			return "", err
+		}
+		if attachment.FileSize > uint64(maxAttachmentBytes) {
+			return "", fmt.Errorf("attachment exceeds the 2 GiB download limit")
+		}
+	}
+	if err = os.MkdirAll(c.mediaDir, 0o700); err != nil {
+		return "", err
+	}
+	temporary, err := os.CreateTemp(c.mediaDir, ".attachment-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	bounded := &boundedFile{File: temporary, maxSize: maxAttachmentBytes + 64}
+	downloadable, err := downloadableAttachment(message.Kind, attachment)
+	if err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	downloadCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	err = c.wa.DownloadToFile(downloadCtx, downloadable, bounded)
+	cancel()
+	if err != nil && !errors.Is(err, errAttachmentDownloadLimit) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// Direct paths from history can expire. Refresh once from the primary and
+		// retry with the new cryptographic descriptor.
+		refreshed, refreshErr := c.recoverAttachmentDescriptor(ctx, message, attachment)
+		if refreshErr == nil {
+			attachment = refreshed
+			if attachment.FileSize > uint64(maxAttachmentBytes) {
+				refreshErr = fmt.Errorf("attachment exceeds the 2 GiB download limit")
+			} else {
+				downloadable, refreshErr = downloadableAttachment(message.Kind, attachment)
+			}
+		}
+		if refreshErr == nil {
+			refreshErr = resetDownloadFile(temporary)
+		}
+		if refreshErr == nil {
+			downloadCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			err = c.wa.DownloadToFile(downloadCtx, downloadable, bounded)
+			cancel()
+		} else {
+			err = errors.Join(err, refreshErr)
+		}
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("download attachment: %w", err)
+	}
+	info, err := os.Stat(temporaryPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxAttachmentBytes {
+		return "", fmt.Errorf("downloaded attachment has invalid size")
+	}
+	if attachment.FileSize > 0 && uint64(info.Size()) != attachment.FileSize {
+		return "", fmt.Errorf("downloaded attachment size does not match metadata")
+	}
+	path := c.attachmentPath(chatID, messageID, attachment)
+	if err = os.Rename(temporaryPath, path); err != nil && !validLocalAttachment(path, attachment.FileSize) {
+		return "", err
+	}
+	if err = c.store.SetAttachmentLocalPath(ctx, chatID, messageID, path); err != nil {
+		return "", err
+	}
+	c.pruneMediaCacheExcept(mediaCacheBytes, attachmentCacheKey(chatID, messageID))
+	return path, nil
 }
 
 func downloadableImage(kind string, image *domain.Image) whatsmeow.DownloadableMessage {
@@ -1866,6 +2456,10 @@ func imageDescriptorChanged(previous, current *domain.Image) bool {
 }
 
 func (c *Client) pruneMediaCache(maxBytes int64) {
+	c.pruneMediaCacheExcept(maxBytes, "")
+}
+
+func (c *Client) pruneMediaCacheExcept(maxBytes int64, preserveKey string) {
 	entries, err := os.ReadDir(c.mediaDir)
 	if err != nil {
 		return
@@ -1901,6 +2495,9 @@ func (c *Client) pruneMediaCache(maxBytes int64) {
 	for _, group := range groups {
 		if total <= maxBytes {
 			break
+		}
+		if preserveKey != "" && len(group.paths) > 0 && strings.HasPrefix(filepath.Base(group.paths[0]), preserveKey+".") {
+			continue
 		}
 		removed := int64(0)
 		for _, path := range group.paths {

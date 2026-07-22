@@ -200,6 +200,58 @@ func (MessageStatus) EnumDescriptor() ([]byte, []int) {
 	return file_bridge_proto_rawDescGZIP(), []int{2}
 }
 
+type AttachmentKind int32
+
+const (
+	AttachmentKind_ATTACHMENT_KIND_UNSPECIFIED AttachmentKind = 0
+	AttachmentKind_ATTACHMENT_KIND_DOCUMENT    AttachmentKind = 1
+	AttachmentKind_ATTACHMENT_KIND_VIDEO       AttachmentKind = 2
+	AttachmentKind_ATTACHMENT_KIND_AUDIO       AttachmentKind = 3
+)
+
+// Enum value maps for AttachmentKind.
+var (
+	AttachmentKind_name = map[int32]string{
+		0: "ATTACHMENT_KIND_UNSPECIFIED",
+		1: "ATTACHMENT_KIND_DOCUMENT",
+		2: "ATTACHMENT_KIND_VIDEO",
+		3: "ATTACHMENT_KIND_AUDIO",
+	}
+	AttachmentKind_value = map[string]int32{
+		"ATTACHMENT_KIND_UNSPECIFIED": 0,
+		"ATTACHMENT_KIND_DOCUMENT":    1,
+		"ATTACHMENT_KIND_VIDEO":       2,
+		"ATTACHMENT_KIND_AUDIO":       3,
+	}
+)
+
+func (x AttachmentKind) Enum() *AttachmentKind {
+	p := new(AttachmentKind)
+	*p = x
+	return p
+}
+
+func (x AttachmentKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (AttachmentKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_bridge_proto_enumTypes[3].Descriptor()
+}
+
+func (AttachmentKind) Type() protoreflect.EnumType {
+	return &file_bridge_proto_enumTypes[3]
+}
+
+func (x AttachmentKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use AttachmentKind.Descriptor instead.
+func (AttachmentKind) EnumDescriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{3}
+}
+
 // Frames are encoded as a 4-byte big-endian length followed by one Envelope.
 // Protocol stdout must never contain logs or any other unframed bytes.
 type Envelope struct {
@@ -343,6 +395,8 @@ type RpcRequest struct {
 	//	*RpcRequest_ListMessagesAfter
 	//	*RpcRequest_GetChatInfo
 	//	*RpcRequest_SetTyping
+	//	*RpcRequest_GetMessageAttachment
+	//	*RpcRequest_SendAttachment
 	Request       isRpcRequest_Request `protobuf_oneof:"request"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -592,6 +646,24 @@ func (x *RpcRequest) GetSetTyping() *SetTypingRequest {
 	return nil
 }
 
+func (x *RpcRequest) GetGetMessageAttachment() *GetMessageAttachmentRequest {
+	if x != nil {
+		if x, ok := x.Request.(*RpcRequest_GetMessageAttachment); ok {
+			return x.GetMessageAttachment
+		}
+	}
+	return nil
+}
+
+func (x *RpcRequest) GetSendAttachment() *SendAttachmentRequest {
+	if x != nil {
+		if x, ok := x.Request.(*RpcRequest_SendAttachment); ok {
+			return x.SendAttachment
+		}
+	}
+	return nil
+}
+
 type isRpcRequest_Request interface {
 	isRpcRequest_Request()
 }
@@ -688,6 +760,14 @@ type RpcRequest_SetTyping struct {
 	SetTyping *SetTypingRequest `protobuf:"bytes,23,opt,name=set_typing,json=setTyping,proto3,oneof"`
 }
 
+type RpcRequest_GetMessageAttachment struct {
+	GetMessageAttachment *GetMessageAttachmentRequest `protobuf:"bytes,24,opt,name=get_message_attachment,json=getMessageAttachment,proto3,oneof"`
+}
+
+type RpcRequest_SendAttachment struct {
+	SendAttachment *SendAttachmentRequest `protobuf:"bytes,25,opt,name=send_attachment,json=sendAttachment,proto3,oneof"`
+}
+
 func (*RpcRequest_Hello) isRpcRequest_Request() {}
 
 func (*RpcRequest_GetAuthState) isRpcRequest_Request() {}
@@ -734,6 +814,10 @@ func (*RpcRequest_GetChatInfo) isRpcRequest_Request() {}
 
 func (*RpcRequest_SetTyping) isRpcRequest_Request() {}
 
+func (*RpcRequest_GetMessageAttachment) isRpcRequest_Request() {}
+
+func (*RpcRequest_SendAttachment) isRpcRequest_Request() {}
+
 type RpcResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Exactly one result is always set: either an error or a successful payload.
@@ -764,6 +848,8 @@ type RpcResponse struct {
 	//	*RpcResponse_ListMessagesAfter
 	//	*RpcResponse_GetChatInfo
 	//	*RpcResponse_SetTyping
+	//	*RpcResponse_GetMessageAttachment
+	//	*RpcResponse_SendAttachment
 	Result        isRpcResponse_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1022,6 +1108,24 @@ func (x *RpcResponse) GetSetTyping() *SetTypingResponse {
 	return nil
 }
 
+func (x *RpcResponse) GetGetMessageAttachment() *GetMessageAttachmentResponse {
+	if x != nil {
+		if x, ok := x.Result.(*RpcResponse_GetMessageAttachment); ok {
+			return x.GetMessageAttachment
+		}
+	}
+	return nil
+}
+
+func (x *RpcResponse) GetSendAttachment() *SendAttachmentResponse {
+	if x != nil {
+		if x, ok := x.Result.(*RpcResponse_SendAttachment); ok {
+			return x.SendAttachment
+		}
+	}
+	return nil
+}
+
 type isRpcResponse_Result interface {
 	isRpcResponse_Result()
 }
@@ -1122,6 +1226,14 @@ type RpcResponse_SetTyping struct {
 	SetTyping *SetTypingResponse `protobuf:"bytes,32,opt,name=set_typing,json=setTyping,proto3,oneof"`
 }
 
+type RpcResponse_GetMessageAttachment struct {
+	GetMessageAttachment *GetMessageAttachmentResponse `protobuf:"bytes,33,opt,name=get_message_attachment,json=getMessageAttachment,proto3,oneof"`
+}
+
+type RpcResponse_SendAttachment struct {
+	SendAttachment *SendAttachmentResponse `protobuf:"bytes,34,opt,name=send_attachment,json=sendAttachment,proto3,oneof"`
+}
+
 func (*RpcResponse_Error) isRpcResponse_Result() {}
 
 func (*RpcResponse_Hello) isRpcResponse_Result() {}
@@ -1169,6 +1281,10 @@ func (*RpcResponse_ListMessagesAfter) isRpcResponse_Result() {}
 func (*RpcResponse_GetChatInfo) isRpcResponse_Result() {}
 
 func (*RpcResponse_SetTyping) isRpcResponse_Result() {}
+
+func (*RpcResponse_GetMessageAttachment) isRpcResponse_Result() {}
+
+func (*RpcResponse_SendAttachment) isRpcResponse_Result() {}
 
 type BackendEvent struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -6009,6 +6125,262 @@ func (x *SendStickerResponse) GetMessage() *Message {
 	return nil
 }
 
+type GetMessageAttachmentRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChatId        string                 `protobuf:"bytes,1,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
+	MessageId     string                 `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetMessageAttachmentRequest) Reset() {
+	*x = GetMessageAttachmentRequest{}
+	mi := &file_bridge_proto_msgTypes[76]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetMessageAttachmentRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetMessageAttachmentRequest) ProtoMessage() {}
+
+func (x *GetMessageAttachmentRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[76]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetMessageAttachmentRequest.ProtoReflect.Descriptor instead.
+func (*GetMessageAttachmentRequest) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{76}
+}
+
+func (x *GetMessageAttachmentRequest) GetChatId() string {
+	if x != nil {
+		return x.ChatId
+	}
+	return ""
+}
+
+func (x *GetMessageAttachmentRequest) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+type GetMessageAttachmentResponse struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ChatId    string                 `protobuf:"bytes,1,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
+	MessageId string                 `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// A backend-owned cache entry, or the still-valid source path for an
+	// attachment sent from this device.
+	LocalPath     string `protobuf:"bytes,3,opt,name=local_path,json=localPath,proto3" json:"local_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetMessageAttachmentResponse) Reset() {
+	*x = GetMessageAttachmentResponse{}
+	mi := &file_bridge_proto_msgTypes[77]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetMessageAttachmentResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetMessageAttachmentResponse) ProtoMessage() {}
+
+func (x *GetMessageAttachmentResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[77]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetMessageAttachmentResponse.ProtoReflect.Descriptor instead.
+func (*GetMessageAttachmentResponse) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{77}
+}
+
+func (x *GetMessageAttachmentResponse) GetChatId() string {
+	if x != nil {
+		return x.ChatId
+	}
+	return ""
+}
+
+func (x *GetMessageAttachmentResponse) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *GetMessageAttachmentResponse) GetLocalPath() string {
+	if x != nil {
+		return x.LocalPath
+	}
+	return ""
+}
+
+type SendAttachmentRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Stable UUID with the same idempotency contract as the other send RPCs.
+	ClientMessageId string `protobuf:"bytes,1,opt,name=client_message_id,json=clientMessageId,proto3" json:"client_message_id,omitempty"`
+	ChatId          string `protobuf:"bytes,2,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
+	// Absolute path selected by the local desktop file picker. The backend
+	// validates the file type and streams it to WhatsApp without loading the
+	// complete attachment into memory.
+	FilePath string         `protobuf:"bytes,3,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	Kind     AttachmentKind `protobuf:"varint,4,opt,name=kind,proto3,enum=rustmeow.bridge.v1.AttachmentKind" json:"kind,omitempty"`
+	// Supported for documents and videos. Audio messages do not have captions.
+	Caption          string `protobuf:"bytes,5,opt,name=caption,proto3" json:"caption,omitempty"`
+	ReplyToMessageId string `protobuf:"bytes,6,opt,name=reply_to_message_id,json=replyToMessageId,proto3" json:"reply_to_message_id,omitempty"`
+	// Audio only. Voice notes must contain Ogg Opus data.
+	VoiceNote     bool `protobuf:"varint,7,opt,name=voice_note,json=voiceNote,proto3" json:"voice_note,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendAttachmentRequest) Reset() {
+	*x = SendAttachmentRequest{}
+	mi := &file_bridge_proto_msgTypes[78]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendAttachmentRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendAttachmentRequest) ProtoMessage() {}
+
+func (x *SendAttachmentRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[78]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendAttachmentRequest.ProtoReflect.Descriptor instead.
+func (*SendAttachmentRequest) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{78}
+}
+
+func (x *SendAttachmentRequest) GetClientMessageId() string {
+	if x != nil {
+		return x.ClientMessageId
+	}
+	return ""
+}
+
+func (x *SendAttachmentRequest) GetChatId() string {
+	if x != nil {
+		return x.ChatId
+	}
+	return ""
+}
+
+func (x *SendAttachmentRequest) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
+	}
+	return ""
+}
+
+func (x *SendAttachmentRequest) GetKind() AttachmentKind {
+	if x != nil {
+		return x.Kind
+	}
+	return AttachmentKind_ATTACHMENT_KIND_UNSPECIFIED
+}
+
+func (x *SendAttachmentRequest) GetCaption() string {
+	if x != nil {
+		return x.Caption
+	}
+	return ""
+}
+
+func (x *SendAttachmentRequest) GetReplyToMessageId() string {
+	if x != nil {
+		return x.ReplyToMessageId
+	}
+	return ""
+}
+
+func (x *SendAttachmentRequest) GetVoiceNote() bool {
+	if x != nil {
+		return x.VoiceNote
+	}
+	return false
+}
+
+type SendAttachmentResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Message       *Message               `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendAttachmentResponse) Reset() {
+	*x = SendAttachmentResponse{}
+	mi := &file_bridge_proto_msgTypes[79]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendAttachmentResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendAttachmentResponse) ProtoMessage() {}
+
+func (x *SendAttachmentResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[79]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendAttachmentResponse.ProtoReflect.Descriptor instead.
+func (*SendAttachmentResponse) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{79}
+}
+
+func (x *SendAttachmentResponse) GetMessage() *Message {
+	if x != nil {
+		return x.Message
+	}
+	return nil
+}
+
 var File_bridge_proto protoreflect.FileDescriptor
 
 const file_bridge_proto_rawDesc = "" +
@@ -6022,7 +6394,7 @@ const file_bridge_proto_rawDesc = "" +
 	" \x01(\v2\x1e.rustmeow.bridge.v1.RpcRequestH\x00R\arequest\x12=\n" +
 	"\bresponse\x18\v \x01(\v2\x1f.rustmeow.bridge.v1.RpcResponseH\x00R\bresponse\x128\n" +
 	"\x05event\x18\f \x01(\v2 .rustmeow.bridge.v1.BackendEventH\x00R\x05eventB\x06\n" +
-	"\x04body\"\xca\x0e\n" +
+	"\x04body\"\x89\x10\n" +
 	"\n" +
 	"RpcRequest\x128\n" +
 	"\x05hello\x18\x01 \x01(\v2 .rustmeow.bridge.v1.HelloRequestH\x00R\x05hello\x12O\n" +
@@ -6051,8 +6423,10 @@ const file_bridge_proto_rawDesc = "" +
 	"\x13list_messages_after\x18\x15 \x01(\v2,.rustmeow.bridge.v1.ListMessagesAfterRequestH\x00R\x11listMessagesAfter\x12L\n" +
 	"\rget_chat_info\x18\x16 \x01(\v2&.rustmeow.bridge.v1.GetChatInfoRequestH\x00R\vgetChatInfo\x12E\n" +
 	"\n" +
-	"set_typing\x18\x17 \x01(\v2$.rustmeow.bridge.v1.SetTypingRequestH\x00R\tsetTypingB\t\n" +
-	"\arequest\"\x8d\x0f\n" +
+	"set_typing\x18\x17 \x01(\v2$.rustmeow.bridge.v1.SetTypingRequestH\x00R\tsetTyping\x12g\n" +
+	"\x16get_message_attachment\x18\x18 \x01(\v2/.rustmeow.bridge.v1.GetMessageAttachmentRequestH\x00R\x14getMessageAttachment\x12T\n" +
+	"\x0fsend_attachment\x18\x19 \x01(\v2).rustmeow.bridge.v1.SendAttachmentRequestH\x00R\x0esendAttachmentB\t\n" +
+	"\arequest\"\xce\x10\n" +
 	"\vRpcResponse\x124\n" +
 	"\x05error\x18\x01 \x01(\v2\x1c.rustmeow.bridge.v1.RpcErrorH\x00R\x05error\x129\n" +
 	"\x05hello\x18\n" +
@@ -6082,7 +6456,9 @@ const file_bridge_proto_rawDesc = "" +
 	"\x13list_messages_after\x18\x1e \x01(\v2-.rustmeow.bridge.v1.ListMessagesAfterResponseH\x00R\x11listMessagesAfter\x12M\n" +
 	"\rget_chat_info\x18\x1f \x01(\v2'.rustmeow.bridge.v1.GetChatInfoResponseH\x00R\vgetChatInfo\x12F\n" +
 	"\n" +
-	"set_typing\x18  \x01(\v2%.rustmeow.bridge.v1.SetTypingResponseH\x00R\tsetTypingB\b\n" +
+	"set_typing\x18  \x01(\v2%.rustmeow.bridge.v1.SetTypingResponseH\x00R\tsetTyping\x12h\n" +
+	"\x16get_message_attachment\x18! \x01(\v20.rustmeow.bridge.v1.GetMessageAttachmentResponseH\x00R\x14getMessageAttachment\x12U\n" +
+	"\x0fsend_attachment\x18\" \x01(\v2*.rustmeow.bridge.v1.SendAttachmentResponseH\x00R\x0esendAttachmentB\b\n" +
 	"\x06result\"\x8a\a\n" +
 	"\fBackendEvent\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12V\n" +
@@ -6443,6 +6819,27 @@ const file_bridge_proto_rawDesc = "" +
 	"\twebp_data\x18\x03 \x01(\fR\bwebpData\x12-\n" +
 	"\x13reply_to_message_id\x18\x04 \x01(\tR\x10replyToMessageId\"L\n" +
 	"\x13SendStickerResponse\x125\n" +
+	"\amessage\x18\x01 \x01(\v2\x1b.rustmeow.bridge.v1.MessageR\amessage\"U\n" +
+	"\x1bGetMessageAttachmentRequest\x12\x17\n" +
+	"\achat_id\x18\x01 \x01(\tR\x06chatId\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x02 \x01(\tR\tmessageId\"u\n" +
+	"\x1cGetMessageAttachmentResponse\x12\x17\n" +
+	"\achat_id\x18\x01 \x01(\tR\x06chatId\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x02 \x01(\tR\tmessageId\x12\x1d\n" +
+	"\n" +
+	"local_path\x18\x03 \x01(\tR\tlocalPath\"\x99\x02\n" +
+	"\x15SendAttachmentRequest\x12*\n" +
+	"\x11client_message_id\x18\x01 \x01(\tR\x0fclientMessageId\x12\x17\n" +
+	"\achat_id\x18\x02 \x01(\tR\x06chatId\x12\x1b\n" +
+	"\tfile_path\x18\x03 \x01(\tR\bfilePath\x126\n" +
+	"\x04kind\x18\x04 \x01(\x0e2\".rustmeow.bridge.v1.AttachmentKindR\x04kind\x12\x18\n" +
+	"\acaption\x18\x05 \x01(\tR\acaption\x12-\n" +
+	"\x13reply_to_message_id\x18\x06 \x01(\tR\x10replyToMessageId\x12\x1d\n" +
+	"\n" +
+	"voice_note\x18\a \x01(\bR\tvoiceNote\"O\n" +
+	"\x16SendAttachmentResponse\x125\n" +
 	"\amessage\x18\x01 \x01(\v2\x1b.rustmeow.bridge.v1.MessageR\amessage*\xb0\x02\n" +
 	"\x0fConnectionState\x12 \n" +
 	"\x1cCONNECTION_STATE_UNSPECIFIED\x10\x00\x12\x1d\n" +
@@ -6465,7 +6862,12 @@ const file_bridge_proto_rawDesc = "" +
 	"\x13MESSAGE_STATUS_SENT\x10\x02\x12\x1c\n" +
 	"\x18MESSAGE_STATUS_DELIVERED\x10\x03\x12\x17\n" +
 	"\x13MESSAGE_STATUS_READ\x10\x04\x12\x19\n" +
-	"\x15MESSAGE_STATUS_FAILED\x10\x05B>Z<github.com/rust-meow/rust-meow/backend/gen/bridgev1;bridgev1b\x06proto3"
+	"\x15MESSAGE_STATUS_FAILED\x10\x05*\x85\x01\n" +
+	"\x0eAttachmentKind\x12\x1f\n" +
+	"\x1bATTACHMENT_KIND_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18ATTACHMENT_KIND_DOCUMENT\x10\x01\x12\x19\n" +
+	"\x15ATTACHMENT_KIND_VIDEO\x10\x02\x12\x19\n" +
+	"\x15ATTACHMENT_KIND_AUDIO\x10\x03B>Z<github.com/rust-meow/rust-meow/backend/gen/bridgev1;bridgev1b\x06proto3"
 
 var (
 	file_bridge_proto_rawDescOnce sync.Once
@@ -6479,189 +6881,200 @@ func file_bridge_proto_rawDescGZIP() []byte {
 	return file_bridge_proto_rawDescData
 }
 
-var file_bridge_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 76)
+var file_bridge_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 80)
 var file_bridge_proto_goTypes = []any{
 	(ConnectionState)(0),                  // 0: rustmeow.bridge.v1.ConnectionState
 	(ChatKind)(0),                         // 1: rustmeow.bridge.v1.ChatKind
 	(MessageStatus)(0),                    // 2: rustmeow.bridge.v1.MessageStatus
-	(*Envelope)(nil),                      // 3: rustmeow.bridge.v1.Envelope
-	(*RpcRequest)(nil),                    // 4: rustmeow.bridge.v1.RpcRequest
-	(*RpcResponse)(nil),                   // 5: rustmeow.bridge.v1.RpcResponse
-	(*BackendEvent)(nil),                  // 6: rustmeow.bridge.v1.BackendEvent
-	(*RpcError)(nil),                      // 7: rustmeow.bridge.v1.RpcError
-	(*HelloRequest)(nil),                  // 8: rustmeow.bridge.v1.HelloRequest
-	(*HelloResponse)(nil),                 // 9: rustmeow.bridge.v1.HelloResponse
-	(*GetAuthStateRequest)(nil),           // 10: rustmeow.bridge.v1.GetAuthStateRequest
-	(*AuthStateResponse)(nil),             // 11: rustmeow.bridge.v1.AuthStateResponse
-	(*StartPairingRequest)(nil),           // 12: rustmeow.bridge.v1.StartPairingRequest
-	(*StartPairingResponse)(nil),          // 13: rustmeow.bridge.v1.StartPairingResponse
-	(*ListChatsRequest)(nil),              // 14: rustmeow.bridge.v1.ListChatsRequest
-	(*ListChatsResponse)(nil),             // 15: rustmeow.bridge.v1.ListChatsResponse
-	(*ListMessagesRequest)(nil),           // 16: rustmeow.bridge.v1.ListMessagesRequest
-	(*ListMessagesResponse)(nil),          // 17: rustmeow.bridge.v1.ListMessagesResponse
-	(*OpenMessageWindowRequest)(nil),      // 18: rustmeow.bridge.v1.OpenMessageWindowRequest
-	(*OpenMessageWindowResponse)(nil),     // 19: rustmeow.bridge.v1.OpenMessageWindowResponse
-	(*ListMessagesAfterRequest)(nil),      // 20: rustmeow.bridge.v1.ListMessagesAfterRequest
-	(*ListMessagesAfterResponse)(nil),     // 21: rustmeow.bridge.v1.ListMessagesAfterResponse
-	(*SearchLocalRequest)(nil),            // 22: rustmeow.bridge.v1.SearchLocalRequest
-	(*ContactSearchResult)(nil),           // 23: rustmeow.bridge.v1.ContactSearchResult
-	(*MessageSearchResult)(nil),           // 24: rustmeow.bridge.v1.MessageSearchResult
-	(*SearchLocalResponse)(nil),           // 25: rustmeow.bridge.v1.SearchLocalResponse
-	(*OpenContactRequest)(nil),            // 26: rustmeow.bridge.v1.OpenContactRequest
-	(*OpenContactResponse)(nil),           // 27: rustmeow.bridge.v1.OpenContactResponse
-	(*ListMessagesAroundRequest)(nil),     // 28: rustmeow.bridge.v1.ListMessagesAroundRequest
-	(*ListMessagesAroundResponse)(nil),    // 29: rustmeow.bridge.v1.ListMessagesAroundResponse
-	(*SendTextRequest)(nil),               // 30: rustmeow.bridge.v1.SendTextRequest
-	(*SendTextResponse)(nil),              // 31: rustmeow.bridge.v1.SendTextResponse
-	(*SendImageRequest)(nil),              // 32: rustmeow.bridge.v1.SendImageRequest
-	(*SendImageResponse)(nil),             // 33: rustmeow.bridge.v1.SendImageResponse
-	(*GetMessageImageRequest)(nil),        // 34: rustmeow.bridge.v1.GetMessageImageRequest
-	(*GetMessageImageResponse)(nil),       // 35: rustmeow.bridge.v1.GetMessageImageResponse
-	(*MarkReadRequest)(nil),               // 36: rustmeow.bridge.v1.MarkReadRequest
-	(*MarkReadResponse)(nil),              // 37: rustmeow.bridge.v1.MarkReadResponse
-	(*LogoutRequest)(nil),                 // 38: rustmeow.bridge.v1.LogoutRequest
-	(*LogoutResponse)(nil),                // 39: rustmeow.bridge.v1.LogoutResponse
-	(*ShutdownRequest)(nil),               // 40: rustmeow.bridge.v1.ShutdownRequest
-	(*ShutdownResponse)(nil),              // 41: rustmeow.bridge.v1.ShutdownResponse
-	(*GetChatAvatarRequest)(nil),          // 42: rustmeow.bridge.v1.GetChatAvatarRequest
-	(*GetChatAvatarResponse)(nil),         // 43: rustmeow.bridge.v1.GetChatAvatarResponse
-	(*SendReactionRequest)(nil),           // 44: rustmeow.bridge.v1.SendReactionRequest
-	(*SendReactionResponse)(nil),          // 45: rustmeow.bridge.v1.SendReactionResponse
-	(*GetChatInfoRequest)(nil),            // 46: rustmeow.bridge.v1.GetChatInfoRequest
-	(*ChatParticipant)(nil),               // 47: rustmeow.bridge.v1.ChatParticipant
-	(*GetChatInfoResponse)(nil),           // 48: rustmeow.bridge.v1.GetChatInfoResponse
-	(*SetTypingRequest)(nil),              // 49: rustmeow.bridge.v1.SetTypingRequest
-	(*SetTypingResponse)(nil),             // 50: rustmeow.bridge.v1.SetTypingResponse
-	(*TypingChanged)(nil),                 // 51: rustmeow.bridge.v1.TypingChanged
-	(*GetParticipantAvatarRequest)(nil),   // 52: rustmeow.bridge.v1.GetParticipantAvatarRequest
-	(*GetParticipantAvatarResponse)(nil),  // 53: rustmeow.bridge.v1.GetParticipantAvatarResponse
-	(*RepairRecentReactionsRequest)(nil),  // 54: rustmeow.bridge.v1.RepairRecentReactionsRequest
-	(*RepairRecentReactionsResponse)(nil), // 55: rustmeow.bridge.v1.RepairRecentReactionsResponse
-	(*Chat)(nil),                          // 56: rustmeow.bridge.v1.Chat
-	(*Message)(nil),                       // 57: rustmeow.bridge.v1.Message
-	(*Reaction)(nil),                      // 58: rustmeow.bridge.v1.Reaction
-	(*ReactionUpdated)(nil),               // 59: rustmeow.bridge.v1.ReactionUpdated
-	(*RecentReactionsRepaired)(nil),       // 60: rustmeow.bridge.v1.RecentReactionsRepaired
-	(*ChatMerged)(nil),                    // 61: rustmeow.bridge.v1.ChatMerged
-	(*TextContent)(nil),                   // 62: rustmeow.bridge.v1.TextContent
-	(*LinkPreview)(nil),                   // 63: rustmeow.bridge.v1.LinkPreview
-	(*ImageContent)(nil),                  // 64: rustmeow.bridge.v1.ImageContent
-	(*AttachmentContent)(nil),             // 65: rustmeow.bridge.v1.AttachmentContent
-	(*ContactContent)(nil),                // 66: rustmeow.bridge.v1.ContactContent
-	(*ContactsContent)(nil),               // 67: rustmeow.bridge.v1.ContactsContent
-	(*LocationContent)(nil),               // 68: rustmeow.bridge.v1.LocationContent
-	(*UnsupportedContent)(nil),            // 69: rustmeow.bridge.v1.UnsupportedContent
-	(*ConnectionChanged)(nil),             // 70: rustmeow.bridge.v1.ConnectionChanged
-	(*PairingQr)(nil),                     // 71: rustmeow.bridge.v1.PairingQr
-	(*SyncProgress)(nil),                  // 72: rustmeow.bridge.v1.SyncProgress
-	(*ChatUpserted)(nil),                  // 73: rustmeow.bridge.v1.ChatUpserted
-	(*MessageUpserted)(nil),               // 74: rustmeow.bridge.v1.MessageUpserted
-	(*ReceiptUpdated)(nil),                // 75: rustmeow.bridge.v1.ReceiptUpdated
-	(*BackendProblem)(nil),                // 76: rustmeow.bridge.v1.BackendProblem
-	(*SendStickerRequest)(nil),            // 77: rustmeow.bridge.v1.SendStickerRequest
-	(*SendStickerResponse)(nil),           // 78: rustmeow.bridge.v1.SendStickerResponse
+	(AttachmentKind)(0),                   // 3: rustmeow.bridge.v1.AttachmentKind
+	(*Envelope)(nil),                      // 4: rustmeow.bridge.v1.Envelope
+	(*RpcRequest)(nil),                    // 5: rustmeow.bridge.v1.RpcRequest
+	(*RpcResponse)(nil),                   // 6: rustmeow.bridge.v1.RpcResponse
+	(*BackendEvent)(nil),                  // 7: rustmeow.bridge.v1.BackendEvent
+	(*RpcError)(nil),                      // 8: rustmeow.bridge.v1.RpcError
+	(*HelloRequest)(nil),                  // 9: rustmeow.bridge.v1.HelloRequest
+	(*HelloResponse)(nil),                 // 10: rustmeow.bridge.v1.HelloResponse
+	(*GetAuthStateRequest)(nil),           // 11: rustmeow.bridge.v1.GetAuthStateRequest
+	(*AuthStateResponse)(nil),             // 12: rustmeow.bridge.v1.AuthStateResponse
+	(*StartPairingRequest)(nil),           // 13: rustmeow.bridge.v1.StartPairingRequest
+	(*StartPairingResponse)(nil),          // 14: rustmeow.bridge.v1.StartPairingResponse
+	(*ListChatsRequest)(nil),              // 15: rustmeow.bridge.v1.ListChatsRequest
+	(*ListChatsResponse)(nil),             // 16: rustmeow.bridge.v1.ListChatsResponse
+	(*ListMessagesRequest)(nil),           // 17: rustmeow.bridge.v1.ListMessagesRequest
+	(*ListMessagesResponse)(nil),          // 18: rustmeow.bridge.v1.ListMessagesResponse
+	(*OpenMessageWindowRequest)(nil),      // 19: rustmeow.bridge.v1.OpenMessageWindowRequest
+	(*OpenMessageWindowResponse)(nil),     // 20: rustmeow.bridge.v1.OpenMessageWindowResponse
+	(*ListMessagesAfterRequest)(nil),      // 21: rustmeow.bridge.v1.ListMessagesAfterRequest
+	(*ListMessagesAfterResponse)(nil),     // 22: rustmeow.bridge.v1.ListMessagesAfterResponse
+	(*SearchLocalRequest)(nil),            // 23: rustmeow.bridge.v1.SearchLocalRequest
+	(*ContactSearchResult)(nil),           // 24: rustmeow.bridge.v1.ContactSearchResult
+	(*MessageSearchResult)(nil),           // 25: rustmeow.bridge.v1.MessageSearchResult
+	(*SearchLocalResponse)(nil),           // 26: rustmeow.bridge.v1.SearchLocalResponse
+	(*OpenContactRequest)(nil),            // 27: rustmeow.bridge.v1.OpenContactRequest
+	(*OpenContactResponse)(nil),           // 28: rustmeow.bridge.v1.OpenContactResponse
+	(*ListMessagesAroundRequest)(nil),     // 29: rustmeow.bridge.v1.ListMessagesAroundRequest
+	(*ListMessagesAroundResponse)(nil),    // 30: rustmeow.bridge.v1.ListMessagesAroundResponse
+	(*SendTextRequest)(nil),               // 31: rustmeow.bridge.v1.SendTextRequest
+	(*SendTextResponse)(nil),              // 32: rustmeow.bridge.v1.SendTextResponse
+	(*SendImageRequest)(nil),              // 33: rustmeow.bridge.v1.SendImageRequest
+	(*SendImageResponse)(nil),             // 34: rustmeow.bridge.v1.SendImageResponse
+	(*GetMessageImageRequest)(nil),        // 35: rustmeow.bridge.v1.GetMessageImageRequest
+	(*GetMessageImageResponse)(nil),       // 36: rustmeow.bridge.v1.GetMessageImageResponse
+	(*MarkReadRequest)(nil),               // 37: rustmeow.bridge.v1.MarkReadRequest
+	(*MarkReadResponse)(nil),              // 38: rustmeow.bridge.v1.MarkReadResponse
+	(*LogoutRequest)(nil),                 // 39: rustmeow.bridge.v1.LogoutRequest
+	(*LogoutResponse)(nil),                // 40: rustmeow.bridge.v1.LogoutResponse
+	(*ShutdownRequest)(nil),               // 41: rustmeow.bridge.v1.ShutdownRequest
+	(*ShutdownResponse)(nil),              // 42: rustmeow.bridge.v1.ShutdownResponse
+	(*GetChatAvatarRequest)(nil),          // 43: rustmeow.bridge.v1.GetChatAvatarRequest
+	(*GetChatAvatarResponse)(nil),         // 44: rustmeow.bridge.v1.GetChatAvatarResponse
+	(*SendReactionRequest)(nil),           // 45: rustmeow.bridge.v1.SendReactionRequest
+	(*SendReactionResponse)(nil),          // 46: rustmeow.bridge.v1.SendReactionResponse
+	(*GetChatInfoRequest)(nil),            // 47: rustmeow.bridge.v1.GetChatInfoRequest
+	(*ChatParticipant)(nil),               // 48: rustmeow.bridge.v1.ChatParticipant
+	(*GetChatInfoResponse)(nil),           // 49: rustmeow.bridge.v1.GetChatInfoResponse
+	(*SetTypingRequest)(nil),              // 50: rustmeow.bridge.v1.SetTypingRequest
+	(*SetTypingResponse)(nil),             // 51: rustmeow.bridge.v1.SetTypingResponse
+	(*TypingChanged)(nil),                 // 52: rustmeow.bridge.v1.TypingChanged
+	(*GetParticipantAvatarRequest)(nil),   // 53: rustmeow.bridge.v1.GetParticipantAvatarRequest
+	(*GetParticipantAvatarResponse)(nil),  // 54: rustmeow.bridge.v1.GetParticipantAvatarResponse
+	(*RepairRecentReactionsRequest)(nil),  // 55: rustmeow.bridge.v1.RepairRecentReactionsRequest
+	(*RepairRecentReactionsResponse)(nil), // 56: rustmeow.bridge.v1.RepairRecentReactionsResponse
+	(*Chat)(nil),                          // 57: rustmeow.bridge.v1.Chat
+	(*Message)(nil),                       // 58: rustmeow.bridge.v1.Message
+	(*Reaction)(nil),                      // 59: rustmeow.bridge.v1.Reaction
+	(*ReactionUpdated)(nil),               // 60: rustmeow.bridge.v1.ReactionUpdated
+	(*RecentReactionsRepaired)(nil),       // 61: rustmeow.bridge.v1.RecentReactionsRepaired
+	(*ChatMerged)(nil),                    // 62: rustmeow.bridge.v1.ChatMerged
+	(*TextContent)(nil),                   // 63: rustmeow.bridge.v1.TextContent
+	(*LinkPreview)(nil),                   // 64: rustmeow.bridge.v1.LinkPreview
+	(*ImageContent)(nil),                  // 65: rustmeow.bridge.v1.ImageContent
+	(*AttachmentContent)(nil),             // 66: rustmeow.bridge.v1.AttachmentContent
+	(*ContactContent)(nil),                // 67: rustmeow.bridge.v1.ContactContent
+	(*ContactsContent)(nil),               // 68: rustmeow.bridge.v1.ContactsContent
+	(*LocationContent)(nil),               // 69: rustmeow.bridge.v1.LocationContent
+	(*UnsupportedContent)(nil),            // 70: rustmeow.bridge.v1.UnsupportedContent
+	(*ConnectionChanged)(nil),             // 71: rustmeow.bridge.v1.ConnectionChanged
+	(*PairingQr)(nil),                     // 72: rustmeow.bridge.v1.PairingQr
+	(*SyncProgress)(nil),                  // 73: rustmeow.bridge.v1.SyncProgress
+	(*ChatUpserted)(nil),                  // 74: rustmeow.bridge.v1.ChatUpserted
+	(*MessageUpserted)(nil),               // 75: rustmeow.bridge.v1.MessageUpserted
+	(*ReceiptUpdated)(nil),                // 76: rustmeow.bridge.v1.ReceiptUpdated
+	(*BackendProblem)(nil),                // 77: rustmeow.bridge.v1.BackendProblem
+	(*SendStickerRequest)(nil),            // 78: rustmeow.bridge.v1.SendStickerRequest
+	(*SendStickerResponse)(nil),           // 79: rustmeow.bridge.v1.SendStickerResponse
+	(*GetMessageAttachmentRequest)(nil),   // 80: rustmeow.bridge.v1.GetMessageAttachmentRequest
+	(*GetMessageAttachmentResponse)(nil),  // 81: rustmeow.bridge.v1.GetMessageAttachmentResponse
+	(*SendAttachmentRequest)(nil),         // 82: rustmeow.bridge.v1.SendAttachmentRequest
+	(*SendAttachmentResponse)(nil),        // 83: rustmeow.bridge.v1.SendAttachmentResponse
 }
 var file_bridge_proto_depIdxs = []int32{
-	4,  // 0: rustmeow.bridge.v1.Envelope.request:type_name -> rustmeow.bridge.v1.RpcRequest
-	5,  // 1: rustmeow.bridge.v1.Envelope.response:type_name -> rustmeow.bridge.v1.RpcResponse
-	6,  // 2: rustmeow.bridge.v1.Envelope.event:type_name -> rustmeow.bridge.v1.BackendEvent
-	8,  // 3: rustmeow.bridge.v1.RpcRequest.hello:type_name -> rustmeow.bridge.v1.HelloRequest
-	10, // 4: rustmeow.bridge.v1.RpcRequest.get_auth_state:type_name -> rustmeow.bridge.v1.GetAuthStateRequest
-	12, // 5: rustmeow.bridge.v1.RpcRequest.start_pairing:type_name -> rustmeow.bridge.v1.StartPairingRequest
-	14, // 6: rustmeow.bridge.v1.RpcRequest.list_chats:type_name -> rustmeow.bridge.v1.ListChatsRequest
-	16, // 7: rustmeow.bridge.v1.RpcRequest.list_messages:type_name -> rustmeow.bridge.v1.ListMessagesRequest
-	30, // 8: rustmeow.bridge.v1.RpcRequest.send_text:type_name -> rustmeow.bridge.v1.SendTextRequest
-	36, // 9: rustmeow.bridge.v1.RpcRequest.mark_read:type_name -> rustmeow.bridge.v1.MarkReadRequest
-	38, // 10: rustmeow.bridge.v1.RpcRequest.logout:type_name -> rustmeow.bridge.v1.LogoutRequest
-	40, // 11: rustmeow.bridge.v1.RpcRequest.shutdown:type_name -> rustmeow.bridge.v1.ShutdownRequest
-	42, // 12: rustmeow.bridge.v1.RpcRequest.get_chat_avatar:type_name -> rustmeow.bridge.v1.GetChatAvatarRequest
-	44, // 13: rustmeow.bridge.v1.RpcRequest.send_reaction:type_name -> rustmeow.bridge.v1.SendReactionRequest
-	52, // 14: rustmeow.bridge.v1.RpcRequest.get_participant_avatar:type_name -> rustmeow.bridge.v1.GetParticipantAvatarRequest
-	54, // 15: rustmeow.bridge.v1.RpcRequest.repair_recent_reactions:type_name -> rustmeow.bridge.v1.RepairRecentReactionsRequest
-	32, // 16: rustmeow.bridge.v1.RpcRequest.send_image:type_name -> rustmeow.bridge.v1.SendImageRequest
-	34, // 17: rustmeow.bridge.v1.RpcRequest.get_message_image:type_name -> rustmeow.bridge.v1.GetMessageImageRequest
-	22, // 18: rustmeow.bridge.v1.RpcRequest.search_local:type_name -> rustmeow.bridge.v1.SearchLocalRequest
-	26, // 19: rustmeow.bridge.v1.RpcRequest.open_contact:type_name -> rustmeow.bridge.v1.OpenContactRequest
-	28, // 20: rustmeow.bridge.v1.RpcRequest.list_messages_around:type_name -> rustmeow.bridge.v1.ListMessagesAroundRequest
-	77, // 21: rustmeow.bridge.v1.RpcRequest.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerRequest
-	18, // 22: rustmeow.bridge.v1.RpcRequest.open_message_window:type_name -> rustmeow.bridge.v1.OpenMessageWindowRequest
-	20, // 23: rustmeow.bridge.v1.RpcRequest.list_messages_after:type_name -> rustmeow.bridge.v1.ListMessagesAfterRequest
-	46, // 24: rustmeow.bridge.v1.RpcRequest.get_chat_info:type_name -> rustmeow.bridge.v1.GetChatInfoRequest
-	49, // 25: rustmeow.bridge.v1.RpcRequest.set_typing:type_name -> rustmeow.bridge.v1.SetTypingRequest
-	7,  // 26: rustmeow.bridge.v1.RpcResponse.error:type_name -> rustmeow.bridge.v1.RpcError
-	9,  // 27: rustmeow.bridge.v1.RpcResponse.hello:type_name -> rustmeow.bridge.v1.HelloResponse
-	11, // 28: rustmeow.bridge.v1.RpcResponse.auth_state:type_name -> rustmeow.bridge.v1.AuthStateResponse
-	13, // 29: rustmeow.bridge.v1.RpcResponse.start_pairing:type_name -> rustmeow.bridge.v1.StartPairingResponse
-	15, // 30: rustmeow.bridge.v1.RpcResponse.list_chats:type_name -> rustmeow.bridge.v1.ListChatsResponse
-	17, // 31: rustmeow.bridge.v1.RpcResponse.list_messages:type_name -> rustmeow.bridge.v1.ListMessagesResponse
-	31, // 32: rustmeow.bridge.v1.RpcResponse.send_text:type_name -> rustmeow.bridge.v1.SendTextResponse
-	37, // 33: rustmeow.bridge.v1.RpcResponse.mark_read:type_name -> rustmeow.bridge.v1.MarkReadResponse
-	39, // 34: rustmeow.bridge.v1.RpcResponse.logout:type_name -> rustmeow.bridge.v1.LogoutResponse
-	41, // 35: rustmeow.bridge.v1.RpcResponse.shutdown:type_name -> rustmeow.bridge.v1.ShutdownResponse
-	43, // 36: rustmeow.bridge.v1.RpcResponse.get_chat_avatar:type_name -> rustmeow.bridge.v1.GetChatAvatarResponse
-	45, // 37: rustmeow.bridge.v1.RpcResponse.send_reaction:type_name -> rustmeow.bridge.v1.SendReactionResponse
-	53, // 38: rustmeow.bridge.v1.RpcResponse.get_participant_avatar:type_name -> rustmeow.bridge.v1.GetParticipantAvatarResponse
-	55, // 39: rustmeow.bridge.v1.RpcResponse.repair_recent_reactions:type_name -> rustmeow.bridge.v1.RepairRecentReactionsResponse
-	33, // 40: rustmeow.bridge.v1.RpcResponse.send_image:type_name -> rustmeow.bridge.v1.SendImageResponse
-	35, // 41: rustmeow.bridge.v1.RpcResponse.get_message_image:type_name -> rustmeow.bridge.v1.GetMessageImageResponse
-	25, // 42: rustmeow.bridge.v1.RpcResponse.search_local:type_name -> rustmeow.bridge.v1.SearchLocalResponse
-	27, // 43: rustmeow.bridge.v1.RpcResponse.open_contact:type_name -> rustmeow.bridge.v1.OpenContactResponse
-	29, // 44: rustmeow.bridge.v1.RpcResponse.list_messages_around:type_name -> rustmeow.bridge.v1.ListMessagesAroundResponse
-	78, // 45: rustmeow.bridge.v1.RpcResponse.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerResponse
-	19, // 46: rustmeow.bridge.v1.RpcResponse.open_message_window:type_name -> rustmeow.bridge.v1.OpenMessageWindowResponse
-	21, // 47: rustmeow.bridge.v1.RpcResponse.list_messages_after:type_name -> rustmeow.bridge.v1.ListMessagesAfterResponse
-	48, // 48: rustmeow.bridge.v1.RpcResponse.get_chat_info:type_name -> rustmeow.bridge.v1.GetChatInfoResponse
-	50, // 49: rustmeow.bridge.v1.RpcResponse.set_typing:type_name -> rustmeow.bridge.v1.SetTypingResponse
-	70, // 50: rustmeow.bridge.v1.BackendEvent.connection_changed:type_name -> rustmeow.bridge.v1.ConnectionChanged
-	71, // 51: rustmeow.bridge.v1.BackendEvent.pairing_qr:type_name -> rustmeow.bridge.v1.PairingQr
-	72, // 52: rustmeow.bridge.v1.BackendEvent.sync_progress:type_name -> rustmeow.bridge.v1.SyncProgress
-	73, // 53: rustmeow.bridge.v1.BackendEvent.chat_upserted:type_name -> rustmeow.bridge.v1.ChatUpserted
-	74, // 54: rustmeow.bridge.v1.BackendEvent.message_upserted:type_name -> rustmeow.bridge.v1.MessageUpserted
-	75, // 55: rustmeow.bridge.v1.BackendEvent.receipt_updated:type_name -> rustmeow.bridge.v1.ReceiptUpdated
-	76, // 56: rustmeow.bridge.v1.BackendEvent.problem:type_name -> rustmeow.bridge.v1.BackendProblem
-	59, // 57: rustmeow.bridge.v1.BackendEvent.reaction_updated:type_name -> rustmeow.bridge.v1.ReactionUpdated
-	60, // 58: rustmeow.bridge.v1.BackendEvent.recent_reactions_repaired:type_name -> rustmeow.bridge.v1.RecentReactionsRepaired
-	61, // 59: rustmeow.bridge.v1.BackendEvent.chat_merged:type_name -> rustmeow.bridge.v1.ChatMerged
-	51, // 60: rustmeow.bridge.v1.BackendEvent.typing_changed:type_name -> rustmeow.bridge.v1.TypingChanged
-	0,  // 61: rustmeow.bridge.v1.AuthStateResponse.connection_state:type_name -> rustmeow.bridge.v1.ConnectionState
-	56, // 62: rustmeow.bridge.v1.ListChatsResponse.chats:type_name -> rustmeow.bridge.v1.Chat
-	57, // 63: rustmeow.bridge.v1.ListMessagesResponse.messages:type_name -> rustmeow.bridge.v1.Message
-	57, // 64: rustmeow.bridge.v1.OpenMessageWindowResponse.messages:type_name -> rustmeow.bridge.v1.Message
-	57, // 65: rustmeow.bridge.v1.ListMessagesAfterResponse.messages:type_name -> rustmeow.bridge.v1.Message
-	56, // 66: rustmeow.bridge.v1.MessageSearchResult.chat:type_name -> rustmeow.bridge.v1.Chat
-	23, // 67: rustmeow.bridge.v1.SearchLocalResponse.contacts:type_name -> rustmeow.bridge.v1.ContactSearchResult
-	56, // 68: rustmeow.bridge.v1.SearchLocalResponse.groups:type_name -> rustmeow.bridge.v1.Chat
-	24, // 69: rustmeow.bridge.v1.SearchLocalResponse.messages:type_name -> rustmeow.bridge.v1.MessageSearchResult
-	56, // 70: rustmeow.bridge.v1.OpenContactResponse.chat:type_name -> rustmeow.bridge.v1.Chat
-	57, // 71: rustmeow.bridge.v1.ListMessagesAroundResponse.messages:type_name -> rustmeow.bridge.v1.Message
-	57, // 72: rustmeow.bridge.v1.SendTextResponse.message:type_name -> rustmeow.bridge.v1.Message
-	57, // 73: rustmeow.bridge.v1.SendImageResponse.message:type_name -> rustmeow.bridge.v1.Message
-	58, // 74: rustmeow.bridge.v1.SendReactionResponse.reaction:type_name -> rustmeow.bridge.v1.Reaction
-	56, // 75: rustmeow.bridge.v1.GetChatInfoResponse.chat:type_name -> rustmeow.bridge.v1.Chat
-	47, // 76: rustmeow.bridge.v1.GetChatInfoResponse.participants:type_name -> rustmeow.bridge.v1.ChatParticipant
-	1,  // 77: rustmeow.bridge.v1.Chat.kind:type_name -> rustmeow.bridge.v1.ChatKind
-	2,  // 78: rustmeow.bridge.v1.Message.status:type_name -> rustmeow.bridge.v1.MessageStatus
-	58, // 79: rustmeow.bridge.v1.Message.reactions:type_name -> rustmeow.bridge.v1.Reaction
-	62, // 80: rustmeow.bridge.v1.Message.text:type_name -> rustmeow.bridge.v1.TextContent
-	69, // 81: rustmeow.bridge.v1.Message.unsupported:type_name -> rustmeow.bridge.v1.UnsupportedContent
-	64, // 82: rustmeow.bridge.v1.Message.image:type_name -> rustmeow.bridge.v1.ImageContent
-	65, // 83: rustmeow.bridge.v1.Message.attachment:type_name -> rustmeow.bridge.v1.AttachmentContent
-	67, // 84: rustmeow.bridge.v1.Message.contacts:type_name -> rustmeow.bridge.v1.ContactsContent
-	68, // 85: rustmeow.bridge.v1.Message.location:type_name -> rustmeow.bridge.v1.LocationContent
-	58, // 86: rustmeow.bridge.v1.ReactionUpdated.reaction:type_name -> rustmeow.bridge.v1.Reaction
-	63, // 87: rustmeow.bridge.v1.TextContent.link_preview:type_name -> rustmeow.bridge.v1.LinkPreview
-	66, // 88: rustmeow.bridge.v1.ContactsContent.contacts:type_name -> rustmeow.bridge.v1.ContactContent
-	0,  // 89: rustmeow.bridge.v1.ConnectionChanged.state:type_name -> rustmeow.bridge.v1.ConnectionState
-	56, // 90: rustmeow.bridge.v1.ChatUpserted.chat:type_name -> rustmeow.bridge.v1.Chat
-	57, // 91: rustmeow.bridge.v1.MessageUpserted.message:type_name -> rustmeow.bridge.v1.Message
-	2,  // 92: rustmeow.bridge.v1.ReceiptUpdated.status:type_name -> rustmeow.bridge.v1.MessageStatus
-	57, // 93: rustmeow.bridge.v1.SendStickerResponse.message:type_name -> rustmeow.bridge.v1.Message
-	94, // [94:94] is the sub-list for method output_type
-	94, // [94:94] is the sub-list for method input_type
-	94, // [94:94] is the sub-list for extension type_name
-	94, // [94:94] is the sub-list for extension extendee
-	0,  // [0:94] is the sub-list for field type_name
+	5,   // 0: rustmeow.bridge.v1.Envelope.request:type_name -> rustmeow.bridge.v1.RpcRequest
+	6,   // 1: rustmeow.bridge.v1.Envelope.response:type_name -> rustmeow.bridge.v1.RpcResponse
+	7,   // 2: rustmeow.bridge.v1.Envelope.event:type_name -> rustmeow.bridge.v1.BackendEvent
+	9,   // 3: rustmeow.bridge.v1.RpcRequest.hello:type_name -> rustmeow.bridge.v1.HelloRequest
+	11,  // 4: rustmeow.bridge.v1.RpcRequest.get_auth_state:type_name -> rustmeow.bridge.v1.GetAuthStateRequest
+	13,  // 5: rustmeow.bridge.v1.RpcRequest.start_pairing:type_name -> rustmeow.bridge.v1.StartPairingRequest
+	15,  // 6: rustmeow.bridge.v1.RpcRequest.list_chats:type_name -> rustmeow.bridge.v1.ListChatsRequest
+	17,  // 7: rustmeow.bridge.v1.RpcRequest.list_messages:type_name -> rustmeow.bridge.v1.ListMessagesRequest
+	31,  // 8: rustmeow.bridge.v1.RpcRequest.send_text:type_name -> rustmeow.bridge.v1.SendTextRequest
+	37,  // 9: rustmeow.bridge.v1.RpcRequest.mark_read:type_name -> rustmeow.bridge.v1.MarkReadRequest
+	39,  // 10: rustmeow.bridge.v1.RpcRequest.logout:type_name -> rustmeow.bridge.v1.LogoutRequest
+	41,  // 11: rustmeow.bridge.v1.RpcRequest.shutdown:type_name -> rustmeow.bridge.v1.ShutdownRequest
+	43,  // 12: rustmeow.bridge.v1.RpcRequest.get_chat_avatar:type_name -> rustmeow.bridge.v1.GetChatAvatarRequest
+	45,  // 13: rustmeow.bridge.v1.RpcRequest.send_reaction:type_name -> rustmeow.bridge.v1.SendReactionRequest
+	53,  // 14: rustmeow.bridge.v1.RpcRequest.get_participant_avatar:type_name -> rustmeow.bridge.v1.GetParticipantAvatarRequest
+	55,  // 15: rustmeow.bridge.v1.RpcRequest.repair_recent_reactions:type_name -> rustmeow.bridge.v1.RepairRecentReactionsRequest
+	33,  // 16: rustmeow.bridge.v1.RpcRequest.send_image:type_name -> rustmeow.bridge.v1.SendImageRequest
+	35,  // 17: rustmeow.bridge.v1.RpcRequest.get_message_image:type_name -> rustmeow.bridge.v1.GetMessageImageRequest
+	23,  // 18: rustmeow.bridge.v1.RpcRequest.search_local:type_name -> rustmeow.bridge.v1.SearchLocalRequest
+	27,  // 19: rustmeow.bridge.v1.RpcRequest.open_contact:type_name -> rustmeow.bridge.v1.OpenContactRequest
+	29,  // 20: rustmeow.bridge.v1.RpcRequest.list_messages_around:type_name -> rustmeow.bridge.v1.ListMessagesAroundRequest
+	78,  // 21: rustmeow.bridge.v1.RpcRequest.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerRequest
+	19,  // 22: rustmeow.bridge.v1.RpcRequest.open_message_window:type_name -> rustmeow.bridge.v1.OpenMessageWindowRequest
+	21,  // 23: rustmeow.bridge.v1.RpcRequest.list_messages_after:type_name -> rustmeow.bridge.v1.ListMessagesAfterRequest
+	47,  // 24: rustmeow.bridge.v1.RpcRequest.get_chat_info:type_name -> rustmeow.bridge.v1.GetChatInfoRequest
+	50,  // 25: rustmeow.bridge.v1.RpcRequest.set_typing:type_name -> rustmeow.bridge.v1.SetTypingRequest
+	80,  // 26: rustmeow.bridge.v1.RpcRequest.get_message_attachment:type_name -> rustmeow.bridge.v1.GetMessageAttachmentRequest
+	82,  // 27: rustmeow.bridge.v1.RpcRequest.send_attachment:type_name -> rustmeow.bridge.v1.SendAttachmentRequest
+	8,   // 28: rustmeow.bridge.v1.RpcResponse.error:type_name -> rustmeow.bridge.v1.RpcError
+	10,  // 29: rustmeow.bridge.v1.RpcResponse.hello:type_name -> rustmeow.bridge.v1.HelloResponse
+	12,  // 30: rustmeow.bridge.v1.RpcResponse.auth_state:type_name -> rustmeow.bridge.v1.AuthStateResponse
+	14,  // 31: rustmeow.bridge.v1.RpcResponse.start_pairing:type_name -> rustmeow.bridge.v1.StartPairingResponse
+	16,  // 32: rustmeow.bridge.v1.RpcResponse.list_chats:type_name -> rustmeow.bridge.v1.ListChatsResponse
+	18,  // 33: rustmeow.bridge.v1.RpcResponse.list_messages:type_name -> rustmeow.bridge.v1.ListMessagesResponse
+	32,  // 34: rustmeow.bridge.v1.RpcResponse.send_text:type_name -> rustmeow.bridge.v1.SendTextResponse
+	38,  // 35: rustmeow.bridge.v1.RpcResponse.mark_read:type_name -> rustmeow.bridge.v1.MarkReadResponse
+	40,  // 36: rustmeow.bridge.v1.RpcResponse.logout:type_name -> rustmeow.bridge.v1.LogoutResponse
+	42,  // 37: rustmeow.bridge.v1.RpcResponse.shutdown:type_name -> rustmeow.bridge.v1.ShutdownResponse
+	44,  // 38: rustmeow.bridge.v1.RpcResponse.get_chat_avatar:type_name -> rustmeow.bridge.v1.GetChatAvatarResponse
+	46,  // 39: rustmeow.bridge.v1.RpcResponse.send_reaction:type_name -> rustmeow.bridge.v1.SendReactionResponse
+	54,  // 40: rustmeow.bridge.v1.RpcResponse.get_participant_avatar:type_name -> rustmeow.bridge.v1.GetParticipantAvatarResponse
+	56,  // 41: rustmeow.bridge.v1.RpcResponse.repair_recent_reactions:type_name -> rustmeow.bridge.v1.RepairRecentReactionsResponse
+	34,  // 42: rustmeow.bridge.v1.RpcResponse.send_image:type_name -> rustmeow.bridge.v1.SendImageResponse
+	36,  // 43: rustmeow.bridge.v1.RpcResponse.get_message_image:type_name -> rustmeow.bridge.v1.GetMessageImageResponse
+	26,  // 44: rustmeow.bridge.v1.RpcResponse.search_local:type_name -> rustmeow.bridge.v1.SearchLocalResponse
+	28,  // 45: rustmeow.bridge.v1.RpcResponse.open_contact:type_name -> rustmeow.bridge.v1.OpenContactResponse
+	30,  // 46: rustmeow.bridge.v1.RpcResponse.list_messages_around:type_name -> rustmeow.bridge.v1.ListMessagesAroundResponse
+	79,  // 47: rustmeow.bridge.v1.RpcResponse.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerResponse
+	20,  // 48: rustmeow.bridge.v1.RpcResponse.open_message_window:type_name -> rustmeow.bridge.v1.OpenMessageWindowResponse
+	22,  // 49: rustmeow.bridge.v1.RpcResponse.list_messages_after:type_name -> rustmeow.bridge.v1.ListMessagesAfterResponse
+	49,  // 50: rustmeow.bridge.v1.RpcResponse.get_chat_info:type_name -> rustmeow.bridge.v1.GetChatInfoResponse
+	51,  // 51: rustmeow.bridge.v1.RpcResponse.set_typing:type_name -> rustmeow.bridge.v1.SetTypingResponse
+	81,  // 52: rustmeow.bridge.v1.RpcResponse.get_message_attachment:type_name -> rustmeow.bridge.v1.GetMessageAttachmentResponse
+	83,  // 53: rustmeow.bridge.v1.RpcResponse.send_attachment:type_name -> rustmeow.bridge.v1.SendAttachmentResponse
+	71,  // 54: rustmeow.bridge.v1.BackendEvent.connection_changed:type_name -> rustmeow.bridge.v1.ConnectionChanged
+	72,  // 55: rustmeow.bridge.v1.BackendEvent.pairing_qr:type_name -> rustmeow.bridge.v1.PairingQr
+	73,  // 56: rustmeow.bridge.v1.BackendEvent.sync_progress:type_name -> rustmeow.bridge.v1.SyncProgress
+	74,  // 57: rustmeow.bridge.v1.BackendEvent.chat_upserted:type_name -> rustmeow.bridge.v1.ChatUpserted
+	75,  // 58: rustmeow.bridge.v1.BackendEvent.message_upserted:type_name -> rustmeow.bridge.v1.MessageUpserted
+	76,  // 59: rustmeow.bridge.v1.BackendEvent.receipt_updated:type_name -> rustmeow.bridge.v1.ReceiptUpdated
+	77,  // 60: rustmeow.bridge.v1.BackendEvent.problem:type_name -> rustmeow.bridge.v1.BackendProblem
+	60,  // 61: rustmeow.bridge.v1.BackendEvent.reaction_updated:type_name -> rustmeow.bridge.v1.ReactionUpdated
+	61,  // 62: rustmeow.bridge.v1.BackendEvent.recent_reactions_repaired:type_name -> rustmeow.bridge.v1.RecentReactionsRepaired
+	62,  // 63: rustmeow.bridge.v1.BackendEvent.chat_merged:type_name -> rustmeow.bridge.v1.ChatMerged
+	52,  // 64: rustmeow.bridge.v1.BackendEvent.typing_changed:type_name -> rustmeow.bridge.v1.TypingChanged
+	0,   // 65: rustmeow.bridge.v1.AuthStateResponse.connection_state:type_name -> rustmeow.bridge.v1.ConnectionState
+	57,  // 66: rustmeow.bridge.v1.ListChatsResponse.chats:type_name -> rustmeow.bridge.v1.Chat
+	58,  // 67: rustmeow.bridge.v1.ListMessagesResponse.messages:type_name -> rustmeow.bridge.v1.Message
+	58,  // 68: rustmeow.bridge.v1.OpenMessageWindowResponse.messages:type_name -> rustmeow.bridge.v1.Message
+	58,  // 69: rustmeow.bridge.v1.ListMessagesAfterResponse.messages:type_name -> rustmeow.bridge.v1.Message
+	57,  // 70: rustmeow.bridge.v1.MessageSearchResult.chat:type_name -> rustmeow.bridge.v1.Chat
+	24,  // 71: rustmeow.bridge.v1.SearchLocalResponse.contacts:type_name -> rustmeow.bridge.v1.ContactSearchResult
+	57,  // 72: rustmeow.bridge.v1.SearchLocalResponse.groups:type_name -> rustmeow.bridge.v1.Chat
+	25,  // 73: rustmeow.bridge.v1.SearchLocalResponse.messages:type_name -> rustmeow.bridge.v1.MessageSearchResult
+	57,  // 74: rustmeow.bridge.v1.OpenContactResponse.chat:type_name -> rustmeow.bridge.v1.Chat
+	58,  // 75: rustmeow.bridge.v1.ListMessagesAroundResponse.messages:type_name -> rustmeow.bridge.v1.Message
+	58,  // 76: rustmeow.bridge.v1.SendTextResponse.message:type_name -> rustmeow.bridge.v1.Message
+	58,  // 77: rustmeow.bridge.v1.SendImageResponse.message:type_name -> rustmeow.bridge.v1.Message
+	59,  // 78: rustmeow.bridge.v1.SendReactionResponse.reaction:type_name -> rustmeow.bridge.v1.Reaction
+	57,  // 79: rustmeow.bridge.v1.GetChatInfoResponse.chat:type_name -> rustmeow.bridge.v1.Chat
+	48,  // 80: rustmeow.bridge.v1.GetChatInfoResponse.participants:type_name -> rustmeow.bridge.v1.ChatParticipant
+	1,   // 81: rustmeow.bridge.v1.Chat.kind:type_name -> rustmeow.bridge.v1.ChatKind
+	2,   // 82: rustmeow.bridge.v1.Message.status:type_name -> rustmeow.bridge.v1.MessageStatus
+	59,  // 83: rustmeow.bridge.v1.Message.reactions:type_name -> rustmeow.bridge.v1.Reaction
+	63,  // 84: rustmeow.bridge.v1.Message.text:type_name -> rustmeow.bridge.v1.TextContent
+	70,  // 85: rustmeow.bridge.v1.Message.unsupported:type_name -> rustmeow.bridge.v1.UnsupportedContent
+	65,  // 86: rustmeow.bridge.v1.Message.image:type_name -> rustmeow.bridge.v1.ImageContent
+	66,  // 87: rustmeow.bridge.v1.Message.attachment:type_name -> rustmeow.bridge.v1.AttachmentContent
+	68,  // 88: rustmeow.bridge.v1.Message.contacts:type_name -> rustmeow.bridge.v1.ContactsContent
+	69,  // 89: rustmeow.bridge.v1.Message.location:type_name -> rustmeow.bridge.v1.LocationContent
+	59,  // 90: rustmeow.bridge.v1.ReactionUpdated.reaction:type_name -> rustmeow.bridge.v1.Reaction
+	64,  // 91: rustmeow.bridge.v1.TextContent.link_preview:type_name -> rustmeow.bridge.v1.LinkPreview
+	67,  // 92: rustmeow.bridge.v1.ContactsContent.contacts:type_name -> rustmeow.bridge.v1.ContactContent
+	0,   // 93: rustmeow.bridge.v1.ConnectionChanged.state:type_name -> rustmeow.bridge.v1.ConnectionState
+	57,  // 94: rustmeow.bridge.v1.ChatUpserted.chat:type_name -> rustmeow.bridge.v1.Chat
+	58,  // 95: rustmeow.bridge.v1.MessageUpserted.message:type_name -> rustmeow.bridge.v1.Message
+	2,   // 96: rustmeow.bridge.v1.ReceiptUpdated.status:type_name -> rustmeow.bridge.v1.MessageStatus
+	58,  // 97: rustmeow.bridge.v1.SendStickerResponse.message:type_name -> rustmeow.bridge.v1.Message
+	3,   // 98: rustmeow.bridge.v1.SendAttachmentRequest.kind:type_name -> rustmeow.bridge.v1.AttachmentKind
+	58,  // 99: rustmeow.bridge.v1.SendAttachmentResponse.message:type_name -> rustmeow.bridge.v1.Message
+	100, // [100:100] is the sub-list for method output_type
+	100, // [100:100] is the sub-list for method input_type
+	100, // [100:100] is the sub-list for extension type_name
+	100, // [100:100] is the sub-list for extension extendee
+	0,   // [0:100] is the sub-list for field type_name
 }
 
 func init() { file_bridge_proto_init() }
@@ -6698,6 +7111,8 @@ func file_bridge_proto_init() {
 		(*RpcRequest_ListMessagesAfter)(nil),
 		(*RpcRequest_GetChatInfo)(nil),
 		(*RpcRequest_SetTyping)(nil),
+		(*RpcRequest_GetMessageAttachment)(nil),
+		(*RpcRequest_SendAttachment)(nil),
 	}
 	file_bridge_proto_msgTypes[2].OneofWrappers = []any{
 		(*RpcResponse_Error)(nil),
@@ -6724,6 +7139,8 @@ func file_bridge_proto_init() {
 		(*RpcResponse_ListMessagesAfter)(nil),
 		(*RpcResponse_GetChatInfo)(nil),
 		(*RpcResponse_SetTyping)(nil),
+		(*RpcResponse_GetMessageAttachment)(nil),
+		(*RpcResponse_SendAttachment)(nil),
 	}
 	file_bridge_proto_msgTypes[3].OneofWrappers = []any{
 		(*BackendEvent_ConnectionChanged)(nil),
@@ -6751,8 +7168,8 @@ func file_bridge_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bridge_proto_rawDesc), len(file_bridge_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   76,
+			NumEnums:      4,
+			NumMessages:   80,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

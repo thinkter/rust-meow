@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -841,6 +842,40 @@ func TestStickerLocalPathCanBeCached(t *testing.T) {
 	}
 }
 
+func TestAttachmentLocalPathCanBeCached(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	messages := []domain.Message{
+		{ID: "document", ChatJID: "c@g.us", Timestamp: time.Now(), Kind: "document", Attachment: &domain.Attachment{MIMEType: "application/pdf", FileName: "notes.pdf"}},
+		{ID: "video", ChatJID: "c@g.us", Timestamp: time.Now(), Kind: "video", Attachment: &domain.Attachment{MIMEType: "video/mp4"}},
+		{ID: "audio", ChatJID: "c@g.us", Timestamp: time.Now(), Kind: "audio", Attachment: &domain.Attachment{MIMEType: "audio/mpeg"}},
+		{ID: "image", ChatJID: "c@g.us", Timestamp: time.Now(), Kind: "image", Image: &domain.Image{MIMEType: "image/jpeg"}},
+	}
+	if err = s.ApplyMessages(ctx, messages, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range messages[:3] {
+		path := "/cache/" + message.ID
+		if err = s.SetAttachmentLocalPath(ctx, message.ChatJID, message.ID, path); err != nil {
+			t.Fatalf("cache %s: %v", message.Kind, err)
+		}
+		stored, loadErr := s.Message(ctx, message.ChatJID, message.ID)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if stored.Attachment == nil || stored.Attachment.LocalPath != path {
+			t.Fatalf("stored %s = %+v", message.Kind, stored.Attachment)
+		}
+	}
+	if err = s.SetAttachmentLocalPath(ctx, "c@g.us", "image", "/cache/not-an-attachment"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("image cache error=%v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestLegacyImageWithoutDescriptorRemainsRepairable(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
@@ -987,6 +1022,31 @@ func TestReserveOutgoingMessageIsAtomic(t *testing.T) {
 	id, existed, err = s.ReserveOutgoingMessage(ctx, "request", m)
 	if err != nil || !existed || id != m.ID {
 		t.Fatalf("retry id=%q existed=%v err=%v", id, existed, err)
+	}
+}
+
+func TestReserveOutgoingMessageUsesBinaryPayloadFingerprint(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	message := domain.Message{ID: "wa-document", ChatJID: "c@g.us", Text: "notes.pdf", Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "document"}
+	id, existed, err := s.ReserveOutgoingMessageWithPayload(ctx, "request", "fingerprint-a", message)
+	if err != nil || existed || id != message.ID {
+		t.Fatalf("id=%q existed=%v err=%v", id, existed, err)
+	}
+	id, existed, err = s.ReserveOutgoingMessageWithPayload(ctx, "request", "fingerprint-a", message)
+	if err != nil || !existed || id != message.ID {
+		t.Fatalf("retry id=%q existed=%v err=%v", id, existed, err)
+	}
+	if _, existed, err = s.ReserveOutgoingMessageWithPayload(ctx, "request", "fingerprint-b", message); err == nil || !existed {
+		t.Fatalf("different payload existed=%v err=%v", existed, err)
+	}
+	stored, err := s.Message(ctx, message.ChatJID, message.ID)
+	if err != nil || stored.Text != "notes.pdf" {
+		t.Fatalf("stored text=%q err=%v", stored.Text, err)
 	}
 }
 

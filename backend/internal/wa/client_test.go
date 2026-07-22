@@ -281,6 +281,21 @@ func TestQuotedMessageKeepsImageKindAndCaption(t *testing.T) {
 	}
 }
 
+func TestQuotedMessageKeepsAttachmentKinds(t *testing.T) {
+	document := quotedMessage(domain.Message{Kind: "document", Attachment: &domain.Attachment{Caption: "plan", MIMEType: "application/pdf", FileName: "plan.pdf"}}).GetDocumentMessage()
+	if document.GetCaption() != "plan" || document.GetMimetype() != "application/pdf" || document.GetFileName() != "plan.pdf" {
+		t.Fatalf("document=%+v", document)
+	}
+	video := quotedMessage(domain.Message{Kind: "video", Attachment: &domain.Attachment{Caption: "clip", MIMEType: "video/mp4"}}).GetVideoMessage()
+	if video.GetCaption() != "clip" || video.GetMimetype() != "video/mp4" {
+		t.Fatalf("video=%+v", video)
+	}
+	audio := quotedMessage(domain.Message{Kind: "audio", Attachment: &domain.Attachment{MIMEType: "audio/ogg", VoiceNote: true}}).GetAudioMessage()
+	if audio.GetMimetype() != "audio/ogg" || !audio.GetPTT() {
+		t.Fatalf("audio=%+v", audio)
+	}
+}
+
 func TestIdentityJIDsDeduplicatesExplicitAliases(t *testing.T) {
 	c := &Client{}
 	got := c.identityJIDs(context.Background(), "200201394507780@lid", "919999890760@s.whatsapp.net", "200201394507780@lid")
@@ -348,6 +363,267 @@ func TestImageDescriptorChangedRequiresFreshDownloadCoordinates(t *testing.T) {
 		t.Fatal("new direct path was not detected")
 	}
 	if !imageDescriptorChanged(&domain.Image{}, old) {
+		t.Fatal("complete descriptor must replace missing metadata")
+	}
+}
+
+func writeAttachmentFixture(t *testing.T, name string, data []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestOpenAttachmentSourceValidatesKindsAndVoiceNotes(t *testing.T) {
+	documentPath := writeAttachmentFixture(t, "notes.pdf", []byte("%PDF-1.7\ncontent"))
+	document, err := openAttachmentSource(documentPath, "document", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.mimeType != "application/pdf" || document.fileName != "notes.pdf" || document.size == 0 {
+		t.Fatalf("document=%+v", document)
+	}
+	_ = document.file.Close()
+	if _, err = openAttachmentSource(documentPath, "video", false); err == nil {
+		t.Fatal("PDF was accepted as a video")
+	}
+	if _, err = openAttachmentSource(documentPath, "document", true); err == nil {
+		t.Fatal("document was accepted as a voice note")
+	}
+
+	videoPath := writeAttachmentFixture(t, "clip.mp4", []byte{0, 0, 0, 20, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm', 0, 0, 0, 0})
+	video, err := openAttachmentSource(videoPath, "video", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if video.mimeType != "video/mp4" {
+		t.Fatalf("video MIME=%q", video.mimeType)
+	}
+	_ = video.file.Close()
+
+	voicePath := writeAttachmentFixture(t, "voice.ogg", []byte("OggS\x00\x02fixture-OpusHead-audio"))
+	voice, err := openAttachmentSource(voicePath, "audio", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if voice.mimeType != "audio/ogg; codecs=opus" {
+		t.Fatalf("voice MIME=%q", voice.mimeType)
+	}
+	_ = voice.file.Close()
+	ordinaryOgg := writeAttachmentFixture(t, "ordinary.ogg", []byte("OggS\x00\x02vorbis-audio"))
+	if _, err = openAttachmentSource(ordinaryOgg, "audio", true); err == nil {
+		t.Fatal("non-Opus Ogg was accepted as a voice note")
+	}
+	if _, err = openAttachmentSource("relative.pdf", "document", false); err == nil {
+		t.Fatal("relative attachment path was accepted")
+	}
+	if _, err = openAttachmentSource(t.TempDir(), "document", false); err == nil {
+		t.Fatal("directory was accepted as an attachment")
+	}
+	largePath := filepath.Join(t.TempDir(), "large.bin")
+	large, err := os.Create(largePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = large.Truncate(maxAttachmentBytes + 1); err != nil {
+		_ = large.Close()
+		t.Fatal(err)
+	}
+	if err = large.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = openAttachmentSource(largePath, "document", false); err == nil {
+		t.Fatal("attachment larger than 2 GiB was accepted")
+	}
+}
+
+func TestOutgoingAttachmentMessagesCarryUploadMetadata(t *testing.T) {
+	upload := whatsmeow.UploadResponse{
+		URL: "https://media.example/file", DirectPath: "/mms/file", FileLength: 123,
+		MediaKey: bytes.Repeat([]byte{1}, 32), FileSHA256: bytes.Repeat([]byte{2}, 32), FileEncSHA256: bytes.Repeat([]byte{3}, 32),
+	}
+	contextInfo := &waE2E.ContextInfo{StanzaID: proto.String("reply-target")}
+	documentAttachment := &domain.Attachment{Caption: "plan", MIMEType: "application/pdf", FileName: "plan.pdf"}
+	documentMessage, err := outgoingAttachmentMessage("document", documentAttachment, upload, contextInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := documentMessage.GetDocumentMessage()
+	if document.GetURL() != upload.URL || document.GetDirectPath() != upload.DirectPath || document.GetFileLength() != 123 || document.GetFileName() != "plan.pdf" || document.GetCaption() != "plan" || document.GetContextInfo().GetStanzaID() != "reply-target" {
+		t.Fatalf("document=%+v", document)
+	}
+	videoMessage, err := outgoingAttachmentMessage("video", &domain.Attachment{Caption: "clip", MIMEType: "video/mp4"}, upload, contextInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	video := videoMessage.GetVideoMessage()
+	if video.GetMimetype() != "video/mp4" || video.GetCaption() != "clip" || video.GetContextInfo().GetStanzaID() != "reply-target" {
+		t.Fatalf("video=%+v", video)
+	}
+	audioMessage, err := outgoingAttachmentMessage("audio", &domain.Attachment{MIMEType: "audio/ogg; codecs=opus", VoiceNote: true}, upload, contextInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := audioMessage.GetAudioMessage()
+	if audio.GetMimetype() != "audio/ogg; codecs=opus" || !audio.GetPTT() || audio.GetContextInfo().GetStanzaID() != "reply-target" {
+		t.Fatalf("audio=%+v", audio)
+	}
+	if _, err = outgoingAttachmentMessage("image", &domain.Attachment{}, upload, nil); err == nil {
+		t.Fatal("unsupported attachment kind was accepted")
+	}
+	if !validUploadResponse(upload, 123) {
+		t.Fatal("complete upload metadata was rejected")
+	}
+	upload.MediaKey = upload.MediaKey[:31]
+	if validUploadResponse(upload, 123) {
+		t.Fatal("short upload media key was accepted")
+	}
+}
+
+func TestAttachmentPayloadFingerprintCoversBinaryRequest(t *testing.T) {
+	source := attachmentSource{path: "/tmp/notes.pdf", mimeType: "application/pdf", size: 42}
+	base := attachmentPayloadFingerprint(source, "document", "caption", "reply", false)
+	if len(base) != 64 || base != attachmentPayloadFingerprint(source, "document", "caption", "reply", false) {
+		t.Fatalf("fingerprint=%q is not a stable SHA-256 value", base)
+	}
+	variants := []string{
+		attachmentPayloadFingerprint(attachmentSource{path: "/tmp/other.pdf", mimeType: source.mimeType, size: source.size}, "document", "caption", "reply", false),
+		attachmentPayloadFingerprint(attachmentSource{path: source.path, mimeType: source.mimeType, size: source.size + 1}, "document", "caption", "reply", false),
+		attachmentPayloadFingerprint(source, "video", "caption", "reply", false),
+		attachmentPayloadFingerprint(source, "document", "different", "reply", false),
+		attachmentPayloadFingerprint(source, "document", "caption", "other-reply", false),
+		attachmentPayloadFingerprint(source, "document", "caption", "reply", true),
+	}
+	for _, variant := range variants {
+		if variant == base {
+			t.Fatal("different attachment payload produced the same fingerprint")
+		}
+	}
+}
+
+func TestDownloadableAttachmentPreservesDescriptors(t *testing.T) {
+	attachment := &domain.Attachment{
+		Caption: "caption", MIMEType: "application/octet-stream", FileName: "archive.bin", DirectPath: "/mms/file",
+		MediaKey: []byte{1}, FileSHA256: []byte{2}, FileEncSHA256: []byte{3}, FileSize: 44,
+		Width: 640, Height: 360, DurationSeconds: 9, Animated: true, VoiceNote: true,
+	}
+	document, err := downloadableAttachment("document", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := document.(*waE2E.DocumentMessage); got.GetFileName() != "archive.bin" || got.GetDirectPath() != "/mms/file" || got.GetFileLength() != 44 {
+		t.Fatalf("document=%+v", got)
+	}
+	video, err := downloadableAttachment("video", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := video.(*waE2E.VideoMessage); got.GetWidth() != 640 || got.GetHeight() != 360 || !got.GetGifPlayback() || got.GetSeconds() != 9 {
+		t.Fatalf("video=%+v", got)
+	}
+	audio, err := downloadableAttachment("audio", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := audio.(*waE2E.AudioMessage); !got.GetPTT() || got.GetSeconds() != 9 || got.GetDirectPath() != "/mms/file" {
+		t.Fatalf("audio=%+v", got)
+	}
+	if _, err = downloadableAttachment("image", attachment); err == nil {
+		t.Fatal("unsupported attachment kind was downloadable")
+	}
+}
+
+func TestBoundedFileRejectsOversizedMutations(t *testing.T) {
+	underlying, err := os.CreateTemp(t.TempDir(), "bounded-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer underlying.Close()
+	file := &boundedFile{File: underlying, maxSize: 4}
+	if n, writeErr := file.Write([]byte("1234")); writeErr != nil || n != 4 {
+		t.Fatalf("initial write n=%d err=%v", n, writeErr)
+	}
+	if _, err = file.Write([]byte("5")); !errors.Is(err, errAttachmentDownloadLimit) {
+		t.Fatalf("oversized sequential write error=%v", err)
+	}
+	if _, err = file.WriteAt([]byte("45"), 3); !errors.Is(err, errAttachmentDownloadLimit) {
+		t.Fatalf("oversized positional write error=%v", err)
+	}
+	if err = file.Truncate(5); !errors.Is(err, errAttachmentDownloadLimit) {
+		t.Fatalf("oversized truncate error=%v", err)
+	}
+	if err = file.Truncate(4); err != nil {
+		t.Fatal(err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 4 {
+		t.Fatalf("size=%d, want 4", info.Size())
+	}
+}
+
+func TestDownloadAttachmentUsesValidLocalFilesWithoutNetwork(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	sourcePath := filepath.Join(directory, "source.pdf")
+	contents := []byte("%PDF-1.7 local")
+	if err = os.WriteFile(sourcePath, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	message := domain.Message{
+		ID: "document-1", ChatJID: "123@g.us", Timestamp: time.Now(), Kind: "document", Text: "source.pdf",
+		Attachment: &domain.Attachment{MIMEType: "application/pdf", FileName: "source.pdf", LocalPath: sourcePath, FileSize: uint64(len(contents))},
+	}
+	if err = productStore.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{store: productStore, mediaDir: filepath.Join(directory, "media")}
+	path, err := client.DownloadAttachment(ctx, message.ChatJID, message.ID)
+	if err != nil || path != sourcePath {
+		t.Fatalf("path=%q err=%v", path, err)
+	}
+	if err = os.Remove(sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := productStore.Message(ctx, message.ChatJID, message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := client.attachmentPath(stored.ChatJID, stored.ID, stored.Attachment)
+	if err = os.MkdirAll(client.mediaDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(cachePath, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path, err = client.DownloadAttachment(ctx, message.ChatJID, message.ID)
+	if err != nil || path != cachePath {
+		t.Fatalf("cached path=%q want=%q err=%v", path, cachePath, err)
+	}
+	stored, err = productStore.Message(ctx, message.ChatJID, message.ID)
+	if err != nil || stored.Attachment == nil || stored.Attachment.LocalPath != cachePath {
+		t.Fatalf("stored=%+v err=%v", stored.Attachment, err)
+	}
+}
+
+func TestAttachmentDescriptorChangedRequiresFreshCoordinates(t *testing.T) {
+	old := &domain.Attachment{DirectPath: "/old", MediaKey: []byte{1}, FileEncSHA256: []byte{2}}
+	if attachmentDescriptorChanged(old, &domain.Attachment{DirectPath: "/old", MediaKey: []byte{1}, FileEncSHA256: []byte{2}}) {
+		t.Fatal("identical descriptor reported as fresh")
+	}
+	if !attachmentDescriptorChanged(old, &domain.Attachment{DirectPath: "/new", MediaKey: []byte{1}, FileEncSHA256: []byte{2}}) {
+		t.Fatal("new direct path was not detected")
+	}
+	if !attachmentDescriptorChanged(&domain.Attachment{}, old) {
 		t.Fatal("complete descriptor must replace missing metadata")
 	}
 }
@@ -456,6 +732,30 @@ func TestPruneMediaCacheRemovesOriginalAndThumbnailTogether(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("new pair member %q was pruned: %v", name, err)
 		}
+	}
+}
+
+func TestPruneMediaCachePreservesPublishedAttachment(t *testing.T) {
+	dir := t.TempDir()
+	c := &Client{mediaDir: dir}
+	preserveKey := strings.Repeat("a", 64)
+	preserved := filepath.Join(dir, preserveKey+".pdf")
+	other := filepath.Join(dir, strings.Repeat("b", 64)+".mp4")
+	for _, path := range []string{preserved, other} {
+		if err := os.WriteFile(path, []byte("12345678"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(preserved, old, old); err != nil {
+		t.Fatal(err)
+	}
+	c.pruneMediaCacheExcept(8, preserveKey)
+	if _, err := os.Stat(preserved); err != nil {
+		t.Fatalf("published attachment was pruned: %v", err)
+	}
+	if _, err := os.Stat(other); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unprotected cache entry remains: %v", err)
 	}
 }
 

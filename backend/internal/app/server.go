@@ -25,7 +25,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 13
+const ProtocolVersion uint32 = 14
 const maxTextBytes = 65_536
 
 type Server struct {
@@ -68,6 +68,12 @@ func New(ctx context.Context, cancel context.CancelFunc, codec *bridge.Codec, st
 }
 func (s *Server) SetWhatsApp(client *wa.Client) { s.wa = client }
 
+func usesMediaSlot(request *bridgev1.RpcRequest) bool {
+	return request.GetGetChatAvatar() != nil || request.GetGetParticipantAvatar() != nil ||
+		request.GetGetMessageImage() != nil || request.GetSendImage() != nil || request.GetSendSticker() != nil ||
+		request.GetGetChatInfo() != nil || request.GetGetMessageAttachment() != nil || request.GetSendAttachment() != nil
+}
+
 func (s *Server) Run() error {
 	for {
 		envelope, err := s.codec.Read()
@@ -80,7 +86,7 @@ func (s *Server) Run() error {
 		request := envelope.GetRequest()
 		// GetChatInfo joins the media pool because group and about lookups are
 		// network round-trips that must not stall the serialized RPC loop.
-		if s.handshaken.Load() && envelope.GetProtocolVersion() == ProtocolVersion && (request.GetGetChatAvatar() != nil || request.GetGetParticipantAvatar() != nil || request.GetGetMessageImage() != nil || request.GetSendImage() != nil || request.GetSendSticker() != nil || request.GetGetChatInfo() != nil) {
+		if s.handshaken.Load() && envelope.GetProtocolVersion() == ProtocolVersion && usesMediaSlot(request) {
 			go func(envelope *bridgev1.Envelope) {
 				select {
 				case s.mediaSlots <- struct{}{}:
@@ -440,6 +446,47 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, err
 		}
 		return &bridgev1.RpcResponse_SendSticker{SendSticker: &bridgev1.SendStickerResponse{Message: s.wireMessage(message)}}, nil
+	case *bridgev1.RpcRequest_SendAttachment:
+		if req.SendAttachment.GetClientMessageId() == "" || req.SendAttachment.GetChatId() == "" || req.SendAttachment.GetFilePath() == "" {
+			return nil, fail("invalid_argument", "client_message_id, chat_id and file_path are required", false)
+		}
+		if _, err := uuid.Parse(req.SendAttachment.GetClientMessageId()); err != nil {
+			return nil, fail("invalid_argument", "client_message_id must be a UUID", false)
+		}
+		if !utf8.ValidString(req.SendAttachment.GetCaption()) || len(req.SendAttachment.GetCaption()) > 4096 {
+			return nil, fail("invalid_argument", "caption must be valid UTF-8 up to 4096 bytes", false)
+		}
+		kind := ""
+		switch req.SendAttachment.GetKind() {
+		case bridgev1.AttachmentKind_ATTACHMENT_KIND_DOCUMENT:
+			kind = "document"
+		case bridgev1.AttachmentKind_ATTACHMENT_KIND_VIDEO:
+			kind = "video"
+		case bridgev1.AttachmentKind_ATTACHMENT_KIND_AUDIO:
+			kind = "audio"
+		default:
+			return nil, fail("invalid_argument", "kind must be document, video or audio", false)
+		}
+		if kind == "audio" && req.SendAttachment.GetCaption() != "" {
+			return nil, fail("invalid_argument", "audio messages do not support captions", false)
+		}
+		if kind != "audio" && req.SendAttachment.GetVoiceNote() {
+			return nil, fail("invalid_argument", "voice_note is only valid for audio attachments", false)
+		}
+		if err := s.validateReplyTarget(req.SendAttachment.GetChatId(), req.SendAttachment.GetReplyToMessageId()); err != nil {
+			return nil, err
+		}
+		if !s.wa.IsConnected() {
+			return nil, fail("not_connected", "WhatsApp is not connected", true)
+		}
+		message, err := s.wa.SendAttachment(s.ctx, req.SendAttachment.GetClientMessageId(), req.SendAttachment.GetChatId(), req.SendAttachment.GetFilePath(), kind, req.SendAttachment.GetCaption(), req.SendAttachment.GetReplyToMessageId(), req.SendAttachment.GetVoiceNote())
+		if errors.Is(err, wa.ErrInvalidAttachment) {
+			return nil, fail("invalid_argument", err.Error(), false)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_SendAttachment{SendAttachment: &bridgev1.SendAttachmentResponse{Message: s.wireMessage(message)}}, nil
 	case *bridgev1.RpcRequest_GetMessageImage:
 		if req.GetMessageImage.GetChatId() == "" || req.GetMessageImage.GetMessageId() == "" {
 			return nil, fail("invalid_argument", "chat_id and message_id are required", false)
@@ -449,6 +496,15 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, fail("image_unavailable", err.Error(), s.wa.IsConnected())
 		}
 		return &bridgev1.RpcResponse_GetMessageImage{GetMessageImage: &bridgev1.GetMessageImageResponse{ChatId: req.GetMessageImage.GetChatId(), MessageId: req.GetMessageImage.GetMessageId(), ImagePath: path, ThumbnailPath: thumbnailPath}}, nil
+	case *bridgev1.RpcRequest_GetMessageAttachment:
+		if req.GetMessageAttachment.GetChatId() == "" || req.GetMessageAttachment.GetMessageId() == "" {
+			return nil, fail("invalid_argument", "chat_id and message_id are required", false)
+		}
+		path, err := s.wa.DownloadAttachment(s.ctx, req.GetMessageAttachment.GetChatId(), req.GetMessageAttachment.GetMessageId())
+		if err != nil {
+			return nil, fail("attachment_unavailable", err.Error(), s.wa.IsConnected())
+		}
+		return &bridgev1.RpcResponse_GetMessageAttachment{GetMessageAttachment: &bridgev1.GetMessageAttachmentResponse{ChatId: req.GetMessageAttachment.GetChatId(), MessageId: req.GetMessageAttachment.GetMessageId(), LocalPath: path}}, nil
 	case *bridgev1.RpcRequest_SendReaction:
 		if req.SendReaction.GetClientReactionId() == "" || req.SendReaction.GetChatId() == "" || req.SendReaction.GetMessageId() == "" {
 			return nil, fail("invalid_argument", "client_reaction_id, chat_id and message_id are required", false)
@@ -604,7 +660,11 @@ func success(result any) *bridgev1.RpcResponse {
 		response.Result = value
 	case *bridgev1.RpcResponse_SendSticker:
 		response.Result = value
+	case *bridgev1.RpcResponse_SendAttachment:
+		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageImage:
+		response.Result = value
+	case *bridgev1.RpcResponse_GetMessageAttachment:
 		response.Result = value
 	case *bridgev1.RpcResponse_SearchLocal:
 		response.Result = value
@@ -766,6 +826,9 @@ func (s *Server) wireMessageWithIdentities(m domain.Message, identities map[stri
 		// Only advertise files that still exist so the desktop asks us to fetch
 		// an evicted image again when its virtualized row becomes visible.
 		image.LocalPath, image.ThumbnailPath = s.wa.CachedImagePaths(m.ChatJID, m.ID, image.MimeType)
+	}
+	if attachment := message.GetAttachment(); attachment != nil && s.wa != nil {
+		attachment.LocalPath = s.wa.CachedAttachmentPath(m.ChatJID, m.ID, m.Attachment)
 	}
 	chat, err := types.ParseJID(m.TransportJID)
 	if err == nil && chat.Server == types.GroupServer {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"testing"
 	"time"
 
@@ -43,8 +44,8 @@ func TestMediaCapacityDoesNotBlockNonMediaRequest(t *testing.T) {
 		{
 			ProtocolVersion: ProtocolVersion,
 			RequestId:       1,
-			Body: &bridgev1.Envelope_Request{Request: &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_GetChatAvatar{
-				GetChatAvatar: &bridgev1.GetChatAvatarRequest{ChatId: "blocked-media"},
+			Body: &bridgev1.Envelope_Request{Request: &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_GetMessageAttachment{
+				GetMessageAttachment: &bridgev1.GetMessageAttachmentRequest{ChatId: "blocked-media", MessageId: "attachment"},
 			}}},
 		},
 		{
@@ -91,6 +92,32 @@ func TestMediaCapacityDoesNotBlockNonMediaRequest(t *testing.T) {
 	}
 	if got := envelopes[0].GetResponse().GetError().GetCode(); got != "invalid_argument" {
 		t.Fatalf("error code=%q, want invalid_argument", got)
+	}
+}
+
+func TestAttachmentRequestValidation(t *testing.T) {
+	s := &Server{ctx: context.Background()}
+	validID := "b0bca7f5-a85f-4a8c-8956-1722cf35ffbc"
+	tests := []struct {
+		name    string
+		request *bridgev1.RpcRequest
+	}{
+		{"missing required fields", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendAttachment{SendAttachment: &bridgev1.SendAttachmentRequest{}}}},
+		{"invalid client ID", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendAttachment{SendAttachment: &bridgev1.SendAttachmentRequest{ClientMessageId: "not-a-uuid", ChatId: "chat", FilePath: "/file", Kind: bridgev1.AttachmentKind_ATTACHMENT_KIND_DOCUMENT}}}},
+		{"unspecified kind", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendAttachment{SendAttachment: &bridgev1.SendAttachmentRequest{ClientMessageId: validID, ChatId: "chat", FilePath: "/file"}}}},
+		{"audio caption", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendAttachment{SendAttachment: &bridgev1.SendAttachmentRequest{ClientMessageId: validID, ChatId: "chat", FilePath: "/file", Kind: bridgev1.AttachmentKind_ATTACHMENT_KIND_AUDIO, Caption: "unsupported"}}}},
+		{"document voice note", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendAttachment{SendAttachment: &bridgev1.SendAttachmentRequest{ClientMessageId: validID, ChatId: "chat", FilePath: "/file", Kind: bridgev1.AttachmentKind_ATTACHMENT_KIND_DOCUMENT, VoiceNote: true}}}},
+		{"invalid caption UTF-8", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_SendAttachment{SendAttachment: &bridgev1.SendAttachmentRequest{ClientMessageId: validID, ChatId: "chat", FilePath: "/file", Kind: bridgev1.AttachmentKind_ATTACHMENT_KIND_DOCUMENT, Caption: string([]byte{0xff})}}}},
+		{"missing attachment message", &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_GetMessageAttachment{GetMessageAttachment: &bridgev1.GetMessageAttachmentRequest{ChatId: "chat"}}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := s.dispatch(test.request)
+			var failure *rpcFailure
+			if !errors.As(err, &failure) || failure.code != "invalid_argument" {
+				t.Fatalf("error=%v, want invalid_argument", err)
+			}
+		})
 	}
 }
 

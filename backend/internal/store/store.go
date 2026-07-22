@@ -1587,6 +1587,26 @@ func (s *Store) SetImageLocalPath(ctx context.Context, chatJID, messageID, local
 	return nil
 }
 
+func (s *Store) SetAttachmentLocalPath(ctx context.Context, chatJID, messageID, localPath string) error {
+	resolved, err := s.ResolveChat(ctx, chatJID)
+	if err != nil {
+		return err
+	}
+	chatJID = resolved
+	result, err := s.db.ExecContext(ctx, `UPDATE messages SET image_local_path=? WHERE chat_jid=? AND id=? AND kind IN ('video','audio','document')`, localPath, chatJID, messageID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) BeginReactionRepair(ctx context.Context, chatJID string) (domain.ReactionRepairJob, bool, error) {
 	resolved, resolveErr := s.ResolveChat(ctx, chatJID)
 	if resolveErr != nil {
@@ -1994,6 +2014,13 @@ func (s *Store) ReserveOutgoing(ctx context.Context, clientRequestID, chatJID, t
 }
 
 func (s *Store) ReserveOutgoingMessage(ctx context.Context, clientRequestID string, message domain.Message) (string, bool, error) {
+	return s.ReserveOutgoingMessageWithPayload(ctx, clientRequestID, message.Text, message)
+}
+
+// ReserveOutgoingMessageWithPayload atomically reserves a pending message while
+// comparing retries against an opaque payload fingerprint. This keeps the
+// human-readable message preview separate from idempotency for binary sends.
+func (s *Store) ReserveOutgoingMessageWithPayload(ctx context.Context, clientRequestID, payloadFingerprint string, message domain.Message) (string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", false, err
@@ -2012,7 +2039,7 @@ func (s *Store) ReserveOutgoingMessage(ctx context.Context, clientRequestID stri
 	var chat, text, id string
 	err = tx.QueryRowContext(ctx, `SELECT chat_jid,text,message_id FROM outgoing_requests WHERE client_request_id=?`, clientRequestID).Scan(&chat, &text, &id)
 	if err == nil {
-		if chat != message.ChatJID || text != message.Text {
+		if chat != message.ChatJID || text != payloadFingerprint {
 			return "", true, fmt.Errorf("client_message_id already used with different payload")
 		}
 		return id, true, nil
@@ -2020,7 +2047,7 @@ func (s *Store) ReserveOutgoingMessage(ctx context.Context, clientRequestID stri
 	if !errors.Is(err, sql.ErrNoRows) {
 		return "", false, err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO outgoing_requests(client_request_id,chat_jid,text,message_id,created_at) VALUES(?,?,?,?,?)`, clientRequestID, message.ChatJID, message.Text, message.ID, time.Now().UnixMilli()); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO outgoing_requests(client_request_id,chat_jid,text,message_id,created_at) VALUES(?,?,?,?,?)`, clientRequestID, message.ChatJID, payloadFingerprint, message.ID, time.Now().UnixMilli()); err != nil {
 		return "", false, err
 	}
 	if err = applyMessageTx(ctx, tx, message, false); err != nil {

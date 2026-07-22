@@ -42,6 +42,8 @@ message RpcRequest {
     ListMessagesAfterRequest list_messages_after = 21;
     GetChatInfoRequest get_chat_info = 22;
     SetTypingRequest set_typing = 23;
+    GetMessageAttachmentRequest get_message_attachment = 24;
+    SendAttachmentRequest send_attachment = 25;
   }
 }
 
@@ -72,6 +74,8 @@ message RpcResponse {
     ListMessagesAfterResponse list_messages_after = 30;
     GetChatInfoResponse get_chat_info = 31;
     SetTypingResponse set_typing = 32;
+    GetMessageAttachmentResponse get_message_attachment = 33;
+    SendAttachmentResponse send_attachment = 34;
   }
 }
 
@@ -412,6 +416,13 @@ enum MessageStatus {
   MESSAGE_STATUS_FAILED = 5;
 }
 
+enum AttachmentKind {
+  ATTACHMENT_KIND_UNSPECIFIED = 0;
+  ATTACHMENT_KIND_DOCUMENT = 1;
+  ATTACHMENT_KIND_VIDEO = 2;
+  ATTACHMENT_KIND_AUDIO = 3;
+}
+
 message Chat {
   // Opaque local conversation ID. It is not a WhatsApp JID.
   string id = 1;
@@ -599,3 +610,34 @@ message SendStickerRequest {
 }
 
 message SendStickerResponse { Message message = 1; }
+
+message GetMessageAttachmentRequest {
+  string chat_id = 1;
+  string message_id = 2;
+}
+
+message GetMessageAttachmentResponse {
+  string chat_id = 1;
+  string message_id = 2;
+  // A backend-owned cache entry, or the still-valid source path for an
+  // attachment sent from this device.
+  string local_path = 3;
+}
+
+message SendAttachmentRequest {
+  // Stable UUID with the same idempotency contract as the other send RPCs.
+  string client_message_id = 1;
+  string chat_id = 2;
+  // Absolute path selected by the local desktop file picker. The backend
+  // validates the file type and streams it to WhatsApp without loading the
+  // complete attachment into memory.
+  string file_path = 3;
+  AttachmentKind kind = 4;
+  // Supported for documents and videos. Audio messages do not have captions.
+  string caption = 5;
+  string reply_to_message_id = 6;
+  // Audio only. Voice notes must contain Ogg Opus data.
+  bool voice_note = 7;
+}
+
+message SendAttachmentResponse { Message message = 1; }
