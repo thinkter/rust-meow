@@ -1331,7 +1331,12 @@ export function createAppModel() {
             setState("qrExpiresAtMs", 0);
           }
         });
-        if (event.payload.state === ConnectionState.Connected) void loadChats(true);
+        if (event.payload.state === ConnectionState.Connected) {
+          void loadChats(true).then(async () => {
+            await restoreWorkspaceConversations();
+            notificationActivations.markReady();
+          });
+        }
         break;
       case "pairingQr":
         batch(() => {
