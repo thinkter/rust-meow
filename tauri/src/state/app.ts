@@ -258,6 +258,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   let restartResyncing = false;
   const restartEpochs = new RestartEpochQueue();
   const chatListGeneration = new RequestGeneration();
+  const chatInfoGeneration = new RequestGeneration();
   let disposed = false;
   let toastId = 0;
   const pendingImages = new Set<string>();
@@ -597,6 +598,11 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     const selectedChatId = pane?.activeChatId ?? "";
     if (state.selectedChatId && state.selectedChatId !== selectedChatId) {
       participantAvatarQueue.cancelScope(state.selectedChatId);
+    }
+    if (state.selectedChatId !== selectedChatId) {
+      chatInfoGeneration.invalidate();
+      setState("chatInfoLoading", false);
+      setState("chatInfoError", "");
     }
     setState("selectedChatId", selectedChatId);
   }
@@ -1166,6 +1172,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   async function showChatInfo() {
     const chatId = state.selectedChatId;
     if (!chatId) return;
+    const generation = chatInfoGeneration.begin();
     batch(() => {
       setState("chatInfoOpen", true);
       setState("chatInfoLoading", true);
@@ -1174,27 +1181,32 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     });
     try {
       const info = await bridge.getChatInfo(chatId);
-      if (state.selectedChatId !== chatId) return;
+      if (state.selectedChatId !== chatId || !chatInfoGeneration.isCurrent(generation)) return;
       setState("chatInfo", info);
       if (info.chat) upsertChat(info.chat);
     } catch (error) {
-      setState("chatInfoError", normalizeBridgeError(error).message);
+      if (chatInfoGeneration.isCurrent(generation)) {
+        setState("chatInfoError", normalizeBridgeError(error).message);
+      }
     } finally {
-      if (state.selectedChatId === chatId) setState("chatInfoLoading", false);
+      if (chatInfoGeneration.isCurrent(generation)) setState("chatInfoLoading", false);
     }
   }
 
   async function ensureMentionDirectory() {
     const chatId = state.selectedChatId;
     if (!chatId || state.chatInfo?.chat?.id === chatId || state.chatInfoLoading) return;
+    const generation = chatInfoGeneration.begin();
     setState("chatInfoLoading", true);
     try {
       const info = await bridge.getChatInfo(chatId);
-      if (state.selectedChatId === chatId) setState("chatInfo", info);
+      if (state.selectedChatId === chatId && chatInfoGeneration.isCurrent(generation)) {
+        setState("chatInfo", info);
+      }
     } catch {
       // Mention suggestions are optional; the main chat-info panel exposes retry UI.
     } finally {
-      if (state.selectedChatId === chatId) setState("chatInfoLoading", false);
+      if (chatInfoGeneration.isCurrent(generation)) setState("chatInfoLoading", false);
     }
   }
 
@@ -1357,6 +1369,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       stopTyping();
       await bridge.logout();
       chatListGeneration.invalidate();
+      chatInfoGeneration.invalidate();
       batch(() => {
         setState("logoutConfirmation", false);
         setState("screen", "pairing");
