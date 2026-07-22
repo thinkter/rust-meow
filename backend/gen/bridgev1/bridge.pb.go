@@ -397,6 +397,8 @@ type RpcRequest struct {
 	//	*RpcRequest_SetTyping
 	//	*RpcRequest_GetMessageAttachment
 	//	*RpcRequest_SendAttachment
+	//	*RpcRequest_ListStickers
+	//	*RpcRequest_SendStickerFromLibrary
 	Request       isRpcRequest_Request `protobuf_oneof:"request"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -664,6 +666,24 @@ func (x *RpcRequest) GetSendAttachment() *SendAttachmentRequest {
 	return nil
 }
 
+func (x *RpcRequest) GetListStickers() *ListStickersRequest {
+	if x != nil {
+		if x, ok := x.Request.(*RpcRequest_ListStickers); ok {
+			return x.ListStickers
+		}
+	}
+	return nil
+}
+
+func (x *RpcRequest) GetSendStickerFromLibrary() *SendStickerFromLibraryRequest {
+	if x != nil {
+		if x, ok := x.Request.(*RpcRequest_SendStickerFromLibrary); ok {
+			return x.SendStickerFromLibrary
+		}
+	}
+	return nil
+}
+
 type isRpcRequest_Request interface {
 	isRpcRequest_Request()
 }
@@ -768,6 +788,14 @@ type RpcRequest_SendAttachment struct {
 	SendAttachment *SendAttachmentRequest `protobuf:"bytes,25,opt,name=send_attachment,json=sendAttachment,proto3,oneof"`
 }
 
+type RpcRequest_ListStickers struct {
+	ListStickers *ListStickersRequest `protobuf:"bytes,26,opt,name=list_stickers,json=listStickers,proto3,oneof"`
+}
+
+type RpcRequest_SendStickerFromLibrary struct {
+	SendStickerFromLibrary *SendStickerFromLibraryRequest `protobuf:"bytes,27,opt,name=send_sticker_from_library,json=sendStickerFromLibrary,proto3,oneof"`
+}
+
 func (*RpcRequest_Hello) isRpcRequest_Request() {}
 
 func (*RpcRequest_GetAuthState) isRpcRequest_Request() {}
@@ -818,6 +846,10 @@ func (*RpcRequest_GetMessageAttachment) isRpcRequest_Request() {}
 
 func (*RpcRequest_SendAttachment) isRpcRequest_Request() {}
 
+func (*RpcRequest_ListStickers) isRpcRequest_Request() {}
+
+func (*RpcRequest_SendStickerFromLibrary) isRpcRequest_Request() {}
+
 type RpcResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Exactly one result is always set: either an error or a successful payload.
@@ -850,6 +882,8 @@ type RpcResponse struct {
 	//	*RpcResponse_SetTyping
 	//	*RpcResponse_GetMessageAttachment
 	//	*RpcResponse_SendAttachment
+	//	*RpcResponse_ListStickers
+	//	*RpcResponse_SendStickerFromLibrary
 	Result        isRpcResponse_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1126,6 +1160,24 @@ func (x *RpcResponse) GetSendAttachment() *SendAttachmentResponse {
 	return nil
 }
 
+func (x *RpcResponse) GetListStickers() *ListStickersResponse {
+	if x != nil {
+		if x, ok := x.Result.(*RpcResponse_ListStickers); ok {
+			return x.ListStickers
+		}
+	}
+	return nil
+}
+
+func (x *RpcResponse) GetSendStickerFromLibrary() *SendStickerFromLibraryResponse {
+	if x != nil {
+		if x, ok := x.Result.(*RpcResponse_SendStickerFromLibrary); ok {
+			return x.SendStickerFromLibrary
+		}
+	}
+	return nil
+}
+
 type isRpcResponse_Result interface {
 	isRpcResponse_Result()
 }
@@ -1234,6 +1286,14 @@ type RpcResponse_SendAttachment struct {
 	SendAttachment *SendAttachmentResponse `protobuf:"bytes,34,opt,name=send_attachment,json=sendAttachment,proto3,oneof"`
 }
 
+type RpcResponse_ListStickers struct {
+	ListStickers *ListStickersResponse `protobuf:"bytes,35,opt,name=list_stickers,json=listStickers,proto3,oneof"`
+}
+
+type RpcResponse_SendStickerFromLibrary struct {
+	SendStickerFromLibrary *SendStickerFromLibraryResponse `protobuf:"bytes,36,opt,name=send_sticker_from_library,json=sendStickerFromLibrary,proto3,oneof"`
+}
+
 func (*RpcResponse_Error) isRpcResponse_Result() {}
 
 func (*RpcResponse_Hello) isRpcResponse_Result() {}
@@ -1286,6 +1346,10 @@ func (*RpcResponse_GetMessageAttachment) isRpcResponse_Result() {}
 
 func (*RpcResponse_SendAttachment) isRpcResponse_Result() {}
 
+func (*RpcResponse_ListStickers) isRpcResponse_Result() {}
+
+func (*RpcResponse_SendStickerFromLibrary) isRpcResponse_Result() {}
+
 type BackendEvent struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Event envelopes always have request_id=0. Sequence is monotonic only for
@@ -1304,6 +1368,7 @@ type BackendEvent struct {
 	//	*BackendEvent_RecentReactionsRepaired
 	//	*BackendEvent_ChatMerged
 	//	*BackendEvent_TypingChanged
+	//	*BackendEvent_StickersChanged
 	Event         isBackendEvent_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1452,6 +1517,15 @@ func (x *BackendEvent) GetTypingChanged() *TypingChanged {
 	return nil
 }
 
+func (x *BackendEvent) GetStickersChanged() *StickersChanged {
+	if x != nil {
+		if x, ok := x.Event.(*BackendEvent_StickersChanged); ok {
+			return x.StickersChanged
+		}
+	}
+	return nil
+}
+
 type isBackendEvent_Event interface {
 	isBackendEvent_Event()
 }
@@ -1500,6 +1574,10 @@ type BackendEvent_TypingChanged struct {
 	TypingChanged *TypingChanged `protobuf:"bytes,20,opt,name=typing_changed,json=typingChanged,proto3,oneof"`
 }
 
+type BackendEvent_StickersChanged struct {
+	StickersChanged *StickersChanged `protobuf:"bytes,21,opt,name=stickers_changed,json=stickersChanged,proto3,oneof"`
+}
+
 func (*BackendEvent_ConnectionChanged) isBackendEvent_Event() {}
 
 func (*BackendEvent_PairingQr) isBackendEvent_Event() {}
@@ -1521,6 +1599,8 @@ func (*BackendEvent_RecentReactionsRepaired) isBackendEvent_Event() {}
 func (*BackendEvent_ChatMerged) isBackendEvent_Event() {}
 
 func (*BackendEvent_TypingChanged) isBackendEvent_Event() {}
+
+func (*BackendEvent_StickersChanged) isBackendEvent_Event() {}
 
 type RpcError struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -5011,6 +5091,45 @@ func (x *ChatMerged) GetNewChatId() string {
 	return ""
 }
 
+// The sticker library changed: a favourite was added/removed via WhatsApp
+// app-state sync, or a new sticker message arrived/was sent. Carries no
+// payload; the desktop re-calls ListStickers when it needs a fresh view.
+type StickersChanged struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StickersChanged) Reset() {
+	*x = StickersChanged{}
+	mi := &file_bridge_proto_msgTypes[59]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StickersChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StickersChanged) ProtoMessage() {}
+
+func (x *StickersChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[59]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StickersChanged.ProtoReflect.Descriptor instead.
+func (*StickersChanged) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{59}
+}
+
 type TextContent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
@@ -5021,7 +5140,7 @@ type TextContent struct {
 
 func (x *TextContent) Reset() {
 	*x = TextContent{}
-	mi := &file_bridge_proto_msgTypes[59]
+	mi := &file_bridge_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5033,7 +5152,7 @@ func (x *TextContent) String() string {
 func (*TextContent) ProtoMessage() {}
 
 func (x *TextContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[59]
+	mi := &file_bridge_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5046,7 +5165,7 @@ func (x *TextContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextContent.ProtoReflect.Descriptor instead.
 func (*TextContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{59}
+	return file_bridge_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *TextContent) GetText() string {
@@ -5079,7 +5198,7 @@ type LinkPreview struct {
 
 func (x *LinkPreview) Reset() {
 	*x = LinkPreview{}
-	mi := &file_bridge_proto_msgTypes[60]
+	mi := &file_bridge_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5091,7 +5210,7 @@ func (x *LinkPreview) String() string {
 func (*LinkPreview) ProtoMessage() {}
 
 func (x *LinkPreview) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[60]
+	mi := &file_bridge_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5104,7 +5223,7 @@ func (x *LinkPreview) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LinkPreview.ProtoReflect.Descriptor instead.
 func (*LinkPreview) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{60}
+	return file_bridge_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *LinkPreview) GetUrl() string {
@@ -5169,7 +5288,7 @@ type ImageContent struct {
 
 func (x *ImageContent) Reset() {
 	*x = ImageContent{}
-	mi := &file_bridge_proto_msgTypes[61]
+	mi := &file_bridge_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5181,7 +5300,7 @@ func (x *ImageContent) String() string {
 func (*ImageContent) ProtoMessage() {}
 
 func (x *ImageContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[61]
+	mi := &file_bridge_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5194,7 +5313,7 @@ func (x *ImageContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImageContent.ProtoReflect.Descriptor instead.
 func (*ImageContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{61}
+	return file_bridge_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *ImageContent) GetCaption() string {
@@ -5287,7 +5406,7 @@ type AttachmentContent struct {
 
 func (x *AttachmentContent) Reset() {
 	*x = AttachmentContent{}
-	mi := &file_bridge_proto_msgTypes[62]
+	mi := &file_bridge_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5299,7 +5418,7 @@ func (x *AttachmentContent) String() string {
 func (*AttachmentContent) ProtoMessage() {}
 
 func (x *AttachmentContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[62]
+	mi := &file_bridge_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5312,7 +5431,7 @@ func (x *AttachmentContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachmentContent.ProtoReflect.Descriptor instead.
 func (*AttachmentContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{62}
+	return file_bridge_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *AttachmentContent) GetKind() string {
@@ -5409,7 +5528,7 @@ type ContactContent struct {
 
 func (x *ContactContent) Reset() {
 	*x = ContactContent{}
-	mi := &file_bridge_proto_msgTypes[63]
+	mi := &file_bridge_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5421,7 +5540,7 @@ func (x *ContactContent) String() string {
 func (*ContactContent) ProtoMessage() {}
 
 func (x *ContactContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[63]
+	mi := &file_bridge_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5434,7 +5553,7 @@ func (x *ContactContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContactContent.ProtoReflect.Descriptor instead.
 func (*ContactContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{63}
+	return file_bridge_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *ContactContent) GetDisplayName() string {
@@ -5460,7 +5579,7 @@ type ContactsContent struct {
 
 func (x *ContactsContent) Reset() {
 	*x = ContactsContent{}
-	mi := &file_bridge_proto_msgTypes[64]
+	mi := &file_bridge_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5472,7 +5591,7 @@ func (x *ContactsContent) String() string {
 func (*ContactsContent) ProtoMessage() {}
 
 func (x *ContactsContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[64]
+	mi := &file_bridge_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5485,7 +5604,7 @@ func (x *ContactsContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContactsContent.ProtoReflect.Descriptor instead.
 func (*ContactsContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{64}
+	return file_bridge_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *ContactsContent) GetContacts() []*ContactContent {
@@ -5509,7 +5628,7 @@ type LocationContent struct {
 
 func (x *LocationContent) Reset() {
 	*x = LocationContent{}
-	mi := &file_bridge_proto_msgTypes[65]
+	mi := &file_bridge_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5521,7 +5640,7 @@ func (x *LocationContent) String() string {
 func (*LocationContent) ProtoMessage() {}
 
 func (x *LocationContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[65]
+	mi := &file_bridge_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5534,7 +5653,7 @@ func (x *LocationContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LocationContent.ProtoReflect.Descriptor instead.
 func (*LocationContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{65}
+	return file_bridge_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *LocationContent) GetLatitude() float64 {
@@ -5589,7 +5708,7 @@ type UnsupportedContent struct {
 
 func (x *UnsupportedContent) Reset() {
 	*x = UnsupportedContent{}
-	mi := &file_bridge_proto_msgTypes[66]
+	mi := &file_bridge_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5601,7 +5720,7 @@ func (x *UnsupportedContent) String() string {
 func (*UnsupportedContent) ProtoMessage() {}
 
 func (x *UnsupportedContent) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[66]
+	mi := &file_bridge_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5614,7 +5733,7 @@ func (x *UnsupportedContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsupportedContent.ProtoReflect.Descriptor instead.
 func (*UnsupportedContent) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{66}
+	return file_bridge_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *UnsupportedContent) GetTypeName() string {
@@ -5641,7 +5760,7 @@ type ConnectionChanged struct {
 
 func (x *ConnectionChanged) Reset() {
 	*x = ConnectionChanged{}
-	mi := &file_bridge_proto_msgTypes[67]
+	mi := &file_bridge_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5653,7 +5772,7 @@ func (x *ConnectionChanged) String() string {
 func (*ConnectionChanged) ProtoMessage() {}
 
 func (x *ConnectionChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[67]
+	mi := &file_bridge_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5666,7 +5785,7 @@ func (x *ConnectionChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionChanged.ProtoReflect.Descriptor instead.
 func (*ConnectionChanged) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{67}
+	return file_bridge_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *ConnectionChanged) GetState() ConnectionState {
@@ -5693,7 +5812,7 @@ type PairingQr struct {
 
 func (x *PairingQr) Reset() {
 	*x = PairingQr{}
-	mi := &file_bridge_proto_msgTypes[68]
+	mi := &file_bridge_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5705,7 +5824,7 @@ func (x *PairingQr) String() string {
 func (*PairingQr) ProtoMessage() {}
 
 func (x *PairingQr) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[68]
+	mi := &file_bridge_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5718,7 +5837,7 @@ func (x *PairingQr) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PairingQr.ProtoReflect.Descriptor instead.
 func (*PairingQr) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{68}
+	return file_bridge_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *PairingQr) GetCode() string {
@@ -5746,7 +5865,7 @@ type SyncProgress struct {
 
 func (x *SyncProgress) Reset() {
 	*x = SyncProgress{}
-	mi := &file_bridge_proto_msgTypes[69]
+	mi := &file_bridge_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5758,7 +5877,7 @@ func (x *SyncProgress) String() string {
 func (*SyncProgress) ProtoMessage() {}
 
 func (x *SyncProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[69]
+	mi := &file_bridge_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5771,7 +5890,7 @@ func (x *SyncProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncProgress.ProtoReflect.Descriptor instead.
 func (*SyncProgress) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{69}
+	return file_bridge_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *SyncProgress) GetChatsProcessed() uint64 {
@@ -5804,7 +5923,7 @@ type ChatUpserted struct {
 
 func (x *ChatUpserted) Reset() {
 	*x = ChatUpserted{}
-	mi := &file_bridge_proto_msgTypes[70]
+	mi := &file_bridge_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5816,7 +5935,7 @@ func (x *ChatUpserted) String() string {
 func (*ChatUpserted) ProtoMessage() {}
 
 func (x *ChatUpserted) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[70]
+	mi := &file_bridge_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5829,7 +5948,7 @@ func (x *ChatUpserted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatUpserted.ProtoReflect.Descriptor instead.
 func (*ChatUpserted) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{70}
+	return file_bridge_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *ChatUpserted) GetChat() *Chat {
@@ -5848,7 +5967,7 @@ type MessageUpserted struct {
 
 func (x *MessageUpserted) Reset() {
 	*x = MessageUpserted{}
-	mi := &file_bridge_proto_msgTypes[71]
+	mi := &file_bridge_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5860,7 +5979,7 @@ func (x *MessageUpserted) String() string {
 func (*MessageUpserted) ProtoMessage() {}
 
 func (x *MessageUpserted) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[71]
+	mi := &file_bridge_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5873,7 +5992,7 @@ func (x *MessageUpserted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageUpserted.ProtoReflect.Descriptor instead.
 func (*MessageUpserted) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{71}
+	return file_bridge_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *MessageUpserted) GetMessage() *Message {
@@ -5895,7 +6014,7 @@ type ReceiptUpdated struct {
 
 func (x *ReceiptUpdated) Reset() {
 	*x = ReceiptUpdated{}
-	mi := &file_bridge_proto_msgTypes[72]
+	mi := &file_bridge_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5907,7 +6026,7 @@ func (x *ReceiptUpdated) String() string {
 func (*ReceiptUpdated) ProtoMessage() {}
 
 func (x *ReceiptUpdated) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[72]
+	mi := &file_bridge_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5920,7 +6039,7 @@ func (x *ReceiptUpdated) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReceiptUpdated.ProtoReflect.Descriptor instead.
 func (*ReceiptUpdated) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{72}
+	return file_bridge_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *ReceiptUpdated) GetChatId() string {
@@ -5962,7 +6081,7 @@ type BackendProblem struct {
 
 func (x *BackendProblem) Reset() {
 	*x = BackendProblem{}
-	mi := &file_bridge_proto_msgTypes[73]
+	mi := &file_bridge_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5974,7 +6093,7 @@ func (x *BackendProblem) String() string {
 func (*BackendProblem) ProtoMessage() {}
 
 func (x *BackendProblem) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[73]
+	mi := &file_bridge_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5987,7 +6106,7 @@ func (x *BackendProblem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackendProblem.ProtoReflect.Descriptor instead.
 func (*BackendProblem) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{73}
+	return file_bridge_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *BackendProblem) GetCode() string {
@@ -6025,7 +6144,7 @@ type SendStickerRequest struct {
 
 func (x *SendStickerRequest) Reset() {
 	*x = SendStickerRequest{}
-	mi := &file_bridge_proto_msgTypes[74]
+	mi := &file_bridge_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6037,7 +6156,7 @@ func (x *SendStickerRequest) String() string {
 func (*SendStickerRequest) ProtoMessage() {}
 
 func (x *SendStickerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[74]
+	mi := &file_bridge_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6050,7 +6169,7 @@ func (x *SendStickerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendStickerRequest.ProtoReflect.Descriptor instead.
 func (*SendStickerRequest) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{74}
+	return file_bridge_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *SendStickerRequest) GetClientMessageId() string {
@@ -6090,7 +6209,7 @@ type SendStickerResponse struct {
 
 func (x *SendStickerResponse) Reset() {
 	*x = SendStickerResponse{}
-	mi := &file_bridge_proto_msgTypes[75]
+	mi := &file_bridge_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6102,7 +6221,7 @@ func (x *SendStickerResponse) String() string {
 func (*SendStickerResponse) ProtoMessage() {}
 
 func (x *SendStickerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[75]
+	mi := &file_bridge_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6115,10 +6234,392 @@ func (x *SendStickerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendStickerResponse.ProtoReflect.Descriptor instead.
 func (*SendStickerResponse) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{75}
+	return file_bridge_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *SendStickerResponse) GetMessage() *Message {
+	if x != nil {
+		return x.Message
+	}
+	return nil
+}
+
+type ListStickersRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListStickersRequest) Reset() {
+	*x = ListStickersRequest{}
+	mi := &file_bridge_proto_msgTypes[77]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListStickersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListStickersRequest) ProtoMessage() {}
+
+func (x *ListStickersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[77]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListStickersRequest.ProtoReflect.Descriptor instead.
+func (*ListStickersRequest) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{77}
+}
+
+// One sticker available for reuse, assembled from local history and/or
+// synced WhatsApp app-state. `id` is stable across calls for the same
+// underlying media: the hex-encoded plaintext file hash when known (history
+// entries), otherwise the hex-encoded encrypted file hash (favourites-only
+// entries, since WhatsApp's favouriteSticker app-state action never carries
+// the plaintext hash). The two ID spaces do not coincide, so the same
+// sticker favourited on the phone and also present in chat history can
+// legitimately appear under two different IDs in two different packs.
+type Sticker struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Empty until this sticker has been downloaded into the local media cache.
+	LocalPath string `protobuf:"bytes,2,opt,name=local_path,json=localPath,proto3" json:"local_path,omitempty"`
+	MimeType  string `protobuf:"bytes,3,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	Animated  bool   `protobuf:"varint,4,opt,name=animated,proto3" json:"animated,omitempty"`
+	Width     int32  `protobuf:"varint,5,opt,name=width,proto3" json:"width,omitempty"`
+	Height    int32  `protobuf:"varint,6,opt,name=height,proto3" json:"height,omitempty"`
+	Favorite  bool   `protobuf:"varint,7,opt,name=favorite,proto3" json:"favorite,omitempty"`
+	// 0 when unknown (e.g. a favourite never seen in local history).
+	LastUsedMs int64 `protobuf:"varint,8,opt,name=last_used_ms,json=lastUsedMs,proto3" json:"last_used_ms,omitempty"`
+	// A message that can supply this sticker's bytes on demand. Empty for
+	// favourites-only entries; such entries are downloaded directly instead.
+	SourceChatId    string `protobuf:"bytes,9,opt,name=source_chat_id,json=sourceChatId,proto3" json:"source_chat_id,omitempty"`
+	SourceMessageId string `protobuf:"bytes,10,opt,name=source_message_id,json=sourceMessageId,proto3" json:"source_message_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *Sticker) Reset() {
+	*x = Sticker{}
+	mi := &file_bridge_proto_msgTypes[78]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Sticker) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Sticker) ProtoMessage() {}
+
+func (x *Sticker) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[78]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Sticker.ProtoReflect.Descriptor instead.
+func (*Sticker) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{78}
+}
+
+func (x *Sticker) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Sticker) GetLocalPath() string {
+	if x != nil {
+		return x.LocalPath
+	}
+	return ""
+}
+
+func (x *Sticker) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *Sticker) GetAnimated() bool {
+	if x != nil {
+		return x.Animated
+	}
+	return false
+}
+
+func (x *Sticker) GetWidth() int32 {
+	if x != nil {
+		return x.Width
+	}
+	return 0
+}
+
+func (x *Sticker) GetHeight() int32 {
+	if x != nil {
+		return x.Height
+	}
+	return 0
+}
+
+func (x *Sticker) GetFavorite() bool {
+	if x != nil {
+		return x.Favorite
+	}
+	return false
+}
+
+func (x *Sticker) GetLastUsedMs() int64 {
+	if x != nil {
+		return x.LastUsedMs
+	}
+	return 0
+}
+
+func (x *Sticker) GetSourceChatId() string {
+	if x != nil {
+		return x.SourceChatId
+	}
+	return ""
+}
+
+func (x *Sticker) GetSourceMessageId() string {
+	if x != nil {
+		return x.SourceMessageId
+	}
+	return ""
+}
+
+type StickerPack struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Stickers      []*Sticker             `protobuf:"bytes,3,rep,name=stickers,proto3" json:"stickers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StickerPack) Reset() {
+	*x = StickerPack{}
+	mi := &file_bridge_proto_msgTypes[79]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StickerPack) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StickerPack) ProtoMessage() {}
+
+func (x *StickerPack) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[79]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StickerPack.ProtoReflect.Descriptor instead.
+func (*StickerPack) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{79}
+}
+
+func (x *StickerPack) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *StickerPack) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *StickerPack) GetStickers() []*Sticker {
+	if x != nil {
+		return x.Stickers
+	}
+	return nil
+}
+
+type ListStickersResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Packs         []*StickerPack         `protobuf:"bytes,1,rep,name=packs,proto3" json:"packs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListStickersResponse) Reset() {
+	*x = ListStickersResponse{}
+	mi := &file_bridge_proto_msgTypes[80]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListStickersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListStickersResponse) ProtoMessage() {}
+
+func (x *ListStickersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[80]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListStickersResponse.ProtoReflect.Descriptor instead.
+func (*ListStickersResponse) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{80}
+}
+
+func (x *ListStickersResponse) GetPacks() []*StickerPack {
+	if x != nil {
+		return x.Packs
+	}
+	return nil
+}
+
+type SendStickerFromLibraryRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Stable UUID with the same idempotency contract as other sends.
+	ClientMessageId string `protobuf:"bytes,1,opt,name=client_message_id,json=clientMessageId,proto3" json:"client_message_id,omitempty"`
+	ChatId          string `protobuf:"bytes,2,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
+	// A Sticker.id from a previous ListStickers response.
+	StickerId        string `protobuf:"bytes,3,opt,name=sticker_id,json=stickerId,proto3" json:"sticker_id,omitempty"`
+	ReplyToMessageId string `protobuf:"bytes,4,opt,name=reply_to_message_id,json=replyToMessageId,proto3" json:"reply_to_message_id,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *SendStickerFromLibraryRequest) Reset() {
+	*x = SendStickerFromLibraryRequest{}
+	mi := &file_bridge_proto_msgTypes[81]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendStickerFromLibraryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendStickerFromLibraryRequest) ProtoMessage() {}
+
+func (x *SendStickerFromLibraryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[81]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendStickerFromLibraryRequest.ProtoReflect.Descriptor instead.
+func (*SendStickerFromLibraryRequest) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{81}
+}
+
+func (x *SendStickerFromLibraryRequest) GetClientMessageId() string {
+	if x != nil {
+		return x.ClientMessageId
+	}
+	return ""
+}
+
+func (x *SendStickerFromLibraryRequest) GetChatId() string {
+	if x != nil {
+		return x.ChatId
+	}
+	return ""
+}
+
+func (x *SendStickerFromLibraryRequest) GetStickerId() string {
+	if x != nil {
+		return x.StickerId
+	}
+	return ""
+}
+
+func (x *SendStickerFromLibraryRequest) GetReplyToMessageId() string {
+	if x != nil {
+		return x.ReplyToMessageId
+	}
+	return ""
+}
+
+type SendStickerFromLibraryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Message       *Message               `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendStickerFromLibraryResponse) Reset() {
+	*x = SendStickerFromLibraryResponse{}
+	mi := &file_bridge_proto_msgTypes[82]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendStickerFromLibraryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendStickerFromLibraryResponse) ProtoMessage() {}
+
+func (x *SendStickerFromLibraryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_proto_msgTypes[82]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendStickerFromLibraryResponse.ProtoReflect.Descriptor instead.
+func (*SendStickerFromLibraryResponse) Descriptor() ([]byte, []int) {
+	return file_bridge_proto_rawDescGZIP(), []int{82}
+}
+
+func (x *SendStickerFromLibraryResponse) GetMessage() *Message {
 	if x != nil {
 		return x.Message
 	}
@@ -6135,7 +6636,7 @@ type GetMessageAttachmentRequest struct {
 
 func (x *GetMessageAttachmentRequest) Reset() {
 	*x = GetMessageAttachmentRequest{}
-	mi := &file_bridge_proto_msgTypes[76]
+	mi := &file_bridge_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6147,7 +6648,7 @@ func (x *GetMessageAttachmentRequest) String() string {
 func (*GetMessageAttachmentRequest) ProtoMessage() {}
 
 func (x *GetMessageAttachmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[76]
+	mi := &file_bridge_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6160,7 +6661,7 @@ func (x *GetMessageAttachmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMessageAttachmentRequest.ProtoReflect.Descriptor instead.
 func (*GetMessageAttachmentRequest) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{76}
+	return file_bridge_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *GetMessageAttachmentRequest) GetChatId() string {
@@ -6190,7 +6691,7 @@ type GetMessageAttachmentResponse struct {
 
 func (x *GetMessageAttachmentResponse) Reset() {
 	*x = GetMessageAttachmentResponse{}
-	mi := &file_bridge_proto_msgTypes[77]
+	mi := &file_bridge_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6202,7 +6703,7 @@ func (x *GetMessageAttachmentResponse) String() string {
 func (*GetMessageAttachmentResponse) ProtoMessage() {}
 
 func (x *GetMessageAttachmentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[77]
+	mi := &file_bridge_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6215,7 +6716,7 @@ func (x *GetMessageAttachmentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMessageAttachmentResponse.ProtoReflect.Descriptor instead.
 func (*GetMessageAttachmentResponse) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{77}
+	return file_bridge_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *GetMessageAttachmentResponse) GetChatId() string {
@@ -6260,7 +6761,7 @@ type SendAttachmentRequest struct {
 
 func (x *SendAttachmentRequest) Reset() {
 	*x = SendAttachmentRequest{}
-	mi := &file_bridge_proto_msgTypes[78]
+	mi := &file_bridge_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6272,7 +6773,7 @@ func (x *SendAttachmentRequest) String() string {
 func (*SendAttachmentRequest) ProtoMessage() {}
 
 func (x *SendAttachmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[78]
+	mi := &file_bridge_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6285,7 +6786,7 @@ func (x *SendAttachmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendAttachmentRequest.ProtoReflect.Descriptor instead.
 func (*SendAttachmentRequest) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{78}
+	return file_bridge_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *SendAttachmentRequest) GetClientMessageId() string {
@@ -6346,7 +6847,7 @@ type SendAttachmentResponse struct {
 
 func (x *SendAttachmentResponse) Reset() {
 	*x = SendAttachmentResponse{}
-	mi := &file_bridge_proto_msgTypes[79]
+	mi := &file_bridge_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6358,7 +6859,7 @@ func (x *SendAttachmentResponse) String() string {
 func (*SendAttachmentResponse) ProtoMessage() {}
 
 func (x *SendAttachmentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_proto_msgTypes[79]
+	mi := &file_bridge_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6371,7 +6872,7 @@ func (x *SendAttachmentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendAttachmentResponse.ProtoReflect.Descriptor instead.
 func (*SendAttachmentResponse) Descriptor() ([]byte, []int) {
-	return file_bridge_proto_rawDescGZIP(), []int{79}
+	return file_bridge_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *SendAttachmentResponse) GetMessage() *Message {
@@ -6394,7 +6895,7 @@ const file_bridge_proto_rawDesc = "" +
 	" \x01(\v2\x1e.rustmeow.bridge.v1.RpcRequestH\x00R\arequest\x12=\n" +
 	"\bresponse\x18\v \x01(\v2\x1f.rustmeow.bridge.v1.RpcResponseH\x00R\bresponse\x128\n" +
 	"\x05event\x18\f \x01(\v2 .rustmeow.bridge.v1.BackendEventH\x00R\x05eventB\x06\n" +
-	"\x04body\"\x89\x10\n" +
+	"\x04body\"\xc9\x11\n" +
 	"\n" +
 	"RpcRequest\x128\n" +
 	"\x05hello\x18\x01 \x01(\v2 .rustmeow.bridge.v1.HelloRequestH\x00R\x05hello\x12O\n" +
@@ -6425,8 +6926,10 @@ const file_bridge_proto_rawDesc = "" +
 	"\n" +
 	"set_typing\x18\x17 \x01(\v2$.rustmeow.bridge.v1.SetTypingRequestH\x00R\tsetTyping\x12g\n" +
 	"\x16get_message_attachment\x18\x18 \x01(\v2/.rustmeow.bridge.v1.GetMessageAttachmentRequestH\x00R\x14getMessageAttachment\x12T\n" +
-	"\x0fsend_attachment\x18\x19 \x01(\v2).rustmeow.bridge.v1.SendAttachmentRequestH\x00R\x0esendAttachmentB\t\n" +
-	"\arequest\"\xce\x10\n" +
+	"\x0fsend_attachment\x18\x19 \x01(\v2).rustmeow.bridge.v1.SendAttachmentRequestH\x00R\x0esendAttachment\x12N\n" +
+	"\rlist_stickers\x18\x1a \x01(\v2'.rustmeow.bridge.v1.ListStickersRequestH\x00R\flistStickers\x12n\n" +
+	"\x19send_sticker_from_library\x18\x1b \x01(\v21.rustmeow.bridge.v1.SendStickerFromLibraryRequestH\x00R\x16sendStickerFromLibraryB\t\n" +
+	"\arequest\"\x90\x12\n" +
 	"\vRpcResponse\x124\n" +
 	"\x05error\x18\x01 \x01(\v2\x1c.rustmeow.bridge.v1.RpcErrorH\x00R\x05error\x129\n" +
 	"\x05hello\x18\n" +
@@ -6458,8 +6961,10 @@ const file_bridge_proto_rawDesc = "" +
 	"\n" +
 	"set_typing\x18  \x01(\v2%.rustmeow.bridge.v1.SetTypingResponseH\x00R\tsetTyping\x12h\n" +
 	"\x16get_message_attachment\x18! \x01(\v20.rustmeow.bridge.v1.GetMessageAttachmentResponseH\x00R\x14getMessageAttachment\x12U\n" +
-	"\x0fsend_attachment\x18\" \x01(\v2*.rustmeow.bridge.v1.SendAttachmentResponseH\x00R\x0esendAttachmentB\b\n" +
-	"\x06result\"\x8a\a\n" +
+	"\x0fsend_attachment\x18\" \x01(\v2*.rustmeow.bridge.v1.SendAttachmentResponseH\x00R\x0esendAttachment\x12O\n" +
+	"\rlist_stickers\x18# \x01(\v2(.rustmeow.bridge.v1.ListStickersResponseH\x00R\flistStickers\x12o\n" +
+	"\x19send_sticker_from_library\x18$ \x01(\v22.rustmeow.bridge.v1.SendStickerFromLibraryResponseH\x00R\x16sendStickerFromLibraryB\b\n" +
+	"\x06result\"\xdc\a\n" +
 	"\fBackendEvent\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12V\n" +
 	"\x12connection_changed\x18\n" +
@@ -6475,7 +6980,8 @@ const file_bridge_proto_rawDesc = "" +
 	"\x19recent_reactions_repaired\x18\x12 \x01(\v2+.rustmeow.bridge.v1.RecentReactionsRepairedH\x00R\x17recentReactionsRepaired\x12A\n" +
 	"\vchat_merged\x18\x13 \x01(\v2\x1e.rustmeow.bridge.v1.ChatMergedH\x00R\n" +
 	"chatMerged\x12J\n" +
-	"\x0etyping_changed\x18\x14 \x01(\v2!.rustmeow.bridge.v1.TypingChangedH\x00R\rtypingChangedB\a\n" +
+	"\x0etyping_changed\x18\x14 \x01(\v2!.rustmeow.bridge.v1.TypingChangedH\x00R\rtypingChanged\x12P\n" +
+	"\x10stickers_changed\x18\x15 \x01(\v2#.rustmeow.bridge.v1.StickersChangedH\x00R\x0fstickersChangedB\a\n" +
 	"\x05event\"V\n" +
 	"\bRpcError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
@@ -6734,7 +7240,8 @@ const file_bridge_proto_rawDesc = "" +
 	"\n" +
 	"ChatMerged\x12\x1e\n" +
 	"\vold_chat_id\x18\x01 \x01(\tR\toldChatId\x12\x1e\n" +
-	"\vnew_chat_id\x18\x02 \x01(\tR\tnewChatId\"e\n" +
+	"\vnew_chat_id\x18\x02 \x01(\tR\tnewChatId\"\x11\n" +
+	"\x0fStickersChanged\"e\n" +
 	"\vTextContent\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12B\n" +
 	"\flink_preview\x18\x02 \x01(\v2\x1f.rustmeow.bridge.v1.LinkPreviewR\vlinkPreview\"\xd2\x01\n" +
@@ -6819,6 +7326,35 @@ const file_bridge_proto_rawDesc = "" +
 	"\twebp_data\x18\x03 \x01(\fR\bwebpData\x12-\n" +
 	"\x13reply_to_message_id\x18\x04 \x01(\tR\x10replyToMessageId\"L\n" +
 	"\x13SendStickerResponse\x125\n" +
+	"\amessage\x18\x01 \x01(\v2\x1b.rustmeow.bridge.v1.MessageR\amessage\"\x15\n" +
+	"\x13ListStickersRequest\"\xaf\x02\n" +
+	"\aSticker\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
+	"\n" +
+	"local_path\x18\x02 \x01(\tR\tlocalPath\x12\x1b\n" +
+	"\tmime_type\x18\x03 \x01(\tR\bmimeType\x12\x1a\n" +
+	"\banimated\x18\x04 \x01(\bR\banimated\x12\x14\n" +
+	"\x05width\x18\x05 \x01(\x05R\x05width\x12\x16\n" +
+	"\x06height\x18\x06 \x01(\x05R\x06height\x12\x1a\n" +
+	"\bfavorite\x18\a \x01(\bR\bfavorite\x12 \n" +
+	"\flast_used_ms\x18\b \x01(\x03R\n" +
+	"lastUsedMs\x12$\n" +
+	"\x0esource_chat_id\x18\t \x01(\tR\fsourceChatId\x12*\n" +
+	"\x11source_message_id\x18\n" +
+	" \x01(\tR\x0fsourceMessageId\"j\n" +
+	"\vStickerPack\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x127\n" +
+	"\bstickers\x18\x03 \x03(\v2\x1b.rustmeow.bridge.v1.StickerR\bstickers\"M\n" +
+	"\x14ListStickersResponse\x125\n" +
+	"\x05packs\x18\x01 \x03(\v2\x1f.rustmeow.bridge.v1.StickerPackR\x05packs\"\xb2\x01\n" +
+	"\x1dSendStickerFromLibraryRequest\x12*\n" +
+	"\x11client_message_id\x18\x01 \x01(\tR\x0fclientMessageId\x12\x17\n" +
+	"\achat_id\x18\x02 \x01(\tR\x06chatId\x12\x1d\n" +
+	"\n" +
+	"sticker_id\x18\x03 \x01(\tR\tstickerId\x12-\n" +
+	"\x13reply_to_message_id\x18\x04 \x01(\tR\x10replyToMessageId\"W\n" +
+	"\x1eSendStickerFromLibraryResponse\x125\n" +
 	"\amessage\x18\x01 \x01(\v2\x1b.rustmeow.bridge.v1.MessageR\amessage\"U\n" +
 	"\x1bGetMessageAttachmentRequest\x12\x17\n" +
 	"\achat_id\x18\x01 \x01(\tR\x06chatId\x12\x1d\n" +
@@ -6882,92 +7418,99 @@ func file_bridge_proto_rawDescGZIP() []byte {
 }
 
 var file_bridge_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 80)
+var file_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 87)
 var file_bridge_proto_goTypes = []any{
-	(ConnectionState)(0),                  // 0: rustmeow.bridge.v1.ConnectionState
-	(ChatKind)(0),                         // 1: rustmeow.bridge.v1.ChatKind
-	(MessageStatus)(0),                    // 2: rustmeow.bridge.v1.MessageStatus
-	(AttachmentKind)(0),                   // 3: rustmeow.bridge.v1.AttachmentKind
-	(*Envelope)(nil),                      // 4: rustmeow.bridge.v1.Envelope
-	(*RpcRequest)(nil),                    // 5: rustmeow.bridge.v1.RpcRequest
-	(*RpcResponse)(nil),                   // 6: rustmeow.bridge.v1.RpcResponse
-	(*BackendEvent)(nil),                  // 7: rustmeow.bridge.v1.BackendEvent
-	(*RpcError)(nil),                      // 8: rustmeow.bridge.v1.RpcError
-	(*HelloRequest)(nil),                  // 9: rustmeow.bridge.v1.HelloRequest
-	(*HelloResponse)(nil),                 // 10: rustmeow.bridge.v1.HelloResponse
-	(*GetAuthStateRequest)(nil),           // 11: rustmeow.bridge.v1.GetAuthStateRequest
-	(*AuthStateResponse)(nil),             // 12: rustmeow.bridge.v1.AuthStateResponse
-	(*StartPairingRequest)(nil),           // 13: rustmeow.bridge.v1.StartPairingRequest
-	(*StartPairingResponse)(nil),          // 14: rustmeow.bridge.v1.StartPairingResponse
-	(*ListChatsRequest)(nil),              // 15: rustmeow.bridge.v1.ListChatsRequest
-	(*ListChatsResponse)(nil),             // 16: rustmeow.bridge.v1.ListChatsResponse
-	(*ListMessagesRequest)(nil),           // 17: rustmeow.bridge.v1.ListMessagesRequest
-	(*ListMessagesResponse)(nil),          // 18: rustmeow.bridge.v1.ListMessagesResponse
-	(*OpenMessageWindowRequest)(nil),      // 19: rustmeow.bridge.v1.OpenMessageWindowRequest
-	(*OpenMessageWindowResponse)(nil),     // 20: rustmeow.bridge.v1.OpenMessageWindowResponse
-	(*ListMessagesAfterRequest)(nil),      // 21: rustmeow.bridge.v1.ListMessagesAfterRequest
-	(*ListMessagesAfterResponse)(nil),     // 22: rustmeow.bridge.v1.ListMessagesAfterResponse
-	(*SearchLocalRequest)(nil),            // 23: rustmeow.bridge.v1.SearchLocalRequest
-	(*ContactSearchResult)(nil),           // 24: rustmeow.bridge.v1.ContactSearchResult
-	(*MessageSearchResult)(nil),           // 25: rustmeow.bridge.v1.MessageSearchResult
-	(*SearchLocalResponse)(nil),           // 26: rustmeow.bridge.v1.SearchLocalResponse
-	(*OpenContactRequest)(nil),            // 27: rustmeow.bridge.v1.OpenContactRequest
-	(*OpenContactResponse)(nil),           // 28: rustmeow.bridge.v1.OpenContactResponse
-	(*ListMessagesAroundRequest)(nil),     // 29: rustmeow.bridge.v1.ListMessagesAroundRequest
-	(*ListMessagesAroundResponse)(nil),    // 30: rustmeow.bridge.v1.ListMessagesAroundResponse
-	(*SendTextRequest)(nil),               // 31: rustmeow.bridge.v1.SendTextRequest
-	(*SendTextResponse)(nil),              // 32: rustmeow.bridge.v1.SendTextResponse
-	(*SendImageRequest)(nil),              // 33: rustmeow.bridge.v1.SendImageRequest
-	(*SendImageResponse)(nil),             // 34: rustmeow.bridge.v1.SendImageResponse
-	(*GetMessageImageRequest)(nil),        // 35: rustmeow.bridge.v1.GetMessageImageRequest
-	(*GetMessageImageResponse)(nil),       // 36: rustmeow.bridge.v1.GetMessageImageResponse
-	(*MarkReadRequest)(nil),               // 37: rustmeow.bridge.v1.MarkReadRequest
-	(*MarkReadResponse)(nil),              // 38: rustmeow.bridge.v1.MarkReadResponse
-	(*LogoutRequest)(nil),                 // 39: rustmeow.bridge.v1.LogoutRequest
-	(*LogoutResponse)(nil),                // 40: rustmeow.bridge.v1.LogoutResponse
-	(*ShutdownRequest)(nil),               // 41: rustmeow.bridge.v1.ShutdownRequest
-	(*ShutdownResponse)(nil),              // 42: rustmeow.bridge.v1.ShutdownResponse
-	(*GetChatAvatarRequest)(nil),          // 43: rustmeow.bridge.v1.GetChatAvatarRequest
-	(*GetChatAvatarResponse)(nil),         // 44: rustmeow.bridge.v1.GetChatAvatarResponse
-	(*SendReactionRequest)(nil),           // 45: rustmeow.bridge.v1.SendReactionRequest
-	(*SendReactionResponse)(nil),          // 46: rustmeow.bridge.v1.SendReactionResponse
-	(*GetChatInfoRequest)(nil),            // 47: rustmeow.bridge.v1.GetChatInfoRequest
-	(*ChatParticipant)(nil),               // 48: rustmeow.bridge.v1.ChatParticipant
-	(*GetChatInfoResponse)(nil),           // 49: rustmeow.bridge.v1.GetChatInfoResponse
-	(*SetTypingRequest)(nil),              // 50: rustmeow.bridge.v1.SetTypingRequest
-	(*SetTypingResponse)(nil),             // 51: rustmeow.bridge.v1.SetTypingResponse
-	(*TypingChanged)(nil),                 // 52: rustmeow.bridge.v1.TypingChanged
-	(*GetParticipantAvatarRequest)(nil),   // 53: rustmeow.bridge.v1.GetParticipantAvatarRequest
-	(*GetParticipantAvatarResponse)(nil),  // 54: rustmeow.bridge.v1.GetParticipantAvatarResponse
-	(*RepairRecentReactionsRequest)(nil),  // 55: rustmeow.bridge.v1.RepairRecentReactionsRequest
-	(*RepairRecentReactionsResponse)(nil), // 56: rustmeow.bridge.v1.RepairRecentReactionsResponse
-	(*Chat)(nil),                          // 57: rustmeow.bridge.v1.Chat
-	(*Message)(nil),                       // 58: rustmeow.bridge.v1.Message
-	(*Reaction)(nil),                      // 59: rustmeow.bridge.v1.Reaction
-	(*ReactionUpdated)(nil),               // 60: rustmeow.bridge.v1.ReactionUpdated
-	(*RecentReactionsRepaired)(nil),       // 61: rustmeow.bridge.v1.RecentReactionsRepaired
-	(*ChatMerged)(nil),                    // 62: rustmeow.bridge.v1.ChatMerged
-	(*TextContent)(nil),                   // 63: rustmeow.bridge.v1.TextContent
-	(*LinkPreview)(nil),                   // 64: rustmeow.bridge.v1.LinkPreview
-	(*ImageContent)(nil),                  // 65: rustmeow.bridge.v1.ImageContent
-	(*AttachmentContent)(nil),             // 66: rustmeow.bridge.v1.AttachmentContent
-	(*ContactContent)(nil),                // 67: rustmeow.bridge.v1.ContactContent
-	(*ContactsContent)(nil),               // 68: rustmeow.bridge.v1.ContactsContent
-	(*LocationContent)(nil),               // 69: rustmeow.bridge.v1.LocationContent
-	(*UnsupportedContent)(nil),            // 70: rustmeow.bridge.v1.UnsupportedContent
-	(*ConnectionChanged)(nil),             // 71: rustmeow.bridge.v1.ConnectionChanged
-	(*PairingQr)(nil),                     // 72: rustmeow.bridge.v1.PairingQr
-	(*SyncProgress)(nil),                  // 73: rustmeow.bridge.v1.SyncProgress
-	(*ChatUpserted)(nil),                  // 74: rustmeow.bridge.v1.ChatUpserted
-	(*MessageUpserted)(nil),               // 75: rustmeow.bridge.v1.MessageUpserted
-	(*ReceiptUpdated)(nil),                // 76: rustmeow.bridge.v1.ReceiptUpdated
-	(*BackendProblem)(nil),                // 77: rustmeow.bridge.v1.BackendProblem
-	(*SendStickerRequest)(nil),            // 78: rustmeow.bridge.v1.SendStickerRequest
-	(*SendStickerResponse)(nil),           // 79: rustmeow.bridge.v1.SendStickerResponse
-	(*GetMessageAttachmentRequest)(nil),   // 80: rustmeow.bridge.v1.GetMessageAttachmentRequest
-	(*GetMessageAttachmentResponse)(nil),  // 81: rustmeow.bridge.v1.GetMessageAttachmentResponse
-	(*SendAttachmentRequest)(nil),         // 82: rustmeow.bridge.v1.SendAttachmentRequest
-	(*SendAttachmentResponse)(nil),        // 83: rustmeow.bridge.v1.SendAttachmentResponse
+	(ConnectionState)(0),                   // 0: rustmeow.bridge.v1.ConnectionState
+	(ChatKind)(0),                          // 1: rustmeow.bridge.v1.ChatKind
+	(MessageStatus)(0),                     // 2: rustmeow.bridge.v1.MessageStatus
+	(AttachmentKind)(0),                    // 3: rustmeow.bridge.v1.AttachmentKind
+	(*Envelope)(nil),                       // 4: rustmeow.bridge.v1.Envelope
+	(*RpcRequest)(nil),                     // 5: rustmeow.bridge.v1.RpcRequest
+	(*RpcResponse)(nil),                    // 6: rustmeow.bridge.v1.RpcResponse
+	(*BackendEvent)(nil),                   // 7: rustmeow.bridge.v1.BackendEvent
+	(*RpcError)(nil),                       // 8: rustmeow.bridge.v1.RpcError
+	(*HelloRequest)(nil),                   // 9: rustmeow.bridge.v1.HelloRequest
+	(*HelloResponse)(nil),                  // 10: rustmeow.bridge.v1.HelloResponse
+	(*GetAuthStateRequest)(nil),            // 11: rustmeow.bridge.v1.GetAuthStateRequest
+	(*AuthStateResponse)(nil),              // 12: rustmeow.bridge.v1.AuthStateResponse
+	(*StartPairingRequest)(nil),            // 13: rustmeow.bridge.v1.StartPairingRequest
+	(*StartPairingResponse)(nil),           // 14: rustmeow.bridge.v1.StartPairingResponse
+	(*ListChatsRequest)(nil),               // 15: rustmeow.bridge.v1.ListChatsRequest
+	(*ListChatsResponse)(nil),              // 16: rustmeow.bridge.v1.ListChatsResponse
+	(*ListMessagesRequest)(nil),            // 17: rustmeow.bridge.v1.ListMessagesRequest
+	(*ListMessagesResponse)(nil),           // 18: rustmeow.bridge.v1.ListMessagesResponse
+	(*OpenMessageWindowRequest)(nil),       // 19: rustmeow.bridge.v1.OpenMessageWindowRequest
+	(*OpenMessageWindowResponse)(nil),      // 20: rustmeow.bridge.v1.OpenMessageWindowResponse
+	(*ListMessagesAfterRequest)(nil),       // 21: rustmeow.bridge.v1.ListMessagesAfterRequest
+	(*ListMessagesAfterResponse)(nil),      // 22: rustmeow.bridge.v1.ListMessagesAfterResponse
+	(*SearchLocalRequest)(nil),             // 23: rustmeow.bridge.v1.SearchLocalRequest
+	(*ContactSearchResult)(nil),            // 24: rustmeow.bridge.v1.ContactSearchResult
+	(*MessageSearchResult)(nil),            // 25: rustmeow.bridge.v1.MessageSearchResult
+	(*SearchLocalResponse)(nil),            // 26: rustmeow.bridge.v1.SearchLocalResponse
+	(*OpenContactRequest)(nil),             // 27: rustmeow.bridge.v1.OpenContactRequest
+	(*OpenContactResponse)(nil),            // 28: rustmeow.bridge.v1.OpenContactResponse
+	(*ListMessagesAroundRequest)(nil),      // 29: rustmeow.bridge.v1.ListMessagesAroundRequest
+	(*ListMessagesAroundResponse)(nil),     // 30: rustmeow.bridge.v1.ListMessagesAroundResponse
+	(*SendTextRequest)(nil),                // 31: rustmeow.bridge.v1.SendTextRequest
+	(*SendTextResponse)(nil),               // 32: rustmeow.bridge.v1.SendTextResponse
+	(*SendImageRequest)(nil),               // 33: rustmeow.bridge.v1.SendImageRequest
+	(*SendImageResponse)(nil),              // 34: rustmeow.bridge.v1.SendImageResponse
+	(*GetMessageImageRequest)(nil),         // 35: rustmeow.bridge.v1.GetMessageImageRequest
+	(*GetMessageImageResponse)(nil),        // 36: rustmeow.bridge.v1.GetMessageImageResponse
+	(*MarkReadRequest)(nil),                // 37: rustmeow.bridge.v1.MarkReadRequest
+	(*MarkReadResponse)(nil),               // 38: rustmeow.bridge.v1.MarkReadResponse
+	(*LogoutRequest)(nil),                  // 39: rustmeow.bridge.v1.LogoutRequest
+	(*LogoutResponse)(nil),                 // 40: rustmeow.bridge.v1.LogoutResponse
+	(*ShutdownRequest)(nil),                // 41: rustmeow.bridge.v1.ShutdownRequest
+	(*ShutdownResponse)(nil),               // 42: rustmeow.bridge.v1.ShutdownResponse
+	(*GetChatAvatarRequest)(nil),           // 43: rustmeow.bridge.v1.GetChatAvatarRequest
+	(*GetChatAvatarResponse)(nil),          // 44: rustmeow.bridge.v1.GetChatAvatarResponse
+	(*SendReactionRequest)(nil),            // 45: rustmeow.bridge.v1.SendReactionRequest
+	(*SendReactionResponse)(nil),           // 46: rustmeow.bridge.v1.SendReactionResponse
+	(*GetChatInfoRequest)(nil),             // 47: rustmeow.bridge.v1.GetChatInfoRequest
+	(*ChatParticipant)(nil),                // 48: rustmeow.bridge.v1.ChatParticipant
+	(*GetChatInfoResponse)(nil),            // 49: rustmeow.bridge.v1.GetChatInfoResponse
+	(*SetTypingRequest)(nil),               // 50: rustmeow.bridge.v1.SetTypingRequest
+	(*SetTypingResponse)(nil),              // 51: rustmeow.bridge.v1.SetTypingResponse
+	(*TypingChanged)(nil),                  // 52: rustmeow.bridge.v1.TypingChanged
+	(*GetParticipantAvatarRequest)(nil),    // 53: rustmeow.bridge.v1.GetParticipantAvatarRequest
+	(*GetParticipantAvatarResponse)(nil),   // 54: rustmeow.bridge.v1.GetParticipantAvatarResponse
+	(*RepairRecentReactionsRequest)(nil),   // 55: rustmeow.bridge.v1.RepairRecentReactionsRequest
+	(*RepairRecentReactionsResponse)(nil),  // 56: rustmeow.bridge.v1.RepairRecentReactionsResponse
+	(*Chat)(nil),                           // 57: rustmeow.bridge.v1.Chat
+	(*Message)(nil),                        // 58: rustmeow.bridge.v1.Message
+	(*Reaction)(nil),                       // 59: rustmeow.bridge.v1.Reaction
+	(*ReactionUpdated)(nil),                // 60: rustmeow.bridge.v1.ReactionUpdated
+	(*RecentReactionsRepaired)(nil),        // 61: rustmeow.bridge.v1.RecentReactionsRepaired
+	(*ChatMerged)(nil),                     // 62: rustmeow.bridge.v1.ChatMerged
+	(*StickersChanged)(nil),                // 63: rustmeow.bridge.v1.StickersChanged
+	(*TextContent)(nil),                    // 64: rustmeow.bridge.v1.TextContent
+	(*LinkPreview)(nil),                    // 65: rustmeow.bridge.v1.LinkPreview
+	(*ImageContent)(nil),                   // 66: rustmeow.bridge.v1.ImageContent
+	(*AttachmentContent)(nil),              // 67: rustmeow.bridge.v1.AttachmentContent
+	(*ContactContent)(nil),                 // 68: rustmeow.bridge.v1.ContactContent
+	(*ContactsContent)(nil),                // 69: rustmeow.bridge.v1.ContactsContent
+	(*LocationContent)(nil),                // 70: rustmeow.bridge.v1.LocationContent
+	(*UnsupportedContent)(nil),             // 71: rustmeow.bridge.v1.UnsupportedContent
+	(*ConnectionChanged)(nil),              // 72: rustmeow.bridge.v1.ConnectionChanged
+	(*PairingQr)(nil),                      // 73: rustmeow.bridge.v1.PairingQr
+	(*SyncProgress)(nil),                   // 74: rustmeow.bridge.v1.SyncProgress
+	(*ChatUpserted)(nil),                   // 75: rustmeow.bridge.v1.ChatUpserted
+	(*MessageUpserted)(nil),                // 76: rustmeow.bridge.v1.MessageUpserted
+	(*ReceiptUpdated)(nil),                 // 77: rustmeow.bridge.v1.ReceiptUpdated
+	(*BackendProblem)(nil),                 // 78: rustmeow.bridge.v1.BackendProblem
+	(*SendStickerRequest)(nil),             // 79: rustmeow.bridge.v1.SendStickerRequest
+	(*SendStickerResponse)(nil),            // 80: rustmeow.bridge.v1.SendStickerResponse
+	(*ListStickersRequest)(nil),            // 81: rustmeow.bridge.v1.ListStickersRequest
+	(*Sticker)(nil),                        // 82: rustmeow.bridge.v1.Sticker
+	(*StickerPack)(nil),                    // 83: rustmeow.bridge.v1.StickerPack
+	(*ListStickersResponse)(nil),           // 84: rustmeow.bridge.v1.ListStickersResponse
+	(*SendStickerFromLibraryRequest)(nil),  // 85: rustmeow.bridge.v1.SendStickerFromLibraryRequest
+	(*SendStickerFromLibraryResponse)(nil), // 86: rustmeow.bridge.v1.SendStickerFromLibraryResponse
+	(*GetMessageAttachmentRequest)(nil),    // 87: rustmeow.bridge.v1.GetMessageAttachmentRequest
+	(*GetMessageAttachmentResponse)(nil),   // 88: rustmeow.bridge.v1.GetMessageAttachmentResponse
+	(*SendAttachmentRequest)(nil),          // 89: rustmeow.bridge.v1.SendAttachmentRequest
+	(*SendAttachmentResponse)(nil),         // 90: rustmeow.bridge.v1.SendAttachmentResponse
 }
 var file_bridge_proto_depIdxs = []int32{
 	5,   // 0: rustmeow.bridge.v1.Envelope.request:type_name -> rustmeow.bridge.v1.RpcRequest
@@ -6991,90 +7534,98 @@ var file_bridge_proto_depIdxs = []int32{
 	23,  // 18: rustmeow.bridge.v1.RpcRequest.search_local:type_name -> rustmeow.bridge.v1.SearchLocalRequest
 	27,  // 19: rustmeow.bridge.v1.RpcRequest.open_contact:type_name -> rustmeow.bridge.v1.OpenContactRequest
 	29,  // 20: rustmeow.bridge.v1.RpcRequest.list_messages_around:type_name -> rustmeow.bridge.v1.ListMessagesAroundRequest
-	78,  // 21: rustmeow.bridge.v1.RpcRequest.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerRequest
+	79,  // 21: rustmeow.bridge.v1.RpcRequest.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerRequest
 	19,  // 22: rustmeow.bridge.v1.RpcRequest.open_message_window:type_name -> rustmeow.bridge.v1.OpenMessageWindowRequest
 	21,  // 23: rustmeow.bridge.v1.RpcRequest.list_messages_after:type_name -> rustmeow.bridge.v1.ListMessagesAfterRequest
 	47,  // 24: rustmeow.bridge.v1.RpcRequest.get_chat_info:type_name -> rustmeow.bridge.v1.GetChatInfoRequest
 	50,  // 25: rustmeow.bridge.v1.RpcRequest.set_typing:type_name -> rustmeow.bridge.v1.SetTypingRequest
-	80,  // 26: rustmeow.bridge.v1.RpcRequest.get_message_attachment:type_name -> rustmeow.bridge.v1.GetMessageAttachmentRequest
-	82,  // 27: rustmeow.bridge.v1.RpcRequest.send_attachment:type_name -> rustmeow.bridge.v1.SendAttachmentRequest
-	8,   // 28: rustmeow.bridge.v1.RpcResponse.error:type_name -> rustmeow.bridge.v1.RpcError
-	10,  // 29: rustmeow.bridge.v1.RpcResponse.hello:type_name -> rustmeow.bridge.v1.HelloResponse
-	12,  // 30: rustmeow.bridge.v1.RpcResponse.auth_state:type_name -> rustmeow.bridge.v1.AuthStateResponse
-	14,  // 31: rustmeow.bridge.v1.RpcResponse.start_pairing:type_name -> rustmeow.bridge.v1.StartPairingResponse
-	16,  // 32: rustmeow.bridge.v1.RpcResponse.list_chats:type_name -> rustmeow.bridge.v1.ListChatsResponse
-	18,  // 33: rustmeow.bridge.v1.RpcResponse.list_messages:type_name -> rustmeow.bridge.v1.ListMessagesResponse
-	32,  // 34: rustmeow.bridge.v1.RpcResponse.send_text:type_name -> rustmeow.bridge.v1.SendTextResponse
-	38,  // 35: rustmeow.bridge.v1.RpcResponse.mark_read:type_name -> rustmeow.bridge.v1.MarkReadResponse
-	40,  // 36: rustmeow.bridge.v1.RpcResponse.logout:type_name -> rustmeow.bridge.v1.LogoutResponse
-	42,  // 37: rustmeow.bridge.v1.RpcResponse.shutdown:type_name -> rustmeow.bridge.v1.ShutdownResponse
-	44,  // 38: rustmeow.bridge.v1.RpcResponse.get_chat_avatar:type_name -> rustmeow.bridge.v1.GetChatAvatarResponse
-	46,  // 39: rustmeow.bridge.v1.RpcResponse.send_reaction:type_name -> rustmeow.bridge.v1.SendReactionResponse
-	54,  // 40: rustmeow.bridge.v1.RpcResponse.get_participant_avatar:type_name -> rustmeow.bridge.v1.GetParticipantAvatarResponse
-	56,  // 41: rustmeow.bridge.v1.RpcResponse.repair_recent_reactions:type_name -> rustmeow.bridge.v1.RepairRecentReactionsResponse
-	34,  // 42: rustmeow.bridge.v1.RpcResponse.send_image:type_name -> rustmeow.bridge.v1.SendImageResponse
-	36,  // 43: rustmeow.bridge.v1.RpcResponse.get_message_image:type_name -> rustmeow.bridge.v1.GetMessageImageResponse
-	26,  // 44: rustmeow.bridge.v1.RpcResponse.search_local:type_name -> rustmeow.bridge.v1.SearchLocalResponse
-	28,  // 45: rustmeow.bridge.v1.RpcResponse.open_contact:type_name -> rustmeow.bridge.v1.OpenContactResponse
-	30,  // 46: rustmeow.bridge.v1.RpcResponse.list_messages_around:type_name -> rustmeow.bridge.v1.ListMessagesAroundResponse
-	79,  // 47: rustmeow.bridge.v1.RpcResponse.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerResponse
-	20,  // 48: rustmeow.bridge.v1.RpcResponse.open_message_window:type_name -> rustmeow.bridge.v1.OpenMessageWindowResponse
-	22,  // 49: rustmeow.bridge.v1.RpcResponse.list_messages_after:type_name -> rustmeow.bridge.v1.ListMessagesAfterResponse
-	49,  // 50: rustmeow.bridge.v1.RpcResponse.get_chat_info:type_name -> rustmeow.bridge.v1.GetChatInfoResponse
-	51,  // 51: rustmeow.bridge.v1.RpcResponse.set_typing:type_name -> rustmeow.bridge.v1.SetTypingResponse
-	81,  // 52: rustmeow.bridge.v1.RpcResponse.get_message_attachment:type_name -> rustmeow.bridge.v1.GetMessageAttachmentResponse
-	83,  // 53: rustmeow.bridge.v1.RpcResponse.send_attachment:type_name -> rustmeow.bridge.v1.SendAttachmentResponse
-	71,  // 54: rustmeow.bridge.v1.BackendEvent.connection_changed:type_name -> rustmeow.bridge.v1.ConnectionChanged
-	72,  // 55: rustmeow.bridge.v1.BackendEvent.pairing_qr:type_name -> rustmeow.bridge.v1.PairingQr
-	73,  // 56: rustmeow.bridge.v1.BackendEvent.sync_progress:type_name -> rustmeow.bridge.v1.SyncProgress
-	74,  // 57: rustmeow.bridge.v1.BackendEvent.chat_upserted:type_name -> rustmeow.bridge.v1.ChatUpserted
-	75,  // 58: rustmeow.bridge.v1.BackendEvent.message_upserted:type_name -> rustmeow.bridge.v1.MessageUpserted
-	76,  // 59: rustmeow.bridge.v1.BackendEvent.receipt_updated:type_name -> rustmeow.bridge.v1.ReceiptUpdated
-	77,  // 60: rustmeow.bridge.v1.BackendEvent.problem:type_name -> rustmeow.bridge.v1.BackendProblem
-	60,  // 61: rustmeow.bridge.v1.BackendEvent.reaction_updated:type_name -> rustmeow.bridge.v1.ReactionUpdated
-	61,  // 62: rustmeow.bridge.v1.BackendEvent.recent_reactions_repaired:type_name -> rustmeow.bridge.v1.RecentReactionsRepaired
-	62,  // 63: rustmeow.bridge.v1.BackendEvent.chat_merged:type_name -> rustmeow.bridge.v1.ChatMerged
-	52,  // 64: rustmeow.bridge.v1.BackendEvent.typing_changed:type_name -> rustmeow.bridge.v1.TypingChanged
-	0,   // 65: rustmeow.bridge.v1.AuthStateResponse.connection_state:type_name -> rustmeow.bridge.v1.ConnectionState
-	57,  // 66: rustmeow.bridge.v1.ListChatsResponse.chats:type_name -> rustmeow.bridge.v1.Chat
-	58,  // 67: rustmeow.bridge.v1.ListMessagesResponse.messages:type_name -> rustmeow.bridge.v1.Message
-	58,  // 68: rustmeow.bridge.v1.OpenMessageWindowResponse.messages:type_name -> rustmeow.bridge.v1.Message
-	58,  // 69: rustmeow.bridge.v1.ListMessagesAfterResponse.messages:type_name -> rustmeow.bridge.v1.Message
-	57,  // 70: rustmeow.bridge.v1.MessageSearchResult.chat:type_name -> rustmeow.bridge.v1.Chat
-	24,  // 71: rustmeow.bridge.v1.SearchLocalResponse.contacts:type_name -> rustmeow.bridge.v1.ContactSearchResult
-	57,  // 72: rustmeow.bridge.v1.SearchLocalResponse.groups:type_name -> rustmeow.bridge.v1.Chat
-	25,  // 73: rustmeow.bridge.v1.SearchLocalResponse.messages:type_name -> rustmeow.bridge.v1.MessageSearchResult
-	57,  // 74: rustmeow.bridge.v1.OpenContactResponse.chat:type_name -> rustmeow.bridge.v1.Chat
-	58,  // 75: rustmeow.bridge.v1.ListMessagesAroundResponse.messages:type_name -> rustmeow.bridge.v1.Message
-	58,  // 76: rustmeow.bridge.v1.SendTextResponse.message:type_name -> rustmeow.bridge.v1.Message
-	58,  // 77: rustmeow.bridge.v1.SendImageResponse.message:type_name -> rustmeow.bridge.v1.Message
-	59,  // 78: rustmeow.bridge.v1.SendReactionResponse.reaction:type_name -> rustmeow.bridge.v1.Reaction
-	57,  // 79: rustmeow.bridge.v1.GetChatInfoResponse.chat:type_name -> rustmeow.bridge.v1.Chat
-	48,  // 80: rustmeow.bridge.v1.GetChatInfoResponse.participants:type_name -> rustmeow.bridge.v1.ChatParticipant
-	1,   // 81: rustmeow.bridge.v1.Chat.kind:type_name -> rustmeow.bridge.v1.ChatKind
-	2,   // 82: rustmeow.bridge.v1.Message.status:type_name -> rustmeow.bridge.v1.MessageStatus
-	59,  // 83: rustmeow.bridge.v1.Message.reactions:type_name -> rustmeow.bridge.v1.Reaction
-	63,  // 84: rustmeow.bridge.v1.Message.text:type_name -> rustmeow.bridge.v1.TextContent
-	70,  // 85: rustmeow.bridge.v1.Message.unsupported:type_name -> rustmeow.bridge.v1.UnsupportedContent
-	65,  // 86: rustmeow.bridge.v1.Message.image:type_name -> rustmeow.bridge.v1.ImageContent
-	66,  // 87: rustmeow.bridge.v1.Message.attachment:type_name -> rustmeow.bridge.v1.AttachmentContent
-	68,  // 88: rustmeow.bridge.v1.Message.contacts:type_name -> rustmeow.bridge.v1.ContactsContent
-	69,  // 89: rustmeow.bridge.v1.Message.location:type_name -> rustmeow.bridge.v1.LocationContent
-	59,  // 90: rustmeow.bridge.v1.ReactionUpdated.reaction:type_name -> rustmeow.bridge.v1.Reaction
-	64,  // 91: rustmeow.bridge.v1.TextContent.link_preview:type_name -> rustmeow.bridge.v1.LinkPreview
-	67,  // 92: rustmeow.bridge.v1.ContactsContent.contacts:type_name -> rustmeow.bridge.v1.ContactContent
-	0,   // 93: rustmeow.bridge.v1.ConnectionChanged.state:type_name -> rustmeow.bridge.v1.ConnectionState
-	57,  // 94: rustmeow.bridge.v1.ChatUpserted.chat:type_name -> rustmeow.bridge.v1.Chat
-	58,  // 95: rustmeow.bridge.v1.MessageUpserted.message:type_name -> rustmeow.bridge.v1.Message
-	2,   // 96: rustmeow.bridge.v1.ReceiptUpdated.status:type_name -> rustmeow.bridge.v1.MessageStatus
-	58,  // 97: rustmeow.bridge.v1.SendStickerResponse.message:type_name -> rustmeow.bridge.v1.Message
-	3,   // 98: rustmeow.bridge.v1.SendAttachmentRequest.kind:type_name -> rustmeow.bridge.v1.AttachmentKind
-	58,  // 99: rustmeow.bridge.v1.SendAttachmentResponse.message:type_name -> rustmeow.bridge.v1.Message
-	100, // [100:100] is the sub-list for method output_type
-	100, // [100:100] is the sub-list for method input_type
-	100, // [100:100] is the sub-list for extension type_name
-	100, // [100:100] is the sub-list for extension extendee
-	0,   // [0:100] is the sub-list for field type_name
+	87,  // 26: rustmeow.bridge.v1.RpcRequest.get_message_attachment:type_name -> rustmeow.bridge.v1.GetMessageAttachmentRequest
+	89,  // 27: rustmeow.bridge.v1.RpcRequest.send_attachment:type_name -> rustmeow.bridge.v1.SendAttachmentRequest
+	81,  // 28: rustmeow.bridge.v1.RpcRequest.list_stickers:type_name -> rustmeow.bridge.v1.ListStickersRequest
+	85,  // 29: rustmeow.bridge.v1.RpcRequest.send_sticker_from_library:type_name -> rustmeow.bridge.v1.SendStickerFromLibraryRequest
+	8,   // 30: rustmeow.bridge.v1.RpcResponse.error:type_name -> rustmeow.bridge.v1.RpcError
+	10,  // 31: rustmeow.bridge.v1.RpcResponse.hello:type_name -> rustmeow.bridge.v1.HelloResponse
+	12,  // 32: rustmeow.bridge.v1.RpcResponse.auth_state:type_name -> rustmeow.bridge.v1.AuthStateResponse
+	14,  // 33: rustmeow.bridge.v1.RpcResponse.start_pairing:type_name -> rustmeow.bridge.v1.StartPairingResponse
+	16,  // 34: rustmeow.bridge.v1.RpcResponse.list_chats:type_name -> rustmeow.bridge.v1.ListChatsResponse
+	18,  // 35: rustmeow.bridge.v1.RpcResponse.list_messages:type_name -> rustmeow.bridge.v1.ListMessagesResponse
+	32,  // 36: rustmeow.bridge.v1.RpcResponse.send_text:type_name -> rustmeow.bridge.v1.SendTextResponse
+	38,  // 37: rustmeow.bridge.v1.RpcResponse.mark_read:type_name -> rustmeow.bridge.v1.MarkReadResponse
+	40,  // 38: rustmeow.bridge.v1.RpcResponse.logout:type_name -> rustmeow.bridge.v1.LogoutResponse
+	42,  // 39: rustmeow.bridge.v1.RpcResponse.shutdown:type_name -> rustmeow.bridge.v1.ShutdownResponse
+	44,  // 40: rustmeow.bridge.v1.RpcResponse.get_chat_avatar:type_name -> rustmeow.bridge.v1.GetChatAvatarResponse
+	46,  // 41: rustmeow.bridge.v1.RpcResponse.send_reaction:type_name -> rustmeow.bridge.v1.SendReactionResponse
+	54,  // 42: rustmeow.bridge.v1.RpcResponse.get_participant_avatar:type_name -> rustmeow.bridge.v1.GetParticipantAvatarResponse
+	56,  // 43: rustmeow.bridge.v1.RpcResponse.repair_recent_reactions:type_name -> rustmeow.bridge.v1.RepairRecentReactionsResponse
+	34,  // 44: rustmeow.bridge.v1.RpcResponse.send_image:type_name -> rustmeow.bridge.v1.SendImageResponse
+	36,  // 45: rustmeow.bridge.v1.RpcResponse.get_message_image:type_name -> rustmeow.bridge.v1.GetMessageImageResponse
+	26,  // 46: rustmeow.bridge.v1.RpcResponse.search_local:type_name -> rustmeow.bridge.v1.SearchLocalResponse
+	28,  // 47: rustmeow.bridge.v1.RpcResponse.open_contact:type_name -> rustmeow.bridge.v1.OpenContactResponse
+	30,  // 48: rustmeow.bridge.v1.RpcResponse.list_messages_around:type_name -> rustmeow.bridge.v1.ListMessagesAroundResponse
+	80,  // 49: rustmeow.bridge.v1.RpcResponse.send_sticker:type_name -> rustmeow.bridge.v1.SendStickerResponse
+	20,  // 50: rustmeow.bridge.v1.RpcResponse.open_message_window:type_name -> rustmeow.bridge.v1.OpenMessageWindowResponse
+	22,  // 51: rustmeow.bridge.v1.RpcResponse.list_messages_after:type_name -> rustmeow.bridge.v1.ListMessagesAfterResponse
+	49,  // 52: rustmeow.bridge.v1.RpcResponse.get_chat_info:type_name -> rustmeow.bridge.v1.GetChatInfoResponse
+	51,  // 53: rustmeow.bridge.v1.RpcResponse.set_typing:type_name -> rustmeow.bridge.v1.SetTypingResponse
+	88,  // 54: rustmeow.bridge.v1.RpcResponse.get_message_attachment:type_name -> rustmeow.bridge.v1.GetMessageAttachmentResponse
+	90,  // 55: rustmeow.bridge.v1.RpcResponse.send_attachment:type_name -> rustmeow.bridge.v1.SendAttachmentResponse
+	84,  // 56: rustmeow.bridge.v1.RpcResponse.list_stickers:type_name -> rustmeow.bridge.v1.ListStickersResponse
+	86,  // 57: rustmeow.bridge.v1.RpcResponse.send_sticker_from_library:type_name -> rustmeow.bridge.v1.SendStickerFromLibraryResponse
+	72,  // 58: rustmeow.bridge.v1.BackendEvent.connection_changed:type_name -> rustmeow.bridge.v1.ConnectionChanged
+	73,  // 59: rustmeow.bridge.v1.BackendEvent.pairing_qr:type_name -> rustmeow.bridge.v1.PairingQr
+	74,  // 60: rustmeow.bridge.v1.BackendEvent.sync_progress:type_name -> rustmeow.bridge.v1.SyncProgress
+	75,  // 61: rustmeow.bridge.v1.BackendEvent.chat_upserted:type_name -> rustmeow.bridge.v1.ChatUpserted
+	76,  // 62: rustmeow.bridge.v1.BackendEvent.message_upserted:type_name -> rustmeow.bridge.v1.MessageUpserted
+	77,  // 63: rustmeow.bridge.v1.BackendEvent.receipt_updated:type_name -> rustmeow.bridge.v1.ReceiptUpdated
+	78,  // 64: rustmeow.bridge.v1.BackendEvent.problem:type_name -> rustmeow.bridge.v1.BackendProblem
+	60,  // 65: rustmeow.bridge.v1.BackendEvent.reaction_updated:type_name -> rustmeow.bridge.v1.ReactionUpdated
+	61,  // 66: rustmeow.bridge.v1.BackendEvent.recent_reactions_repaired:type_name -> rustmeow.bridge.v1.RecentReactionsRepaired
+	62,  // 67: rustmeow.bridge.v1.BackendEvent.chat_merged:type_name -> rustmeow.bridge.v1.ChatMerged
+	52,  // 68: rustmeow.bridge.v1.BackendEvent.typing_changed:type_name -> rustmeow.bridge.v1.TypingChanged
+	63,  // 69: rustmeow.bridge.v1.BackendEvent.stickers_changed:type_name -> rustmeow.bridge.v1.StickersChanged
+	0,   // 70: rustmeow.bridge.v1.AuthStateResponse.connection_state:type_name -> rustmeow.bridge.v1.ConnectionState
+	57,  // 71: rustmeow.bridge.v1.ListChatsResponse.chats:type_name -> rustmeow.bridge.v1.Chat
+	58,  // 72: rustmeow.bridge.v1.ListMessagesResponse.messages:type_name -> rustmeow.bridge.v1.Message
+	58,  // 73: rustmeow.bridge.v1.OpenMessageWindowResponse.messages:type_name -> rustmeow.bridge.v1.Message
+	58,  // 74: rustmeow.bridge.v1.ListMessagesAfterResponse.messages:type_name -> rustmeow.bridge.v1.Message
+	57,  // 75: rustmeow.bridge.v1.MessageSearchResult.chat:type_name -> rustmeow.bridge.v1.Chat
+	24,  // 76: rustmeow.bridge.v1.SearchLocalResponse.contacts:type_name -> rustmeow.bridge.v1.ContactSearchResult
+	57,  // 77: rustmeow.bridge.v1.SearchLocalResponse.groups:type_name -> rustmeow.bridge.v1.Chat
+	25,  // 78: rustmeow.bridge.v1.SearchLocalResponse.messages:type_name -> rustmeow.bridge.v1.MessageSearchResult
+	57,  // 79: rustmeow.bridge.v1.OpenContactResponse.chat:type_name -> rustmeow.bridge.v1.Chat
+	58,  // 80: rustmeow.bridge.v1.ListMessagesAroundResponse.messages:type_name -> rustmeow.bridge.v1.Message
+	58,  // 81: rustmeow.bridge.v1.SendTextResponse.message:type_name -> rustmeow.bridge.v1.Message
+	58,  // 82: rustmeow.bridge.v1.SendImageResponse.message:type_name -> rustmeow.bridge.v1.Message
+	59,  // 83: rustmeow.bridge.v1.SendReactionResponse.reaction:type_name -> rustmeow.bridge.v1.Reaction
+	57,  // 84: rustmeow.bridge.v1.GetChatInfoResponse.chat:type_name -> rustmeow.bridge.v1.Chat
+	48,  // 85: rustmeow.bridge.v1.GetChatInfoResponse.participants:type_name -> rustmeow.bridge.v1.ChatParticipant
+	1,   // 86: rustmeow.bridge.v1.Chat.kind:type_name -> rustmeow.bridge.v1.ChatKind
+	2,   // 87: rustmeow.bridge.v1.Message.status:type_name -> rustmeow.bridge.v1.MessageStatus
+	59,  // 88: rustmeow.bridge.v1.Message.reactions:type_name -> rustmeow.bridge.v1.Reaction
+	64,  // 89: rustmeow.bridge.v1.Message.text:type_name -> rustmeow.bridge.v1.TextContent
+	71,  // 90: rustmeow.bridge.v1.Message.unsupported:type_name -> rustmeow.bridge.v1.UnsupportedContent
+	66,  // 91: rustmeow.bridge.v1.Message.image:type_name -> rustmeow.bridge.v1.ImageContent
+	67,  // 92: rustmeow.bridge.v1.Message.attachment:type_name -> rustmeow.bridge.v1.AttachmentContent
+	69,  // 93: rustmeow.bridge.v1.Message.contacts:type_name -> rustmeow.bridge.v1.ContactsContent
+	70,  // 94: rustmeow.bridge.v1.Message.location:type_name -> rustmeow.bridge.v1.LocationContent
+	59,  // 95: rustmeow.bridge.v1.ReactionUpdated.reaction:type_name -> rustmeow.bridge.v1.Reaction
+	65,  // 96: rustmeow.bridge.v1.TextContent.link_preview:type_name -> rustmeow.bridge.v1.LinkPreview
+	68,  // 97: rustmeow.bridge.v1.ContactsContent.contacts:type_name -> rustmeow.bridge.v1.ContactContent
+	0,   // 98: rustmeow.bridge.v1.ConnectionChanged.state:type_name -> rustmeow.bridge.v1.ConnectionState
+	57,  // 99: rustmeow.bridge.v1.ChatUpserted.chat:type_name -> rustmeow.bridge.v1.Chat
+	58,  // 100: rustmeow.bridge.v1.MessageUpserted.message:type_name -> rustmeow.bridge.v1.Message
+	2,   // 101: rustmeow.bridge.v1.ReceiptUpdated.status:type_name -> rustmeow.bridge.v1.MessageStatus
+	58,  // 102: rustmeow.bridge.v1.SendStickerResponse.message:type_name -> rustmeow.bridge.v1.Message
+	82,  // 103: rustmeow.bridge.v1.StickerPack.stickers:type_name -> rustmeow.bridge.v1.Sticker
+	83,  // 104: rustmeow.bridge.v1.ListStickersResponse.packs:type_name -> rustmeow.bridge.v1.StickerPack
+	58,  // 105: rustmeow.bridge.v1.SendStickerFromLibraryResponse.message:type_name -> rustmeow.bridge.v1.Message
+	3,   // 106: rustmeow.bridge.v1.SendAttachmentRequest.kind:type_name -> rustmeow.bridge.v1.AttachmentKind
+	58,  // 107: rustmeow.bridge.v1.SendAttachmentResponse.message:type_name -> rustmeow.bridge.v1.Message
+	108, // [108:108] is the sub-list for method output_type
+	108, // [108:108] is the sub-list for method input_type
+	108, // [108:108] is the sub-list for extension type_name
+	108, // [108:108] is the sub-list for extension extendee
+	0,   // [0:108] is the sub-list for field type_name
 }
 
 func init() { file_bridge_proto_init() }
@@ -7113,6 +7664,8 @@ func file_bridge_proto_init() {
 		(*RpcRequest_SetTyping)(nil),
 		(*RpcRequest_GetMessageAttachment)(nil),
 		(*RpcRequest_SendAttachment)(nil),
+		(*RpcRequest_ListStickers)(nil),
+		(*RpcRequest_SendStickerFromLibrary)(nil),
 	}
 	file_bridge_proto_msgTypes[2].OneofWrappers = []any{
 		(*RpcResponse_Error)(nil),
@@ -7141,6 +7694,8 @@ func file_bridge_proto_init() {
 		(*RpcResponse_SetTyping)(nil),
 		(*RpcResponse_GetMessageAttachment)(nil),
 		(*RpcResponse_SendAttachment)(nil),
+		(*RpcResponse_ListStickers)(nil),
+		(*RpcResponse_SendStickerFromLibrary)(nil),
 	}
 	file_bridge_proto_msgTypes[3].OneofWrappers = []any{
 		(*BackendEvent_ConnectionChanged)(nil),
@@ -7154,6 +7709,7 @@ func file_bridge_proto_init() {
 		(*BackendEvent_RecentReactionsRepaired)(nil),
 		(*BackendEvent_ChatMerged)(nil),
 		(*BackendEvent_TypingChanged)(nil),
+		(*BackendEvent_StickersChanged)(nil),
 	}
 	file_bridge_proto_msgTypes[54].OneofWrappers = []any{
 		(*Message_Text)(nil),
@@ -7169,7 +7725,7 @@ func file_bridge_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bridge_proto_rawDesc), len(file_bridge_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   80,
+			NumMessages:   87,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

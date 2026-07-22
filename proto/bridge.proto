@@ -44,6 +44,8 @@ message RpcRequest {
     SetTypingRequest set_typing = 23;
     GetMessageAttachmentRequest get_message_attachment = 24;
     SendAttachmentRequest send_attachment = 25;
+    ListStickersRequest list_stickers = 26;
+    SendStickerFromLibraryRequest send_sticker_from_library = 27;
   }
 }
 
@@ -76,6 +78,8 @@ message RpcResponse {
     SetTypingResponse set_typing = 32;
     GetMessageAttachmentResponse get_message_attachment = 33;
     SendAttachmentResponse send_attachment = 34;
+    ListStickersResponse list_stickers = 35;
+    SendStickerFromLibraryResponse send_sticker_from_library = 36;
   }
 }
 
@@ -96,6 +100,7 @@ message BackendEvent {
     RecentReactionsRepaired recent_reactions_repaired = 18;
     ChatMerged chat_merged = 19;
     TypingChanged typing_changed = 20;
+    StickersChanged stickers_changed = 21;
   }
 }
 
@@ -496,6 +501,11 @@ message ChatMerged {
   string new_chat_id = 2;
 }
 
+// The sticker library changed: a favourite was added/removed via WhatsApp
+// app-state sync, or a new sticker message arrived/was sent. Carries no
+// payload; the desktop re-calls ListStickers when it needs a fresh view.
+message StickersChanged {}
+
 message TextContent {
   string text = 1;
   LinkPreview link_preview = 2;
@@ -610,6 +620,52 @@ message SendStickerRequest {
 }
 
 message SendStickerResponse { Message message = 1; }
+
+message ListStickersRequest {}
+
+// One sticker available for reuse, assembled from local history and/or
+// synced WhatsApp app-state. `id` is stable across calls for the same
+// underlying media: the hex-encoded plaintext file hash when known (history
+// entries), otherwise the hex-encoded encrypted file hash (favourites-only
+// entries, since WhatsApp's favouriteSticker app-state action never carries
+// the plaintext hash). The two ID spaces do not coincide, so the same
+// sticker favourited on the phone and also present in chat history can
+// legitimately appear under two different IDs in two different packs.
+message Sticker {
+  string id = 1;
+  // Empty until this sticker has been downloaded into the local media cache.
+  string local_path = 2;
+  string mime_type = 3;
+  bool animated = 4;
+  int32 width = 5;
+  int32 height = 6;
+  bool favorite = 7;
+  // 0 when unknown (e.g. a favourite never seen in local history).
+  int64 last_used_ms = 8;
+  // A message that can supply this sticker's bytes on demand. Empty for
+  // favourites-only entries; such entries are downloaded directly instead.
+  string source_chat_id = 9;
+  string source_message_id = 10;
+}
+
+message StickerPack {
+  string id = 1;
+  string name = 2;
+  repeated Sticker stickers = 3;
+}
+
+message ListStickersResponse { repeated StickerPack packs = 1; }
+
+message SendStickerFromLibraryRequest {
+  // Stable UUID with the same idempotency contract as other sends.
+  string client_message_id = 1;
+  string chat_id = 2;
+  // A Sticker.id from a previous ListStickers response.
+  string sticker_id = 3;
+  string reply_to_message_id = 4;
+}
+
+message SendStickerFromLibraryResponse { Message message = 1; }
 
 message GetMessageAttachmentRequest {
   string chat_id = 1;
