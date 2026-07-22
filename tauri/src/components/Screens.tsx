@@ -166,7 +166,7 @@ export function LogoutDialog(props: { model: AppModel }) {
       >
         <div class="dialog-card">
           <h2 id="logout-title">Log out of Rust Meow?</h2>
-          <p id="logout-description">This unlinks the device and permanently removes the local session, message cache, avatars, and downloaded media from this computer.</p>
+          <p id="logout-description">This unlinks the device and removes the local session, message cache, avatars, and downloaded media stored by Rust Meow on this computer.</p>
           <div class="dialog-actions">
             <button ref={cancelButton} type="button" class="secondary-button" onClick={() => actions.setLogoutConfirmation(false)}>Cancel</button>
             <button ref={logoutButton} type="button" class="danger-button" onClick={() => void actions.logout()}>Log out and delete local data</button>
