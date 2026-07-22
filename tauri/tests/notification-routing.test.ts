@@ -35,6 +35,25 @@ test("queued activation follows a chat merge and remains ordered", async () => {
   assert.deepEqual(routed, ["new/first", "new/second"]);
 });
 
+test("a chat merge deduplicates a canonical target queued during routing", async () => {
+  const routed: string[] = [];
+  let releaseFirst!: () => void;
+  const firstRoute = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const queue = new NotificationActivationQueue(async ({ chatId, messageId }) => {
+    routed.push(`${chatId}/${messageId}`);
+    await firstRoute;
+  });
+  queue.markReady();
+  queue.enqueue({ chatId: "old", messageId: "message" });
+  queue.enqueue({ chatId: "new", messageId: "message" });
+  queue.mergeChatId("old", "new");
+  releaseFirst();
+  await queue.flush();
+  assert.deepEqual(routed, ["old/message"]);
+});
+
 test("invalid activation payloads are ignored", () => {
   const queue = new NotificationActivationQueue(() => undefined);
   assert.equal(queue.enqueue(null), false);

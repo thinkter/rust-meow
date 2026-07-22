@@ -72,13 +72,13 @@ export class NotificationActivationQueue {
   mergeChatId(oldChatId: string, newChatId: string): void {
     if (!oldChatId || !newChatId || oldChatId === newChatId) return;
     this.aliases.set(oldChatId, this.resolveChatId(newChatId));
-    this.rekey(this.pending);
     const delivered = new Map<string, true>();
     for (const key of this.delivered.keys()) {
       const parsed = JSON.parse(key) as [string, string];
       delivered.set(targetKey(this.canonicalize({ chatId: parsed[0], messageId: parsed[1] })), true);
     }
     this.delivered = delivered;
+    this.rekey(this.pending);
   }
 
   async flush(): Promise<void> {
