@@ -27,6 +27,7 @@ import {
   type SearchResults,
 } from "../lib/types";
 import { pairingStartupDecision } from "./pairing";
+import { activeConversationIds, backendLifecycleDecision } from "./backend-lifecycle";
 import { createPreferences } from "./preferences";
 import { optimisticUnreadCount, shouldRestoreOptimisticUnread } from "./unread";
 import {
@@ -1415,8 +1416,24 @@ export function createAppModel() {
           }
         }
         break;
-      case "bridgeExited":
-        fatal(`The WhatsApp backend stopped: ${event.payload.message}`);
+      case "bridgeLifecycle":
+        {
+          const decision = backendLifecycleDecision(event.payload);
+          if (decision.phase === "reconnecting") {
+            batch(() => {
+              setState("connection", ConnectionState.Reconnecting);
+              setState("connectionDetail", decision.detail);
+            });
+          } else if (decision.phase === "resync") {
+            batch(() => {
+              setState("connection", ConnectionState.Reconnecting);
+              setState("connectionDetail", "Refreshing chats after backend restart");
+            });
+            void resyncAfterBackendRestart(decision.epoch);
+          } else {
+            fatal(decision.message);
+          }
+        }
         break;
       case "recentReactionsRepaired":
         if (event.payload.recoveredReactions > 0 && state.conversations[event.payload.chatId]) {
@@ -1475,7 +1492,7 @@ export function createAppModel() {
     if (resyncing) return;
     resyncing = true;
     try {
-      const openChatIds = [...new Set(state.panes.map((pane) => pane.activeChatId).filter(Boolean))];
+      const openChatIds = activeConversationIds(state.panes);
       await Promise.all([
         ...openChatIds.map((chatId) => loadConversation(chatId).catch(() => undefined)),
         loadChats(true),
@@ -1483,6 +1500,34 @@ export function createAppModel() {
       toast("Chat state refreshed after a missed backend event", "info");
     } catch (error) {
       toast(`Could not refresh after the event gap: ${normalizeBridgeError(error).message}`);
+    } finally {
+      resyncing = false;
+    }
+  }
+
+  async function resyncAfterBackendRestart(epoch: number) {
+    if (resyncing) return;
+    resyncing = true;
+    try {
+      const [hello, auth] = await Promise.all([bridge.hello(), bridge.getAuthState()]);
+      const openChatIds = activeConversationIds(state.panes);
+      batch(() => {
+        setState("backendVersion", hello.backendVersion);
+        setState("connection", auth.connectionState);
+        setState("connectionDetail", "");
+        setState("ownUserId", auth.ownUserId);
+        setState("screen", pairingStartupDecision(auth).screen);
+      });
+      await Promise.all([
+        loadChats(true),
+        ...openChatIds.map((chatId) => loadConversation(chatId)),
+      ]);
+      toast(`Backend reconnected and refreshed (epoch ${epoch})`, "info");
+    } catch (error) {
+      const bridgeError = normalizeBridgeError(error);
+      if (bridgeError.code !== "backend_epoch_changed") {
+        toast(`Backend reconnected but refresh failed: ${bridgeError.message}`);
+      }
     } finally {
       resyncing = false;
     }

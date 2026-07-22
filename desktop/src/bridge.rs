@@ -1,6 +1,6 @@
 use std::{
     env,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -21,8 +21,22 @@ const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug)]
 pub enum BridgeMessage {
     Envelope(Box<proto::Envelope>),
-    Exited(String),
+    Exited(BridgeExit),
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BridgeExitKind {
+    Transient,
+    Fatal,
+}
+
+#[derive(Clone, Debug)]
+pub struct BridgeExit {
+    pub kind: BridgeExitKind,
+    pub message: String,
+}
+
+const MAX_EXIT_DIAGNOSTIC_BYTES: usize = 8 * 1024;
 
 pub struct BackendClient {
     outgoing: async_channel::Sender<proto::Envelope>,
@@ -48,24 +62,50 @@ impl BackendClient {
             .arg(log_file)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("start backend {}", executable.display()))?;
 
         let stdin = child.stdin.take().context("backend stdin unavailable")?;
         let stdout = child.stdout.take().context("backend stdout unavailable")?;
+        let stderr = child.stderr.take().context("backend stderr unavailable")?;
         let child = Arc::new(Mutex::new(child));
+        let diagnostics = Arc::new(Mutex::new(String::new()));
         let (outgoing, outgoing_rx) = async_channel::bounded(256);
         let (incoming_tx, incoming) = async_channel::bounded(1024);
 
         thread::Builder::new()
             .name("bridge-writer".into())
             .spawn(move || writer_loop(stdin, outgoing_rx))?;
+        let stderr_thread = thread::Builder::new().name("bridge-stderr".into()).spawn({
+            let diagnostics = diagnostics.clone();
+            move || capture_stderr(stderr, diagnostics)
+        })?;
+        let reader_child = child.clone();
         thread::Builder::new()
             .name("bridge-reader".into())
             .spawn(move || {
                 if let Err(error) = reader_loop(stdout, &incoming_tx) {
-                    let _ = incoming_tx.send_blocking(BridgeMessage::Exited(error.to_string()));
+                    let status = reader_child
+                        .lock()
+                        .ok()
+                        .and_then(|mut child| child.wait().ok())
+                        .map(|status| status.to_string());
+                    let _ = stderr_thread.join();
+                    let diagnostic = diagnostics
+                        .lock()
+                        .map(|value| value.clone())
+                        .unwrap_or_default();
+                    let message = match (diagnostic.trim(), status) {
+                        ("", Some(status)) => format!("{error}; backend {status}"),
+                        ("", None) => error.to_string(),
+                        (diagnostic, Some(status)) => format!("{diagnostic}; backend {status}"),
+                        (diagnostic, None) => diagnostic.to_owned(),
+                    };
+                    let _ = incoming_tx.send_blocking(BridgeMessage::Exited(BridgeExit {
+                        kind: classify_exit(&message),
+                        message,
+                    }));
                 }
             })?;
 
@@ -78,14 +118,14 @@ impl BackendClient {
 
     pub fn send(&self, request_id: u64, request: rpc_request::Request) -> Result<()> {
         self.outgoing
-            .send_blocking(proto::Envelope {
+            .try_send(proto::Envelope {
                 protocol_version: PROTOCOL_VERSION,
                 request_id,
                 body: Some(envelope::Body::Request(proto::RpcRequest {
                     request: Some(request),
                 })),
             })
-            .context("backend writer stopped")
+            .context("backend writer unavailable or backpressured")
     }
 
     pub fn disconnected() -> Self {
@@ -96,6 +136,19 @@ impl BackendClient {
             outgoing,
             incoming,
             child: None,
+        }
+    }
+
+    /// Stop accepting new work, request a graceful backend shutdown, and
+    /// independently guarantee the child is reaped after the grace period.
+    pub fn shutdown(&self) {
+        let _ = self.send(
+            u64::MAX,
+            rpc_request::Request::Shutdown(proto::ShutdownRequest {}),
+        );
+        self.outgoing.close();
+        if let Some(child) = &self.child {
+            spawn_reaper(child.clone());
         }
     }
 
@@ -123,33 +176,62 @@ impl BackendClient {
     }
 }
 
-impl Drop for BackendClient {
-    fn drop(&mut self) {
-        let _ = self.send(
-            u64::MAX,
-            rpc_request::Request::Shutdown(proto::ShutdownRequest {}),
-        );
-        self.outgoing.close();
-        if let Some(child) = &self.child {
-            let child = child.clone();
-            let _ = thread::Builder::new()
-                .name("backend-reaper".into())
-                .spawn(move || {
-                    if let Ok(mut child) = child.lock() {
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_secs(3);
-                        while std::time::Instant::now() < deadline {
-                            if child.try_wait().ok().flatten().is_some() {
-                                return;
-                            }
-                            thread::sleep(std::time::Duration::from_millis(25));
-                        }
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                });
+fn capture_stderr(stderr: impl Read, diagnostics: Arc<Mutex<String>>) {
+    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        eprintln!("rust-meow-backend: {line}");
+        if let Ok(mut captured) = diagnostics.lock() {
+            if captured.len() + line.len() + 1 > MAX_EXIT_DIAGNOSTIC_BYTES {
+                let remove = (captured.len() + line.len() + 1 - MAX_EXIT_DIAGNOSTIC_BYTES)
+                    .min(captured.len());
+                captured.drain(..remove);
+            }
+            captured.push_str(&line);
+            captured.push('\n');
         }
     }
+}
+
+pub fn classify_exit(message: &str) -> BridgeExitKind {
+    let message = message.to_ascii_lowercase();
+    if [
+        "unsupported_protocol",
+        "protocol version",
+        "profile is already in use",
+        "database disk image is malformed",
+        "file is not a database",
+        "database corruption",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        BridgeExitKind::Fatal
+    } else {
+        BridgeExitKind::Transient
+    }
+}
+
+impl Drop for BackendClient {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn spawn_reaper(child: Arc<Mutex<Child>>) {
+    let _ = thread::Builder::new()
+        .name("backend-reaper".into())
+        .spawn(move || {
+            if let Ok(mut child) = child.lock() {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while std::time::Instant::now() < deadline {
+                    if child.try_wait().ok().flatten().is_some() {
+                        return;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(25));
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        });
 }
 
 fn writer_loop(mut writer: impl Write, outgoing: async_channel::Receiver<proto::Envelope>) {
@@ -1078,5 +1160,22 @@ mod tests {
             })
             .collect();
         assert_eq!(sequences, [41, 42]);
+    }
+
+    #[test]
+    fn exit_classification_never_retries_terminal_profile_protocol_or_data_failures() {
+        for message in [
+            "Rust Meow profile is already in use",
+            "unsupported_protocol",
+            "backend sent protocol version 99",
+            "database disk image is malformed",
+            "file is not a database",
+        ] {
+            assert_eq!(classify_exit(message), BridgeExitKind::Fatal, "{message}");
+        }
+        assert_eq!(
+            classify_exit("failed to fill whole buffer; backend signal: 9"),
+            BridgeExitKind::Transient
+        );
     }
 }

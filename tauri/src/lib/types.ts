@@ -405,7 +405,11 @@ export interface TypingChanged {
   recording: boolean;
 }
 
-export interface BridgeExited {
+export interface BridgeLifecycle {
+  epoch: number;
+  state: "reconnecting" | "reconnected" | "retryExhausted" | "fatal";
+  attempt: number;
+  maxAttempts: number;
   message: string;
 }
 
@@ -422,7 +426,7 @@ export type FrontendEventPayload =
   | { type: "recentReactionsRepaired"; payload: RecentReactionsRepaired }
   | { type: "chatMerged"; payload: ChatMerged }
   | { type: "typingChanged"; payload: TypingChanged }
-  | { type: "bridgeExited"; payload: BridgeExited };
+  | { type: "bridgeLifecycle"; payload: BridgeLifecycle };
 
 /** Backend sequences are monotonic and nonzero; shell-local events use zero. */
 export type FrontendEvent = FrontendEventPayload & { sequence: number };

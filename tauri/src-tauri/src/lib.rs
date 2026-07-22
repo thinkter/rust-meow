@@ -14,10 +14,10 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use proto::{rpc_request, rpc_response};
@@ -34,7 +34,27 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 // backend's authoritative result instead of orphaning an in-flight media RPC.
 const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(22 * 60);
 
-type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<proto::RpcResponse>>>>;
+const MAX_PENDING_REQUESTS: usize = 512;
+const MAX_RESTART_ATTEMPTS: u32 = 5;
+const STABLE_EPOCH: Duration = Duration::from_secs(30);
+
+type PendingResult = Result<proto::RpcResponse, CommandError>;
+
+struct PendingRequest {
+    epoch: u64,
+    sender: oneshot::Sender<PendingResult>,
+}
+
+struct ActiveClient {
+    epoch: u64,
+    client: Arc<bridge::BackendClient>,
+}
+
+#[derive(Default)]
+struct TransportState {
+    active: Option<ActiveClient>,
+    pending: HashMap<u64, PendingRequest>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,12 +81,16 @@ enum FrontendEventKind {
     ChatMerged(proto::ChatMerged),
     TypingChanged(proto::TypingChanged),
     StickersChanged(proto::StickersChanged),
-    BridgeExited(BridgeExited),
+    BridgeLifecycle(BridgeLifecycle),
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BridgeExited {
+struct BridgeLifecycle {
+    epoch: u64,
+    state: &'static str,
+    attempt: u32,
+    max_attempts: u32,
     message: String,
 }
 
@@ -140,7 +164,7 @@ impl EventSequence {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CommandError {
     code: String,
@@ -154,6 +178,30 @@ impl CommandError {
             code: "transport".into(),
             message: message.into(),
             retryable: true,
+        }
+    }
+
+    fn epoch_changed(epoch: u64) -> Self {
+        Self {
+            code: "backend_epoch_changed".into(),
+            message: format!("backend epoch {epoch} ended before replying"),
+            retryable: true,
+        }
+    }
+
+    fn reconnecting() -> Self {
+        Self {
+            code: "backend_reconnecting".into(),
+            message: "the WhatsApp backend is reconnecting".into(),
+            retryable: true,
+        }
+    }
+
+    fn shutting_down() -> Self {
+        Self {
+            code: "app_shutting_down".into(),
+            message: "the application is shutting down".into(),
+            retryable: false,
         }
     }
 
@@ -192,90 +240,40 @@ impl From<proto::RpcError> for CommandError {
     }
 }
 
-struct BridgeService {
-    client: bridge::BackendClient,
+type BridgeService = Arc<BridgeServiceInner>;
+
+struct BridgeServiceInner {
+    fake: bool,
     next_request_id: AtomicU64,
-    pending: PendingMap,
+    epoch: AtomicU64,
+    stopping: AtomicBool,
+    transport: StdMutex<TransportState>,
     subscribers: Arc<Mutex<Vec<Channel<FrontendEvent>>>>,
 }
 
-impl BridgeService {
-    fn start(fake: bool) -> anyhow::Result<Self> {
-        let client = bridge::BackendClient::start(fake)?;
-        let incoming = client.incoming.clone();
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+impl BridgeServiceInner {
+    fn start(fake: bool) -> anyhow::Result<Arc<Self>> {
+        let client = Arc::new(bridge::BackendClient::start(fake)?);
         let subscribers = Arc::new(Mutex::new(Vec::<Channel<FrontendEvent>>::new()));
-        let listener_pending = pending.clone();
-        let listener_subscribers = subscribers.clone();
-
-        tauri::async_runtime::spawn(async move {
-            let mut event_sequence = EventSequence::default();
-            while let Ok(message) = incoming.recv().await {
-                match message {
-                    bridge::BridgeMessage::Envelope(envelope) => match envelope.body {
-                        Some(proto::envelope::Body::Response(response)) => {
-                            if let Some(sender) =
-                                listener_pending.lock().await.remove(&envelope.request_id)
-                            {
-                                let _ = sender.send(response);
-                            }
-                        }
-                        Some(proto::envelope::Body::Event(event)) if envelope.request_id == 0 => {
-                            match event_sequence.observe(event.sequence) {
-                                SequenceObservation::Invalid => {
-                                    send_event(
-                                        &listener_subscribers,
-                                        FrontendEvent::problem(
-                                            "event_sequence_invalid",
-                                            "Backend emitted an unsequenced event; refresh may be required"
-                                                .into(),
-                                        ),
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                                SequenceObservation::Stale => continue,
-                                SequenceObservation::Gap { expected, received } => {
-                                    send_event(
-                                        &listener_subscribers,
-                                        FrontendEvent::problem(
-                                            "event_sequence_gap",
-                                            format!(
-                                                "Backend event gap (expected {expected}, received {received}); refresh may be required"
-                                            ),
-                                        ),
-                                    )
-                                    .await;
-                                }
-                                SequenceObservation::Accept => {}
-                            }
-                            if let Some(event) = Option::<FrontendEvent>::from(event) {
-                                send_event(&listener_subscribers, event).await;
-                            }
-                        }
-                        _ => {}
-                    },
-                    bridge::BridgeMessage::Exited(message) => {
-                        listener_pending.lock().await.clear();
-                        send_event(
-                            &listener_subscribers,
-                            FrontendEvent::local(FrontendEventKind::BridgeExited(BridgeExited {
-                                message,
-                            })),
-                        )
-                        .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Self {
-            client,
+        let service = Arc::new(Self {
+            fake,
             next_request_id: AtomicU64::new(1),
-            pending,
+            epoch: AtomicU64::new(1),
+            stopping: AtomicBool::new(false),
+            transport: StdMutex::new(TransportState {
+                active: Some(ActiveClient {
+                    epoch: 1,
+                    client: client.clone(),
+                }),
+                pending: HashMap::new(),
+            }),
             subscribers,
-        })
+        });
+        let supervisor = service.clone();
+        tauri::async_runtime::spawn(async move {
+            supervisor.run_supervisor(client, 1).await;
+        });
+        Ok(service)
     }
 
     async fn subscribe(&self, channel: Channel<FrontendEvent>) {
@@ -292,22 +290,46 @@ impl BridgeService {
             return Err(CommandError::transport("request IDs exhausted"));
         }
 
-        let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(request_id, sender);
-        if let Err(error) = self.client.send(request_id, request) {
-            self.pending.lock().await.remove(&request_id);
-            return Err(CommandError::transport(error.to_string()));
+        let (sender, receiver) = oneshot::channel::<PendingResult>();
+        {
+            let mut transport = self
+                .transport
+                .lock()
+                .expect("bridge transport lock poisoned");
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(CommandError::shutting_down());
+            }
+            if transport.pending.len() >= MAX_PENDING_REQUESTS {
+                return Err(CommandError::transport("too many pending backend requests"));
+            }
+            let Some(active) = transport.active.as_ref() else {
+                return Err(CommandError::reconnecting());
+            };
+            let epoch = active.epoch;
+            let client = active.client.clone();
+            transport
+                .pending
+                .insert(request_id, PendingRequest { epoch, sender });
+            if let Err(error) = client.send(request_id, request) {
+                transport.pending.remove(&request_id);
+                return Err(CommandError::transport(error.to_string()));
+            }
         }
 
         let response = match tokio::time::timeout(timeout, receiver).await {
-            Ok(Ok(response)) => response,
+            Ok(Ok(Ok(response))) => response,
+            Ok(Ok(Err(error))) => return Err(error),
             Ok(Err(_)) => {
                 return Err(CommandError::transport(
                     "the backend stopped before replying",
                 ));
             }
             Err(_) => {
-                self.pending.lock().await.remove(&request_id);
+                self.transport
+                    .lock()
+                    .expect("bridge transport lock poisoned")
+                    .pending
+                    .remove(&request_id);
                 return Err(CommandError::transport("the backend request timed out"));
             }
         };
@@ -316,6 +338,217 @@ impl BridgeService {
             Some(rpc_response::Result::Error(error)) => Err(error.into()),
             Some(result) => Ok(result),
             None => Err(CommandError::protocol("backend response had no result")),
+        }
+    }
+
+    async fn run_supervisor(
+        self: Arc<Self>,
+        mut client: Arc<bridge::BackendClient>,
+        mut epoch: u64,
+    ) {
+        let mut attempts = 0;
+        loop {
+            let started = Instant::now();
+            let exit = self.listen_epoch(client.clone(), epoch).await;
+            self.end_epoch(epoch, CommandError::epoch_changed(epoch))
+                .await;
+            if self.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            if exit.kind == bridge::BridgeExitKind::Fatal {
+                self.lifecycle(epoch, "fatal", attempts, exit.message).await;
+                return;
+            }
+            if started.elapsed() >= STABLE_EPOCH {
+                attempts = 0;
+            }
+
+            loop {
+                if attempts >= MAX_RESTART_ATTEMPTS {
+                    self.lifecycle(epoch, "retryExhausted", attempts, exit.message.clone())
+                        .await;
+                    return;
+                }
+                attempts += 1;
+                self.lifecycle(epoch, "reconnecting", attempts, exit.message.clone())
+                    .await;
+                tokio::time::sleep(restart_delay(attempts)).await;
+                if self.stopping.load(Ordering::Acquire) {
+                    return;
+                }
+                match bridge::BackendClient::start(self.fake) {
+                    Ok(next) => {
+                        epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+                        client = Arc::new(next);
+                        self.transport
+                            .lock()
+                            .expect("bridge transport lock poisoned")
+                            .active = Some(ActiveClient {
+                            epoch,
+                            client: client.clone(),
+                        });
+                        self.lifecycle(epoch, "reconnected", attempts, String::new())
+                            .await;
+                        break;
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if bridge::classify_exit(&message) == bridge::BridgeExitKind::Fatal {
+                            self.lifecycle(epoch, "fatal", attempts, message).await;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn listen_epoch(
+        &self,
+        client: Arc<bridge::BackendClient>,
+        epoch: u64,
+    ) -> bridge::BridgeExit {
+        let incoming = client.incoming.clone();
+        let mut event_sequence = EventSequence::default();
+        let mut terminal_reason = None;
+        while let Ok(message) = incoming.recv().await {
+            match message {
+                bridge::BridgeMessage::Envelope(envelope) => match envelope.body {
+                    Some(proto::envelope::Body::Response(response)) => {
+                        if let Some(rpc_response::Result::Error(error)) = response.result.as_ref()
+                            && !error.retryable
+                            && (error.code == "unsupported_protocol"
+                                || error.code.contains("corrupt"))
+                        {
+                            terminal_reason = Some(error.message.clone());
+                        }
+                        let pending = self
+                            .transport
+                            .lock()
+                            .expect("bridge transport lock poisoned")
+                            .pending
+                            .remove(&envelope.request_id);
+                        if let Some(pending) = pending.filter(|pending| pending.epoch == epoch) {
+                            let _ = pending.sender.send(Ok(response));
+                        }
+                    }
+                    Some(proto::envelope::Body::Event(event)) if envelope.request_id == 0 => {
+                        if let Some(proto::backend_event::Event::Problem(problem)) =
+                            event.event.as_ref()
+                            && problem.fatal
+                        {
+                            terminal_reason = Some(problem.message.clone());
+                        }
+                        match event_sequence.observe(event.sequence) {
+                            SequenceObservation::Invalid => {
+                                self.send(FrontendEvent::problem(
+                                    "event_sequence_invalid",
+                                    "Backend emitted an unsequenced event; refresh may be required"
+                                        .into(),
+                                ))
+                                .await;
+                                continue;
+                            }
+                            SequenceObservation::Stale => continue,
+                            SequenceObservation::Gap { expected, received } => {
+                                self.send(FrontendEvent::problem(
+                                    "event_sequence_gap",
+                                    format!(
+                                        "Backend event gap (expected {expected}, received {received}); refresh may be required"
+                                    ),
+                                ))
+                                .await;
+                            }
+                            SequenceObservation::Accept => {}
+                        }
+                        if let Some(event) = Option::<FrontendEvent>::from(event) {
+                            self.send(event).await;
+                        }
+                    }
+                    _ => {}
+                },
+                bridge::BridgeMessage::Exited(mut exit) => {
+                    if let Some(reason) = terminal_reason {
+                        exit.kind = bridge::BridgeExitKind::Fatal;
+                        exit.message = reason;
+                    }
+                    return exit;
+                }
+            }
+        }
+        bridge::BridgeExit {
+            kind: bridge::BridgeExitKind::Transient,
+            message: "backend event stream closed".into(),
+        }
+    }
+
+    async fn end_epoch(&self, epoch: u64, error: CommandError) {
+        let mut transport = self
+            .transport
+            .lock()
+            .expect("bridge transport lock poisoned");
+        if transport
+            .active
+            .as_ref()
+            .is_some_and(|active| active.epoch == epoch)
+        {
+            transport.active = None;
+        }
+        reject_epoch_requests(&mut transport, epoch, error);
+    }
+
+    async fn lifecycle(&self, epoch: u64, state: &'static str, attempt: u32, message: String) {
+        self.send(FrontendEvent::local(FrontendEventKind::BridgeLifecycle(
+            BridgeLifecycle {
+                epoch,
+                state,
+                attempt,
+                max_attempts: MAX_RESTART_ATTEMPTS,
+                message,
+            },
+        )))
+        .await;
+    }
+
+    async fn send(&self, event: FrontendEvent) {
+        send_event(&self.subscribers, event).await;
+    }
+
+    fn begin_shutdown(&self) {
+        if self.stopping.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let mut transport = self
+            .transport
+            .lock()
+            .expect("bridge transport lock poisoned");
+        if let Some(active) = transport.active.take() {
+            active.client.shutdown();
+        }
+        reject_epoch_requests(&mut transport, epoch, CommandError::shutting_down());
+    }
+}
+
+impl Drop for BridgeServiceInner {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+    }
+}
+
+fn restart_delay(attempt: u32) -> Duration {
+    Duration::from_millis(250_u64.saturating_mul(1_u64 << attempt.saturating_sub(1).min(4)))
+}
+
+fn reject_epoch_requests(transport: &mut TransportState, epoch: u64, error: CommandError) {
+    let ids: Vec<_> = transport
+        .pending
+        .iter()
+        .filter_map(|(id, pending)| (pending.epoch == epoch).then_some(*id))
+        .collect();
+    for id in ids {
+        if let Some(pending) = transport.pending.remove(&id) {
+            let _ = pending.sender.send(Err(error.clone()));
         }
     }
 }
@@ -549,7 +782,11 @@ fn restart_app(app: tauri::AppHandle) -> ! {
 // the divergent operation explicit, while exposing a unit-returning IPC shim
 // under the public `restart_app` command name.
 #[tauri::command(rename = "restart_app")]
-fn restart_app_command(app: tauri::AppHandle) {
+async fn restart_app_command(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BridgeService>,
+) -> Result<(), CommandError> {
+    state.begin_shutdown();
     restart_app(app)
 }
 
@@ -1024,7 +1261,7 @@ async fn logout(
 
 pub fn run() {
     let args = std::env::args().collect::<Vec<_>>();
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(native_notifications::NotificationActivationStore::from_args(&args))
         .manage(native_notifications::NativeNotificationService::default())
         // This must be the first plugin: a second process must exit before the
@@ -1046,7 +1283,7 @@ pub fn run() {
         .setup(|app| {
             configure_asset_protocol_scope(&app.asset_protocol_scope(), &paths::data_dir())?;
             let fake = std::env::args().any(|argument| argument == "--fake-backend");
-            app.manage(BridgeService::start(fake)?);
+            app.manage(BridgeServiceInner::start(fake)?);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1081,8 +1318,13 @@ pub fn run() {
             set_typing,
             logout,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Rust Meow");
+        .build(tauri::generate_context!())
+        .expect("error while building Rust Meow");
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            app.state::<BridgeService>().begin_shutdown();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1109,6 +1351,50 @@ mod tests {
             }
         );
         assert_eq!(sequence.observe(8), SequenceObservation::Accept);
+    }
+
+    #[test]
+    fn restart_backoff_is_exponential_and_capped() {
+        let delays: Vec<_> = (1..=8).map(restart_delay).collect();
+        assert_eq!(delays[0], Duration::from_millis(250));
+        assert_eq!(delays[1], Duration::from_millis(500));
+        assert_eq!(delays[4], Duration::from_secs(4));
+        assert_eq!(delays[7], Duration::from_secs(4));
+        assert_eq!(MAX_RESTART_ATTEMPTS, 5);
+        assert_eq!(MAX_PENDING_REQUESTS, 512);
+    }
+
+    #[test]
+    fn epoch_change_rejects_each_matching_request_once_and_keeps_new_epoch() {
+        let mut transport = TransportState::default();
+        let mut receivers = Vec::new();
+        for (request_id, epoch) in [(1, 7), (2, 7), (3, 8)] {
+            let (sender, receiver) = oneshot::channel();
+            transport
+                .pending
+                .insert(request_id, PendingRequest { epoch, sender });
+            receivers.push((epoch, receiver));
+        }
+
+        reject_epoch_requests(&mut transport, 7, CommandError::epoch_changed(7));
+        assert_eq!(transport.pending.len(), 1);
+        assert!(transport.pending.contains_key(&3));
+        for (epoch, mut receiver) in receivers {
+            if epoch == 7 {
+                let error = receiver.try_recv().unwrap().unwrap_err();
+                assert_eq!(error.code, "backend_epoch_changed");
+                assert!(error.retryable);
+            } else {
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+            }
+        }
+
+        // Repeating the cleanup cannot complete or retain an old request.
+        reject_epoch_requests(&mut transport, 7, CommandError::epoch_changed(7));
+        assert_eq!(transport.pending.len(), 1);
     }
 
     #[test]
