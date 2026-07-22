@@ -100,17 +100,43 @@ a:focus-visible,
 .titlebar {
   position: relative;
   z-index: 30;
-  display: flex;
+  /*
+   * Same column template as `.app-shell` below, so the title bar's regions line
+   * up with the nav rail, chat list, and workspace beneath them. The brand
+   * spans the first two columns; the tabs and window controls live in the
+   * workspace column, keeping the tabs directly above the conversation panes.
+   */
+  display: grid;
+  grid-template-columns: calc(56px * var(--scale)) minmax(260px, calc(300px * var(--scale))) minmax(0, 1fr);
   height: var(--titlebar-height);
   min-height: var(--titlebar-height);
-  align-items: stretch;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
 }
 
-.titlebar-drag {
+.titlebar-main {
+  grid-column: 3;
   display: flex;
   min-width: 0;
+  align-items: stretch;
+}
+
+.titlebar-tabs {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.titlebar-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.titlebar-drag {
+  display: flex;
+  min-width: calc(24px * var(--scale));
   flex: 1;
   align-items: stretch;
   -webkit-user-select: none;
@@ -118,15 +144,28 @@ a:focus-visible,
 }
 
 .titlebar-brand {
+  grid-column: 1 / 3;
   display: flex;
-  flex: none;
+  min-width: 0;
   align-items: center;
   gap: calc(8px * var(--scale));
   padding: 0 calc(12px * var(--scale));
+  overflow: hidden;
   color: var(--fg-muted);
   font-size: calc(12px * var(--scale));
   font-weight: 600;
   letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+/* Collapsing the chat list drops its column to zero, so the brand shrinks to
+   just the mark above the nav rail and the tabs move fully left. */
+.app-shell.sidebar-collapsed .titlebar {
+  grid-template-columns: calc(56px * var(--scale)) 0 minmax(0, 1fr);
+}
+
+.app-shell.sidebar-collapsed .titlebar-title {
+  display: none;
 }
 
 .titlebar-brand .brand-mark {
@@ -242,21 +281,23 @@ a:focus-visible,
 .tab-strip {
   display: flex;
   /*
-   * The tab strip is a thin bar at the top of each pane, above the
-   * conversation. It must take only its natural height — `flex: 1` here would
-   * make it grow to fill the column-flex `.pane` and squash the conversation
-   * below it. The conversation itself carries `flex: 1` and fills the rest.
+   * One strip per pane, laid out left-to-right inside `.titlebar-tabs`, which
+   * itself begins above the conversation panes. Natural width (shrinkable when
+   * space is tight) keeps the tabs at the left of the workspace next to the
+   * pane they belong to, leaving `.titlebar-drag` to fill the rest of the bar.
    */
   min-width: 0;
-  flex: none;
+  flex: 0 1 auto;
   align-items: stretch;
   gap: 2px;
   padding: calc(5px * var(--scale)) 2px 0;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+}
+
+.tab-strip::-webkit-scrollbar {
+  display: none;
 }
 
 /* In normal operation the focused pane's strip is the centre of the custom

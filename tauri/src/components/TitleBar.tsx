@@ -148,43 +148,52 @@ export function TitleBar(props: { model: AppModel }) {
 
   return (
     <>
+      {/* The title bar mirrors `.app-shell`'s column grid: the brand spans the
+          nav-rail + chat-list columns, and everything else lives in the third
+          (workspace) column, so the tabs sit above the conversation panes
+          rather than sprawling left over the sidebar. When the sidebar is
+          collapsed that column shrinks to zero and the tabs slide fully left. */}
       <header class="titlebar">
         <div class="titlebar-brand" aria-hidden="true">
           <span class="brand-mark">M</span>
-          <span>Rust Meow</span>
+          <span class="titlebar-title">Rust Meow</span>
         </div>
-        <Show when={state.screen === "chats"}>
-          <For each={state.panes}>{(pane) => <Tabs model={props.model} pane={pane} />}</For>
-        </Show>
-        <div
-          class="titlebar-drag"
-          onPointerDown={(event) => void handleDragPointerDown(event)}
-          onDblClick={(event) => void handleDoubleClick(event)}
-        />
-        <div class="titlebar-controls">
+        <div class="titlebar-main">
           <Show when={state.screen === "chats"}>
-            <IconButton
-              label={state.panes.length >= 2 ? "Close split view" : "Split view"}
-              active={state.panes.length >= 2}
-              onClick={togglePaneSplit}
-            >
-              <Columns2 size={16} />
-            </IconButton>
+            <div class="titlebar-tabs">
+              <For each={state.panes}>{(pane) => <Tabs model={props.model} pane={pane} />}</For>
+            </div>
           </Show>
-          <button type="button" class="window-button" aria-label="Minimize" onClick={() => void minimize()}>
-            <Minus size={15} />
-          </button>
-          <button
-            type="button"
-            class="window-button"
-            aria-label={maximized() ? "Restore" : "Maximize"}
-            onClick={() => void toggleMaximizeRestore()}
-          >
-            <Square size={13} />
-          </button>
-          <button type="button" class="window-button close" aria-label="Close" onClick={() => void closeWindow()}>
-            <X size={16} />
-          </button>
+          <div
+            class="titlebar-drag"
+            onPointerDown={(event) => void handleDragPointerDown(event)}
+            onDblClick={(event) => void handleDoubleClick(event)}
+          />
+          <div class="titlebar-controls">
+            <Show when={state.screen === "chats"}>
+              <IconButton
+                label={state.panes.length >= 2 ? "Close split view" : "Split view"}
+                active={state.panes.length >= 2}
+                onClick={togglePaneSplit}
+              >
+                <Columns2 size={16} />
+              </IconButton>
+            </Show>
+            <button type="button" class="window-button" aria-label="Minimize" onClick={() => void minimize()}>
+              <Minus size={15} />
+            </button>
+            <button
+              type="button"
+              class="window-button"
+              aria-label={maximized() ? "Restore" : "Maximize"}
+              onClick={() => void toggleMaximizeRestore()}
+            >
+              <Square size={13} />
+            </button>
+            <button type="button" class="window-button close" aria-label="Close" onClick={() => void closeWindow()}>
+              <X size={16} />
+            </button>
+          </div>
         </div>
       </header>
       <For each={RESIZE_HANDLES}>
