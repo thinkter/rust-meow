@@ -32,6 +32,12 @@ export function emptyPane(id: string): Pane {
   return { id, tabChatIds: [], activeChatId: "" };
 }
 
+/** A chat owns one pane-local viewport. Keeping it unique across panes avoids
+ * one exact-message navigation replacing another pane's shared message window. */
+export function paneContainingChat(panes: readonly Pane[], chatId: string): Pane | undefined {
+  return panes.find((pane) => pane.tabChatIds.includes(chatId));
+}
+
 /**
  * Load a chat into a pane's currently active tab slot. A chat already open
  * somewhere in this pane is merely focused, matching browser tab behaviour;
@@ -278,6 +284,17 @@ export function normalizeWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | 
     if (!pane || seenIds.has(pane.id)) return undefined;
     seenIds.add(pane.id);
     panes.push(pane);
+  }
+  const seenChats = new Set<string>();
+  for (const pane of panes) {
+    pane.tabChatIds = pane.tabChatIds.filter((chatId) => {
+      if (seenChats.has(chatId)) return false;
+      seenChats.add(chatId);
+      return true;
+    });
+    if (!pane.tabChatIds.includes(pane.activeChatId)) {
+      pane.activeChatId = pane.tabChatIds[0] ?? "";
+    }
   }
   const focusedPaneId =
     typeof candidate.focusedPaneId === "string" && panes.some((pane) => pane.id === candidate.focusedPaneId)

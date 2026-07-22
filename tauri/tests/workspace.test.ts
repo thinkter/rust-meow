@@ -219,3 +219,19 @@ test("normalizing a workspace snapshot accepts a well-formed payload and repairs
   assert.deepEqual(snapshot?.panes[0], { id: "pane-1", tabChatIds: ["a", "b"], activeChatId: "a" });
   assert.equal(snapshot?.focusedPaneId, "pane-1");
 });
+
+test("normalizing a workspace gives each chat one pane-local viewport", () => {
+  assert.deepEqual(normalizeWorkspaceSnapshot({
+    panes: [
+      { id: "pane-1", tabChatIds: ["shared", "left"], activeChatId: "shared" },
+      { id: "pane-2", tabChatIds: ["shared", "right"], activeChatId: "shared" },
+    ],
+    focusedPaneId: "pane-2",
+  }), {
+    panes: [
+      { id: "pane-1", tabChatIds: ["shared", "left"], activeChatId: "shared" },
+      { id: "pane-2", tabChatIds: ["right"], activeChatId: "right" },
+    ],
+    focusedPaneId: "pane-2",
+  });
+});

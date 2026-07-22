@@ -49,6 +49,7 @@ import {
   moveTabBetweenPanes,
   openSwitcher as buildSwitcher,
   openTab,
+  paneContainingChat,
   readWorkspaceSnapshot,
   recentChatCandidates,
   remapPaneChatId,
@@ -636,13 +637,18 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
    * `openInNewTab` to open deliberately alongside the current tab.
    */
   async function selectChat(chatId: string, aroundMessageId = "", paneId = state.focusedPaneId) {
-    const pane = state.panes.find((candidate) => candidate.id === paneId);
+    // Message windows are chat-scoped while scroll restoration is pane-scoped.
+    // Focus an existing owner pane instead of duplicating a chat and letting an
+    // exact pin/search target replace both panes' shared window.
+    const ownerPane = paneContainingChat(state.panes, chatId);
+    const targetPaneId = ownerPane?.id ?? paneId;
+    const pane = state.panes.find((candidate) => candidate.id === targetPaneId);
     if (!chatId || !pane) return;
     const alreadyHydrated = Boolean(state.conversations[chatId]);
     stopTyping();
     batch(() => {
-      writePane(paneId, selectTab(pane, chatId));
-      setState("focusedPaneId", paneId);
+      writePane(targetPaneId, selectTab(pane, chatId));
+      setState("focusedPaneId", targetPaneId);
       syncSelectedChatId();
       setState("chatInfoOpen", false);
       setState("chatInfo", null);
@@ -682,12 +688,14 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   }
 
   async function openInNewTab(chatId: string, paneId = state.focusedPaneId) {
-    const pane = state.panes.find((candidate) => candidate.id === paneId);
+    const ownerPane = paneContainingChat(state.panes, chatId);
+    const targetPaneId = ownerPane?.id ?? paneId;
+    const pane = state.panes.find((candidate) => candidate.id === targetPaneId);
     if (!chatId || !pane) return;
     const alreadyHydrated = Boolean(state.conversations[chatId]);
     batch(() => {
-      writePane(paneId, openTab(pane, chatId));
-      setState("focusedPaneId", paneId);
+      writePane(targetPaneId, openTab(pane, chatId));
+      setState("focusedPaneId", targetPaneId);
       syncSelectedChatId();
     });
     ensureDraft(chatId);
