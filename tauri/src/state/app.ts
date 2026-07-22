@@ -28,7 +28,12 @@ import {
   type SearchResults,
 } from "../lib/types";
 import { pairingStartupDecision } from "./pairing";
-import { activeConversationIds, backendLifecycleDecision } from "./backend-lifecycle";
+import {
+  activeConversationIds,
+  backendLifecycleDecision,
+  bootstrapFailureDecision,
+  RestartEpochQueue,
+} from "./backend-lifecycle";
 import { createPreferences } from "./preferences";
 import { optimisticUnreadCount, shouldRestoreOptimisticUnread } from "./unread";
 import {
@@ -181,7 +186,12 @@ function emptyConversation(chatId: string): ConversationState {
   };
 }
 
-export function createAppModel() {
+export interface AppModelLifecycleHooks {
+  /** Release queued deep links/notification activations once backend state is hydrated. */
+  backendReady?(): void;
+}
+
+export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   const { preferences, prefActions } = createPreferences();
   const restoredWorkspace = readWorkspaceSnapshot();
   const initialPanes = restoredWorkspace?.panes ?? [emptyPane("pane-1")];
@@ -237,7 +247,9 @@ export function createAppModel() {
   let syncRefreshTimer: number | undefined;
   let typingTimer: number | undefined;
   let typingChatId = "";
-  let resyncing = false;
+  let eventGapResyncing = false;
+  let restartResyncing = false;
+  const restartEpochs = new RestartEpochQueue();
   let toastId = 0;
   const pendingImages = new Set<string>();
   const pendingAttachments = new Set<string>();
@@ -268,6 +280,11 @@ export function createAppModel() {
       });
     },
   });
+
+  function markBackendReady() {
+    notificationActivations.markReady();
+    lifecycleHooks.backendReady?.();
+  }
 
   async function bootstrap() {
     try {
@@ -301,9 +318,17 @@ export function createAppModel() {
       }
       await loadChats(true);
       await restoreWorkspaceConversations();
-      notificationActivations.markReady();
+      markBackendReady();
     } catch (error) {
-      fatal(normalizeBridgeError(error).message);
+      const bridgeError = normalizeBridgeError(error);
+      if (bootstrapFailureDecision(bridgeError) === "reconnecting") {
+        batch(() => {
+          setState("connection", ConnectionState.Reconnecting);
+          setState("connectionDetail", "Waiting for the WhatsApp backend to restart");
+        });
+      } else {
+        fatal(bridgeError.message);
+      }
     }
   }
 
@@ -1331,7 +1356,7 @@ export function createAppModel() {
         if (event.payload.state === ConnectionState.Connected) {
           void loadChats(true).then(async () => {
             await restoreWorkspaceConversations();
-            notificationActivations.markReady();
+            markBackendReady();
           });
         }
         break;
@@ -1485,8 +1510,8 @@ export function createAppModel() {
   }
 
   async function resyncAfterEventGap() {
-    if (resyncing) return;
-    resyncing = true;
+    if (eventGapResyncing) return;
+    eventGapResyncing = true;
     try {
       const openChatIds = activeConversationIds(state.panes);
       await Promise.all([
@@ -1497,36 +1522,49 @@ export function createAppModel() {
     } catch (error) {
       toast(`Could not refresh after the event gap: ${normalizeBridgeError(error).message}`);
     } finally {
-      resyncing = false;
+      eventGapResyncing = false;
     }
   }
 
-  async function resyncAfterBackendRestart(epoch: number) {
-    if (resyncing) return;
-    resyncing = true;
-    try {
-      const [hello, auth] = await Promise.all([bridge.hello(), bridge.getAuthState()]);
-      const openChatIds = activeConversationIds(state.panes);
-      batch(() => {
-        setState("backendVersion", hello.backendVersion);
-        setState("connection", auth.connectionState);
-        setState("connectionDetail", "");
-        setState("ownUserId", auth.ownUserId);
-        setState("screen", pairingStartupDecision(auth).screen);
-      });
-      await Promise.all([
-        loadChats(true),
-        ...openChatIds.map((chatId) => loadConversation(chatId)),
-      ]);
-      toast(`Backend reconnected and refreshed (epoch ${epoch})`, "info");
-    } catch (error) {
-      const bridgeError = normalizeBridgeError(error);
-      if (bridgeError.code !== "backend_epoch_changed") {
-        toast(`Backend reconnected but refresh failed: ${bridgeError.message}`);
+  function resyncAfterBackendRestart(epoch: number) {
+    restartEpochs.push(epoch);
+    if (restartResyncing) return;
+    restartResyncing = true;
+    void (async () => {
+      try {
+        for (let pendingEpoch = restartEpochs.take(); pendingEpoch; pendingEpoch = restartEpochs.take()) {
+          try {
+            const [hello, auth] = await Promise.all([bridge.hello(), bridge.getAuthState()]);
+            const openChatIds = activeConversationIds(state.panes);
+            batch(() => {
+              setState("backendVersion", hello.backendVersion);
+              setState("connection", auth.connectionState);
+              setState("connectionDetail", "");
+              setState("ownUserId", auth.ownUserId);
+              setState("screen", pairingStartupDecision(auth).screen);
+              setState("fatalError", "");
+            });
+            await Promise.all([
+              loadChats(true),
+              ...openChatIds.map((chatId) => loadConversation(chatId)),
+            ]);
+            markBackendReady();
+            toast(`Backend reconnected and refreshed (epoch ${pendingEpoch})`, "info");
+          } catch (error) {
+            const bridgeError = normalizeBridgeError(error);
+            if (bridgeError.code !== "backend_epoch_changed") {
+              toast(`Backend reconnected but refresh failed: ${bridgeError.message}`);
+            }
+          }
+        }
+      } finally {
+        restartResyncing = false;
+        // An epoch can be queued by a handler resumed in the same microtask as
+        // the loop exits. Re-enter once so that edge cannot strand it.
+        const trailingEpoch = restartEpochs.take();
+        if (trailingEpoch) resyncAfterBackendRestart(trailingEpoch);
       }
-    } finally {
-      resyncing = false;
-    }
+    })();
   }
 
   function upsertMessage(message: Message, live: boolean) {

@@ -35,3 +35,25 @@ export function activeConversationIds(
 ): string[] {
   return [...new Set(panes.map((pane) => pane.activeChatId).filter(Boolean))];
 }
+
+export function bootstrapFailureDecision(error: {
+  retryable: boolean;
+}): "reconnecting" | "fatal" {
+  return error.retryable ? "reconnecting" : "fatal";
+}
+
+/** Coalesce overlapping lifecycle events without ever dropping the newest epoch. */
+export class RestartEpochQueue {
+  private pendingEpoch = 0;
+
+  push(epoch: number): void {
+    this.pendingEpoch = Math.max(this.pendingEpoch, epoch);
+  }
+
+  take(): number | undefined {
+    if (!this.pendingEpoch) return undefined;
+    const epoch = this.pendingEpoch;
+    this.pendingEpoch = 0;
+    return epoch;
+  }
+}
