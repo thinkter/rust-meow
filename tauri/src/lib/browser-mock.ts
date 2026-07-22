@@ -50,6 +50,11 @@ const browserFiles = new Map<string, BrowserFileMetadata>();
 
 /** Open a normal browser file input and retain enough metadata for mock sends. */
 export function pickBrowserFile(options: FilePickerOptions): Promise<string | null> {
+  // A browser cannot hand back a real directory path, and the mock bridge never
+  // writes to disk, so answer directory picks with a recognisable placeholder
+  // instead of opening a file input the user cannot satisfy.
+  if (options.directory) return Promise.resolve("/tmp/rust-meow-mock-downloads");
+
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
@@ -418,6 +423,13 @@ class BrowserMockBridge implements BridgeApi {
 
   async openMediaPath(path: string) {
     openBrowserPath(path);
+  }
+
+  async saveMediaAs(sourcePath: string, destinationDir: string, fileName: string) {
+    // The mock never touches the filesystem; report the path the native command
+    // would have produced so the calling UI can be exercised end to end.
+    void sourcePath;
+    return `${destinationDir.replace(/\/+$/, "")}/${fileName}`;
   }
 
   async markRead(chatId: string, _throughMessageId: string) {
