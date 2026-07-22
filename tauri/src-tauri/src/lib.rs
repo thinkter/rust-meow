@@ -493,7 +493,19 @@ fn unique_destination(directory: &Path, file_name: &str) -> PathBuf {
 /// media cache, and the destination must be an existing directory the user
 /// picked. Neither is allowed to be an arbitrary path from the webview.
 #[tauri::command]
-fn save_media_as(
+async fn save_media_as(
+    source_path: String,
+    destination_dir: String,
+    file_name: String,
+) -> Result<String, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_media_as_blocking(source_path, destination_dir, file_name)
+    })
+    .await
+    .map_err(|error| CommandError::transport(format!("save worker failed: {error}")))?
+}
+
+fn save_media_as_blocking(
     source_path: String,
     destination_dir: String,
     file_name: String,
@@ -1251,7 +1263,7 @@ mod tests {
         let secret = outside.path().join("id_rsa");
         std::fs::write(&secret, b"private").unwrap();
 
-        let error = save_media_as(
+        let error = save_media_as_blocking(
             secret.to_string_lossy().into_owned(),
             outside.path().to_string_lossy().into_owned(),
             "id_rsa".to_string(),
