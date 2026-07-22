@@ -231,6 +231,8 @@ export function createAppModel() {
   const backendChatRevisions = new Map<string, number>();
   /** Per-chat load generations so a stale in-flight fetch cannot clobber a fresher one. */
   const conversationGenerations = new Map<string, number>();
+  /** Monotonic across evictions so a reopened chat can never reuse an in-flight token. */
+  let conversationGenerationSequence = 0;
   /** Drives LRU eviction once more than `MAX_HYDRATED_CONVERSATIONS` chats are hydrated. */
   const conversationLastFocusedAt = new Map<string, number>();
 
@@ -327,7 +329,7 @@ export function createAppModel() {
   }
 
   function bumpConversationGeneration(chatId: string): number {
-    const next = (conversationGenerations.get(chatId) ?? 0) + 1;
+    const next = ++conversationGenerationSequence;
     conversationGenerations.set(chatId, next);
     return next;
   }
@@ -369,7 +371,12 @@ export function createAppModel() {
     if (!chatId) return;
     ensureConversation(chatId);
     const generation = bumpConversationGeneration(chatId);
-    setState("conversations", chatId, "loading", true);
+    batch(() => {
+      setState("conversations", chatId, "loading", true);
+      // A new canonical/around window supersedes pagination already in flight.
+      setState("conversations", chatId, "loadingOlder", false);
+      setState("conversations", chatId, "loadingNewer", false);
+    });
     try {
       if (aroundMessageId) {
         const response = await bridge.listMessagesAround(chatId, aroundMessageId);
@@ -426,10 +433,11 @@ export function createAppModel() {
     const current = state.conversations[chatId];
     const first = current?.messages[0];
     if (!current || !first || !current.hasOlder || current.loadingOlder) return;
+    const generation = conversationGenerations.get(chatId);
     setState("conversations", chatId, "loadingOlder", true);
     try {
       const response = await bridge.listMessages(chatId, first.timestampMs, first.id, 50);
-      if (!state.conversations[chatId]) return;
+      if (!state.conversations[chatId] || conversationGenerations.get(chatId) !== generation) return;
       const merged = mergeMessages(response.messages, state.conversations[chatId]!.messages);
       const trimmed = merged.length > MAX_ACTIVE_MESSAGES;
       batch(() => {
@@ -438,9 +446,13 @@ export function createAppModel() {
         if (trimmed) setState("conversations", chatId, "hasNewer", true);
       });
     } catch (error) {
-      toast(normalizeBridgeError(error).message);
+      if (conversationGenerations.get(chatId) === generation) {
+        toast(normalizeBridgeError(error).message);
+      }
     } finally {
-      if (state.conversations[chatId]) setState("conversations", chatId, "loadingOlder", false);
+      if (state.conversations[chatId] && conversationGenerations.get(chatId) === generation) {
+        setState("conversations", chatId, "loadingOlder", false);
+      }
     }
   }
 
@@ -448,10 +460,11 @@ export function createAppModel() {
     const current = state.conversations[chatId];
     const last = current?.messages.at(-1);
     if (!current || !last || !current.hasNewer || current.loadingNewer) return;
+    const generation = conversationGenerations.get(chatId);
     setState("conversations", chatId, "loadingNewer", true);
     try {
       const response = await bridge.listMessagesAfter(chatId, last.timestampMs, last.id, 50);
-      if (!state.conversations[chatId]) return;
+      if (!state.conversations[chatId] || conversationGenerations.get(chatId) !== generation) return;
       const merged = mergeMessages(state.conversations[chatId]!.messages, response.messages);
       const trimmed = merged.length > MAX_ACTIVE_MESSAGES;
       batch(() => {
@@ -460,9 +473,13 @@ export function createAppModel() {
         if (trimmed) setState("conversations", chatId, "hasOlder", true);
       });
     } catch (error) {
-      toast(normalizeBridgeError(error).message);
+      if (conversationGenerations.get(chatId) === generation) {
+        toast(normalizeBridgeError(error).message);
+      }
     } finally {
-      if (state.conversations[chatId]) setState("conversations", chatId, "loadingNewer", false);
+      if (state.conversations[chatId] && conversationGenerations.get(chatId) === generation) {
+        setState("conversations", chatId, "loadingNewer", false);
+      }
     }
   }
 
