@@ -287,7 +287,11 @@ impl RpcClient {
             BridgeMessage::Envelope(envelope) => envelope,
             BridgeMessage::Exited(error) => {
                 self.tracker.clear();
-                return RpcIncoming::Exited(error);
+                // The GPUI client is a behavioral reference without the Tauri
+                // restart supervisor, so both exit classes share its existing
+                // terminal UI while still consuming the structured result.
+                let _legacy_exit_kind = error.kind;
+                return RpcIncoming::Exited(error.message);
             }
         };
         match envelope.body {
