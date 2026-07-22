@@ -1,5 +1,14 @@
 import type { Message, PollContent } from "./types";
 
+/** Snapshot a poll without structuredClone. Solid store values are proxies,
+ * which the browser structured-clone algorithm rejects with DataCloneError. */
+export function clonePollContent(poll: PollContent): PollContent {
+  return {
+    ...poll,
+    options: poll.options.map((option) => ({ ...option })),
+  };
+}
+
 /** Apply one complete local vote intent. The caller owns request sequencing;
  * this pure reducer makes optimistic updates and rollback deterministic. */
 export function optimisticPollVote(poll: PollContent, selectedOptions: string[]): PollContent {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { optimisticPollVote, preservePendingPollIntent } from "../src/lib/polls.ts";
+import { clonePollContent, optimisticPollVote, preservePendingPollIntent } from "../src/lib/polls.ts";
 import type { Message, PollContent } from "../src/lib/types.ts";
 
 const poll = (): PollContent => ({ question: "Lunch?", selectableOptionsCount: 2, totalVoters: 1, options: [
@@ -28,4 +28,12 @@ test("an older backend update cannot overwrite a newer pending intent", () => {
   const merged = preservePendingPollIntent(current, stale, true);
   assert.deepEqual(merged.content, current.content);
   assert.deepEqual(preservePendingPollIntent(current, stale, false).content, stale.content);
+});
+
+test("poll snapshots can be copied from reactive proxy values", () => {
+  const reactive = new Proxy(poll(), {});
+  const snapshot = clonePollContent(reactive);
+  assert.deepEqual(snapshot, poll());
+  assert.notEqual(snapshot, reactive);
+  assert.notEqual(snapshot.options, reactive.options);
 });

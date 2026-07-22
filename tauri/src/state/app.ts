@@ -3,7 +3,7 @@ import { createStore, reconcile } from "solid-js/store";
 import { bridge, normalizeBridgeError, openFile } from "../lib/bridge";
 import { BoundedSet, boundWindowAround } from "../lib/performance";
 import { ParticipantAvatarQueue } from "../lib/participant-avatar-queue";
-import { optimisticPollVote, preservePendingPollIntent } from "../lib/polls";
+import { clonePollContent, optimisticPollVote, preservePendingPollIntent } from "../lib/polls";
 import {
   ensureNotificationPermission,
   listenForNotificationActions,
@@ -939,7 +939,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     if (!message.content || !("poll" in message.content)) return;
     const key = mediaKey(chatId, message.id); const generation = (pollVoteGenerations.get(key) ?? 0) + 1; pollVoteGenerations.set(key, generation);
     const stateKey = `${chatId}:${message.id}`;
-    const previous = structuredClone(message.content.poll); const optimistic = optimisticPollVote(previous, selectedOptions);
+    const previous = clonePollContent(message.content.poll); const optimistic = optimisticPollVote(previous, selectedOptions);
     setState("conversations", chatId, "messages", (candidate) => candidate.id === message.id, "content", { poll: optimistic });
     setState("pendingPollVotes", stateKey, true);
     try { const response = await bridge.votePoll(chatId, message.id, selectedOptions); if (pollVoteGenerations.get(key) === generation && response.message) { setState("pendingPollVotes", stateKey, undefined!); upsertMessage(response.message, true); } }
