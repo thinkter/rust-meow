@@ -380,6 +380,19 @@ fn canonical_media_file(data_dir: &Path, requested: &Path) -> Result<PathBuf, Co
     Ok(target)
 }
 
+fn configure_asset_protocol_scope(
+    scope: &tauri::scope::fs::Scope,
+    data_dir: &Path,
+) -> tauri::Result<()> {
+    // Media may contain managed subdirectories, while avatar cache files are
+    // always written directly under `avatars`. Keep the avatar grant
+    // non-recursive so a rendered profile photo does not broaden filesystem
+    // access beyond the backend-owned cache.
+    scope.allow_directory(data_dir.join("media"), true)?;
+    scope.allow_directory(data_dir.join("avatars"), false)?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn subscribe_backend(
     state: tauri::State<'_, BridgeService>,
@@ -856,8 +869,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            app.asset_protocol_scope()
-                .allow_directory(paths::data_dir().join("media"), true)?;
+            configure_asset_protocol_scope(&app.asset_protocol_scope(), &paths::data_dir())?;
             let fake = std::env::args().any(|argument| argument == "--fake-backend");
             app.manage(BridgeService::start(fake)?);
             Ok(())
@@ -955,6 +967,39 @@ mod tests {
         symlink(&outside, &link).unwrap();
 
         assert!(canonical_media_file(root.path(), &link).is_err());
+    }
+
+    #[test]
+    fn asset_protocol_scope_allows_only_managed_media_and_direct_avatar_files() {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("media");
+        let media_nested = media.join("attachments");
+        let avatars = root.path().join("avatars");
+        let avatar_nested = avatars.join("unexpected");
+        std::fs::create_dir_all(&media_nested).unwrap();
+        std::fs::create_dir_all(&avatar_nested).unwrap();
+
+        let media_file = media_nested.join("message.bin");
+        let avatar_file = avatars.join("profile.jpg");
+        let nested_avatar_file = avatar_nested.join("profile.jpg");
+        let unrelated_file = root.path().join("client.db");
+        for path in [
+            &media_file,
+            &avatar_file,
+            &nested_avatar_file,
+            &unrelated_file,
+        ] {
+            std::fs::write(path, b"test").unwrap();
+        }
+
+        let app = tauri::test::mock_app();
+        let scope = app.asset_protocol_scope();
+        configure_asset_protocol_scope(&scope, root.path()).unwrap();
+
+        assert!(scope.is_allowed(&media_file));
+        assert!(scope.is_allowed(&avatar_file));
+        assert!(!scope.is_allowed(&nested_avatar_file));
+        assert!(!scope.is_allowed(&unrelated_file));
     }
 
     #[test]
