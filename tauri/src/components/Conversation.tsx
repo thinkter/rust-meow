@@ -1,6 +1,6 @@
 import {
-  createMemo,
   createEffect,
+  createMemo,
   createSignal,
   For,
   on,
@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
+import type { Density } from "../state/preferences";
 import { ChatKind, ConnectionState, type Message } from "../lib/types";
 import { connectionLabel, dayKey, formatDay, messageText } from "../lib/format";
 import { Avatar } from "./Avatar";
@@ -26,18 +27,33 @@ import { Composer } from "./Composer";
 import { MessageBubble } from "./MessageBubble";
 import { IconButton, Spinner } from "./Primitives";
 
-export function Conversation(props: { model: AppModel }) {
-  const { state, actions } = props.model;
+/**
+ * One conversation pane's worth of chrome: header, message list, jump-to-
+ * latest floater, composer. Everything here is scoped to `props.chatId`
+ * (never `state.selectedChatId`) because two panes can each host one of
+ * these at the same time — see `actions.conversation(chatId)` in
+ * `state/app.ts`. The one deliberate exception is `actions.showChatInfo`,
+ * `actions.closeChat` and the `Composer`, which the current `AppModel`/
+ * `Composer` API only expose against the *focused* pane; see the BUBBLE
+ * agent report for that residual gap.
+ */
+export function Conversation(props: { model: AppModel; chatId: string }) {
+  const { state, actions, preferences } = props.model;
   let scrollRef: HTMLDivElement | undefined;
   let inChatSearchInput: HTMLInputElement | undefined;
   let initializedChat = "";
   const [newMessages, setNewMessages] = createSignal(0);
+  const [farFromBottom, setFarFromBottom] = createSignal(false);
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [searchQuery, setSearchQuery] = createSignal("");
   const [searchMatch, setSearchMatch] = createSignal(0);
   const [searchHighlight, setSearchHighlight] = createSignal("");
-  const chat = () => actions.selectedChat();
-  const messages = () => state.messages;
+
+  const conversation = () => actions.conversation(props.chatId);
+  const chat = () => state.chats.find((candidate) => candidate.id === props.chatId);
+  const messages = () => conversation().messages;
+  const isGroup = () => chat()?.kind === ChatKind.Group;
+
   const searchMatches = createMemo(() => {
     const query = searchQuery().trim().toLocaleLowerCase();
     if (!query) return [];
@@ -45,6 +61,7 @@ export function Conversation(props: { model: AppModel }) {
       .map((message, index) => ({ message, index }))
       .filter(({ message }) => messageText(message).toLocaleLowerCase().includes(query));
   });
+
   const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
     get count() {
       return messages().length;
@@ -55,8 +72,10 @@ export function Conversation(props: { model: AppModel }) {
         messages()[index],
         index,
         messages(),
-        state.uiScale,
-        state.firstUnreadMessageId,
+        preferences.uiScale,
+        conversation().firstUnreadMessageId,
+        isGroup(),
+        preferences.density,
       ),
     overscan: 10,
     getItemKey: (index) => messages()[index]?.id ?? index,
@@ -64,28 +83,44 @@ export function Conversation(props: { model: AppModel }) {
     onChange: (instance, sync) => {
       if (!sync) return;
       const items = instance.getVirtualItems();
-      if (items[0]?.index === 0 && state.hasOlder && !state.loadingOlder) void loadOlderAnchored();
+      const conv = conversation();
+      if (items[0]?.index === 0 && conv.hasOlder && !conv.loadingOlder) void loadOlderAnchored();
       const last = items.at(-1);
-      if (last && last.index >= messages().length - 2 && state.hasNewer && !state.loadingNewer) {
-        void actions.loadNewer();
+      if (last && last.index >= messages().length - 2 && conv.hasNewer && !conv.loadingNewer) {
+        void actions.loadNewer(props.chatId);
       }
     },
   });
 
+  // Chat switched within this pane (tab click, `selectChat`, …) — drop any
+  // state that belonged to the previous chat immediately, independent of
+  // whether the new chat's window has finished loading yet. Without this a
+  // pane could briefly show "Jump to latest" left over from the chat it was
+  // just showing.
   createEffect(
     on(
-      () => [state.selectedChatId, state.loadingMessages] as const,
-      ([chatId, loading]) => {
+      () => props.chatId,
+      () => {
+        setNewMessages(0);
+        setFarFromBottom(false);
+      },
+    ),
+  );
+
+  createEffect(
+    on(
+      () => [props.chatId, conversation().loading] as const,
+      ([currentChatId, loading]) => {
         setSearchOpen(false);
         setSearchQuery("");
         setSearchHighlight("");
-        if (!chatId || loading || messages().length === 0 || initializedChat === chatId) return;
-        initializedChat = chatId;
+        if (!currentChatId || loading || messages().length === 0 || initializedChat === currentChatId) return;
+        initializedChat = currentChatId;
         setNewMessages(0);
+        setFarFromBottom(false);
         requestAnimationFrame(() => {
-          const unreadIndex = state.firstUnreadMessageId
-            ? messages().findIndex((message) => message.id === state.firstUnreadMessageId)
-            : -1;
+          const unreadId = conversation().firstUnreadMessageId;
+          const unreadIndex = unreadId ? messages().findIndex((message) => message.id === unreadId) : -1;
           virtualizer.scrollToIndex(unreadIndex >= 0 ? unreadIndex : messages().length - 1, {
             align: unreadIndex >= 0 ? "start" : "end",
           });
@@ -96,7 +131,7 @@ export function Conversation(props: { model: AppModel }) {
 
   createEffect(
     on(
-      () => state.liveMessageVersion,
+      () => conversation().liveMessageVersion,
       () => {
         if (!scrollRef || messages().length === 0) return;
         const distance = scrollRef.scrollHeight - scrollRef.scrollTop - scrollRef.clientHeight;
@@ -115,7 +150,7 @@ export function Conversation(props: { model: AppModel }) {
   return (
     <section class="conversation-shell" aria-label={chat()?.title || "Conversation"}>
       <header class="conversation-header">
-        <IconButton label="Back to chats" class="compact-back" onClick={actions.closeChat}>
+        <IconButton label="Back to chats" class="compact-back" onClick={() => actions.closeTab(props.chatId)}>
           <ArrowLeft size={21} />
         </IconButton>
         <Show
@@ -129,7 +164,7 @@ export function Conversation(props: { model: AppModel }) {
                       <Avatar
                         name={value().title || value().phoneNumber}
                         path={value().avatarPath}
-                        size={41 * state.uiScale}
+                        size={41 * preferences.uiScale}
                         group={value().kind === ChatKind.Group}
                       />
                       <span class="conversation-heading">
@@ -203,18 +238,19 @@ export function Conversation(props: { model: AppModel }) {
           if (!scrollRef) return;
           const distance = scrollRef.scrollHeight - scrollRef.scrollTop - scrollRef.clientHeight;
           if (distance < 80) setNewMessages(0);
+          setFarFromBottom(distance > scrollRef.clientHeight * 1.5);
         }}
       >
-        <Show when={state.loadingMessages}>
+        <Show when={conversation().loading}>
           <div class="empty-state"><Spinner label="Loading messages" /></div>
         </Show>
-        <Show when={!state.loadingMessages && state.messages.length === 0}>
+        <Show when={!conversation().loading && messages().length === 0}>
           <div class="empty-state">
             <MessageCircleMore size={25} />
             <strong>No messages here yet. Say hello.</strong>
           </div>
         </Show>
-        <Show when={!state.loadingMessages && state.messages.length > 0}>
+        <Show when={!conversation().loading && messages().length > 0}>
           <div class="message-canvas" style={{ height: `${virtualizer.getTotalSize()}px` }}>
             <For each={virtualizer.getVirtualItems()}>
               {(virtualRow) => {
@@ -222,7 +258,12 @@ export function Conversation(props: { model: AppModel }) {
                 const previous = () => messages()[virtualRow.index - 1];
                 const dateChanged = () =>
                   !previous() || dayKey(previous()!.timestampMs) !== dayKey(message()?.timestampMs ?? 0);
-                const firstUnread = () => message()?.id === state.firstUnreadMessageId;
+                const firstUnread = () => message()?.id === conversation().firstUnreadMessageId;
+                // Consecutive incoming group messages from the same sender
+                // within 5 minutes share one avatar/sender line — G1.
+                const grouped = () =>
+                  isGroupedWithPrevious(message(), previous(), isGroup()) && !firstUnread();
+                const showAvatarGutter = () => isGroup() && Boolean(message()) && !message()!.fromMe;
                 return (
                   <div
                     class={`message-row ${message()?.fromMe ? "from-me" : ""} ${dateChanged() ? "with-date" : ""} ${firstUnread() ? "with-unread" : ""}`}
@@ -241,15 +282,22 @@ export function Conversation(props: { model: AppModel }) {
                     <Show when={firstUnread()}>
                       <div class="unread-separator"><span>Unread messages</span></div>
                     </Show>
+                    <Show when={showAvatarGutter()}>
+                      <Show when={!grouped()} fallback={<div class="message-avatar-spacer" aria-hidden="true" />}>
+                        <GroupAvatar model={props.model} message={message()!} scale={preferences.uiScale} />
+                      </Show>
+                    </Show>
                     <Show when={message()}>
                       {(value) => (
                         <MessageBubble
                           message={value()}
                           model={props.model}
+                          chatId={props.chatId}
                           highlighted={
-                            state.highlightedMessageId === value().id ||
+                            conversation().highlightedMessageId === value().id ||
                             searchHighlight() === value().id
                           }
+                          suppressSender={grouped()}
                           onScrollToMessage={scrollToMessage}
                         />
                       )}
@@ -260,26 +308,31 @@ export function Conversation(props: { model: AppModel }) {
             </For>
           </div>
         </Show>
-        <Show when={state.loadingOlder}>
+        <Show when={conversation().loadingOlder}>
           <div style={{ position: "sticky", top: "8px", display: "flex", "justify-content": "center", "z-index": 5 }}>
             <span class="date-separator" style={{ position: "static", transform: "none" }}><Spinner small label="Loading older messages" /></span>
           </div>
         </Show>
       </div>
 
-      <Show when={newMessages() > 0 || state.hasNewer}>
-        <button type="button" class="floating-jump" onClick={() => {
-          if (state.hasNewer) void actions.jumpToLatest();
-          else scrollToLatest("smooth");
-          setNewMessages(0);
-        }}>
+      <Show when={newMessages() > 0 || conversation().hasNewer || farFromBottom()}>
+        <button
+          type="button"
+          class="floating-jump"
+          onClick={() => {
+            if (conversation().hasNewer) void actions.jumpToLatest(props.chatId);
+            else scrollToLatest("smooth");
+            setNewMessages(0);
+            setFarFromBottom(false);
+          }}
+        >
           <ArrowDown size={17} />
-          <span>{state.hasNewer ? "Jump to latest" : "New messages"}</span>
+          <span>Jump to latest</span>
           <Show when={newMessages() > 0}><span class="count">{newMessages()}</span></Show>
         </button>
       </Show>
 
-      <Composer model={props.model} />
+      <Composer model={props.model} chatId={props.chatId} />
     </section>
   );
 
@@ -287,7 +340,7 @@ export function Conversation(props: { model: AppModel }) {
     if (!scrollRef) return;
     const previousHeight = scrollRef.scrollHeight;
     const previousTop = scrollRef.scrollTop;
-    await actions.loadOlder();
+    await actions.loadOlder(props.chatId);
     requestAnimationFrame(() => {
       if (scrollRef) scrollRef.scrollTop = previousTop + scrollRef.scrollHeight - previousHeight;
     });
@@ -349,29 +402,80 @@ export function Conversation(props: { model: AppModel }) {
   }
 }
 
+/** The left-gutter avatar for a group message — its own component so the
+ * hydration effect gets a real Solid owner/cleanup scope as rows are
+ * virtualized in and out, matching how `ImageMessage` hydrates in
+ * `MessageBubble.tsx`. */
+function GroupAvatar(props: { model: AppModel; message: Message; scale: number }) {
+  const { state, actions } = props.model;
+  createEffect(() => {
+    const senderId = props.message.senderId;
+    if (senderId) void actions.loadParticipantAvatar(senderId);
+  });
+  return (
+    <Avatar
+      class="message-avatar"
+      name={props.message.senderName || props.message.senderPhoneNumber}
+      path={state.participantAvatars[props.message.senderId]}
+      size={30 * props.scale}
+    />
+  );
+}
+
+/** Same 5-minute/same-sender/same-day rule the renderer and the virtualizer
+ * estimator both need to agree on — G1's grouping and G11's height math. */
+function isGroupedWithPrevious(
+  message: Message | undefined,
+  previous: Message | undefined,
+  isGroup: boolean,
+): boolean {
+  if (!isGroup || !message || message.fromMe || !previous || previous.fromMe) return false;
+  if (!message.senderId || previous.senderId !== message.senderId) return false;
+  if (dayKey(previous.timestampMs) !== dayKey(message.timestampMs)) return false;
+  return message.timestampMs - previous.timestampMs <= 5 * 60 * 1000;
+}
+
 function estimateMessageHeight(
   message: Message | undefined,
   index: number,
   messages: readonly Message[],
   scale: number,
   firstUnreadMessageId: string,
+  isGroup: boolean,
+  density: Density,
 ): number {
-  if (!message) return 68 * scale;
-  let height = 48;
-  if (message.senderName && !message.fromMe) height += 18;
-  if (message.replyToMessageId) height += 55;
+  const compact = density === "compact";
+  if (!message) return (compact ? 42 : 68) * scale;
+  const grouped =
+    isGroupedWithPrevious(message, messages[index - 1], isGroup) && message.id !== firstUnreadMessageId;
+  // Compact hides the avatar gutter entirely (styles.css), so only
+  // comfortable density needs the avatar-row floor below.
+  const showsAvatarGutter = isGroup && !message.fromMe && !compact;
+  let height = compact ? 30 : 48;
+  if (message.senderName && !message.fromMe && !grouped) height += compact ? 13 : 18;
+  if (message.replyToMessageId) height += compact ? 42 : 55;
   if (message.content) {
-    if ("text" in message.content) height += Math.min(170, message.content.text.text.length * 0.32);
-    else if ("image" in message.content) height += message.content.image.sticker ? 200 : 285;
-    else if ("attachment" in message.content) height += 62;
-    else if ("contacts" in message.content) height += message.content.contacts.contacts.length * 60;
-    else height += 58;
+    if ("text" in message.content) {
+      height += Math.min(compact ? 130 : 170, message.content.text.text.length * (compact ? 0.26 : 0.32));
+    } else if ("image" in message.content) {
+      height += message.content.image.sticker ? (compact ? 165 : 200) : compact ? 230 : 285;
+    } else if ("attachment" in message.content) {
+      height += compact ? 50 : 62;
+    } else if ("contacts" in message.content) {
+      height += message.content.contacts.contacts.length * (compact ? 48 : 60);
+    } else {
+      height += compact ? 46 : 58;
+    }
   }
-  if (message.reactions.length > 0) height += 28;
+  if (message.reactions.length > 0) height += compact ? 20 : 28;
   if (index === 0 || dayKey(messages[index - 1]?.timestampMs ?? 0) !== dayKey(message.timestampMs)) {
-    height += 42;
+    height += compact ? 34 : 42;
   }
-  if (message.id === firstUnreadMessageId) height += 35;
+  if (message.id === firstUnreadMessageId) height += compact ? 28 : 35;
+  // Avatar (30px) + its bottom margin (3px) sets a floor even for a very
+  // short bubble, or the virtualizer under-sizes rows that are just an
+  // avatar-height tall and scroll position drifts — G1 + G11.
+  if (showsAvatarGutter) height = Math.max(height, 34);
   return height * scale;
 }
 
