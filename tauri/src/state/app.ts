@@ -1353,6 +1353,8 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
         setState("screen", "pairing");
         setState("chats", []);
         setState("conversations", {});
+        setState("pinnedMessages", {});
+        setState("pendingPollVotes", {});
         setState("panes", [emptyPane("pane-1")]);
         setState("focusedPaneId", "pane-1");
         setState("selectedChatId", "");
@@ -1366,6 +1368,8 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       attemptedAvatars.clear();
       participantAvatarQueue.clear();
       participantAvatarKeys.clear();
+      pollVoteGenerations.clear();
+      pinGenerations.clear();
       failedImageKeys.clear();
       failedAttachmentKeys.clear();
       persistWorkspace();
@@ -1587,7 +1591,10 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
             });
             await Promise.all([
               loadChats(true),
-              ...openChatIds.map((chatId) => loadConversation(chatId)),
+              ...openChatIds.flatMap((chatId) => [
+                loadConversation(chatId),
+                loadPinnedMessages(chatId),
+              ]),
             ]);
             markBackendReady();
             toast(`Backend reconnected and refreshed (epoch ${pendingEpoch})`, "info");
