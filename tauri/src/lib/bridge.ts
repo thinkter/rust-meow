@@ -6,6 +6,7 @@ import {
   openBrowserUrl,
   pickBrowserFile,
 } from "./browser-mock";
+import { SendIdempotency } from "./send-idempotency";
 
 import type {
   AttachmentKind,
@@ -271,6 +272,8 @@ export interface BridgeApi {
   restartApp(): Promise<never>;
 }
 
+const sendIdempotency = new SendIdempotency();
+
 /** Typed, camelCase native facade over every registered Tauri command. */
 const nativeBridge: BridgeApi = {
   subscribeBackend,
@@ -315,25 +318,43 @@ const nativeBridge: BridgeApi = {
       messageId,
     }),
   sendText: (chatId, text, replyToMessageId = "", mentionedJids = []) =>
-    invokeCommand<SendTextResponse>("send_text", {
+    sendIdempotency.run(
       chatId,
-      text,
-      replyToMessageId,
-      mentionedJids,
-    }),
+      ["text", text, replyToMessageId, [...mentionedJids]],
+      (clientMessageId) =>
+        invokeCommand<SendTextResponse>("send_text", {
+          clientMessageId,
+          chatId,
+          text,
+          replyToMessageId,
+          mentionedJids,
+        }),
+    ),
   sendImage: (chatId, imagePath, caption = "", replyToMessageId = "") =>
-    invokeCommand<SendImageResponse>("send_image", {
+    sendIdempotency.run(
       chatId,
-      imagePath,
-      caption,
-      replyToMessageId,
-    }),
+      ["image", imagePath, caption, replyToMessageId],
+      (clientMessageId) =>
+        invokeCommand<SendImageResponse>("send_image", {
+          clientMessageId,
+          chatId,
+          imagePath,
+          caption,
+          replyToMessageId,
+        }),
+    ),
   sendSticker: (chatId, imagePath, replyToMessageId = "") =>
-    invokeCommand<SendStickerResponse>("send_sticker", {
+    sendIdempotency.run(
       chatId,
-      imagePath,
-      replyToMessageId,
-    }),
+      ["sticker", imagePath, replyToMessageId],
+      (clientMessageId) =>
+        invokeCommand<SendStickerResponse>("send_sticker", {
+          clientMessageId,
+          chatId,
+          imagePath,
+          replyToMessageId,
+        }),
+    ),
   sendAttachment: (
     chatId,
     filePath,
@@ -342,14 +363,20 @@ const nativeBridge: BridgeApi = {
     replyToMessageId = "",
     voiceNote = false,
   ) =>
-    invokeCommand<SendAttachmentResponse>("send_attachment", {
+    sendIdempotency.run(
       chatId,
-      filePath,
-      kind,
-      caption,
-      replyToMessageId,
-      voiceNote,
-    }),
+      ["attachment", filePath, kind, caption, replyToMessageId, voiceNote],
+      (clientMessageId) =>
+        invokeCommand<SendAttachmentResponse>("send_attachment", {
+          clientMessageId,
+          chatId,
+          filePath,
+          kind,
+          caption,
+          replyToMessageId,
+          voiceNote,
+        }),
+    ),
   getMessageImage: (chatId, messageId) =>
     invokeCommand<GetMessageImageResponse>("get_message_image", {
       chatId,

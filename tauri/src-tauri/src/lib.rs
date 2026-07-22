@@ -336,6 +336,18 @@ macro_rules! expect_response {
     };
 }
 
+fn validate_client_message_id(client_message_id: String) -> Result<String, CommandError> {
+    let parsed = uuid::Uuid::parse_str(&client_message_id).map_err(|_| {
+        CommandError::invalid_argument("client_message_id must be a canonical UUID v4")
+    })?;
+    if parsed.get_version_num() != 4 || parsed.hyphenated().to_string() != client_message_id {
+        return Err(CommandError::invalid_argument(
+            "client_message_id must be a canonical UUID v4",
+        ));
+    }
+    Ok(client_message_id)
+}
+
 fn validate_attachment_kind(
     kind: i32,
     caption: &str,
@@ -591,6 +603,7 @@ async fn list_messages_around(
 #[tauri::command]
 async fn send_text(
     state: tauri::State<'_, BridgeService>,
+    client_message_id: String,
     chat_id: String,
     text: String,
     reply_to_message_id: String,
@@ -599,7 +612,7 @@ async fn send_text(
     let result = state
         .request(
             rpc_request::Request::SendText(proto::SendTextRequest {
-                client_message_id: uuid::Uuid::new_v4().to_string(),
+                client_message_id: validate_client_message_id(client_message_id)?,
                 chat_id,
                 text,
                 reply_to_message_id,
@@ -614,6 +627,7 @@ async fn send_text(
 #[tauri::command]
 async fn send_image(
     state: tauri::State<'_, BridgeService>,
+    client_message_id: String,
     chat_id: String,
     image_path: String,
     caption: String,
@@ -622,7 +636,7 @@ async fn send_image(
     let result = state
         .request(
             rpc_request::Request::SendImage(proto::SendImageRequest {
-                client_message_id: uuid::Uuid::new_v4().to_string(),
+                client_message_id: validate_client_message_id(client_message_id)?,
                 chat_id,
                 image_path,
                 caption,
@@ -637,10 +651,12 @@ async fn send_image(
 #[tauri::command]
 async fn send_sticker(
     state: tauri::State<'_, BridgeService>,
+    client_message_id: String,
     chat_id: String,
     image_path: String,
     reply_to_message_id: String,
 ) -> Result<proto::SendStickerResponse, CommandError> {
+    let client_message_id = validate_client_message_id(client_message_id)?;
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         sticker::prepare(std::path::Path::new(&image_path))
     })
@@ -651,7 +667,7 @@ async fn send_sticker(
     let result = state
         .request(
             rpc_request::Request::SendSticker(proto::SendStickerRequest {
-                client_message_id: uuid::Uuid::new_v4().to_string(),
+                client_message_id,
                 chat_id,
                 webp_data: prepared.webp_data,
                 reply_to_message_id,
@@ -699,8 +715,12 @@ async fn get_message_attachment(
 }
 
 #[tauri::command]
+// Keep the command's flat arguments aligned with the frontend and proto wire
+// fields; nesting only this send kind would make the Tauri ABI inconsistent.
+#[allow(clippy::too_many_arguments)]
 async fn send_attachment(
     state: tauri::State<'_, BridgeService>,
+    client_message_id: String,
     chat_id: String,
     file_path: String,
     kind: i32,
@@ -708,11 +728,12 @@ async fn send_attachment(
     reply_to_message_id: String,
     voice_note: bool,
 ) -> Result<proto::SendAttachmentResponse, CommandError> {
+    let client_message_id = validate_client_message_id(client_message_id)?;
     let kind = validate_attachment_kind(kind, &caption, voice_note)?;
     let result = state
         .request(
             rpc_request::Request::SendAttachment(proto::SendAttachmentRequest {
-                client_message_id: uuid::Uuid::new_v4().to_string(),
+                client_message_id,
                 chat_id,
                 file_path,
                 kind: kind as i32,
@@ -1047,6 +1068,26 @@ mod tests {
                 .unwrap_err(),
             validate_attachment_kind(proto::AttachmentKind::Document as i32, "", true).unwrap_err(),
         ] {
+            assert_eq!(error.code, "invalid_argument");
+            assert!(!error.retryable);
+        }
+    }
+
+    #[test]
+    fn client_message_id_validation_preserves_only_canonical_v4_ids() {
+        let client_message_id = "9d50a8b6-70ca-43db-94f0-2f65e9f71816".to_string();
+        assert_eq!(
+            validate_client_message_id(client_message_id.clone()).unwrap(),
+            client_message_id
+        );
+
+        for invalid in [
+            "",
+            "not-a-uuid",
+            "9D50A8B6-70CA-43DB-94F0-2F65E9F71816",
+            "9d50a8b6-70ca-13db-94f0-2f65e9f71816",
+        ] {
+            let error = validate_client_message_id(invalid.to_string()).unwrap_err();
             assert_eq!(error.code, "invalid_argument");
             assert!(!error.retryable);
         }
