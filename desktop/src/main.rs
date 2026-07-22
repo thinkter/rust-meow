@@ -4494,7 +4494,7 @@ impl RustMeow {
                                             reaction.sender_avatar_path.as_str()
                                         };
                                         let avatar =
-                                            avatar_element(&name, &avatar_path, px(38.), cx);
+                                            avatar_element(&name, avatar_path, px(38.), cx);
                                         h_flex()
                                             .id(("reaction-detail-row", index))
                                             .h(px(58.))
@@ -6043,17 +6043,16 @@ fn avatar_initials(name: &str) -> Option<String> {
         .filter_map(|word| word.chars().find(|character| character.is_alphabetic()))
         .take(2)
         .collect();
-    if initials.chars().count() < 2 {
-        if let Some(word) = words
+    if initials.chars().count() < 2
+        && let Some(word) = words
             .iter()
             .find(|word| word.chars().any(char::is_alphabetic))
-        {
-            initials = word
-                .chars()
-                .filter(|character| character.is_alphabetic())
-                .take(2)
-                .collect();
-        }
+    {
+        initials = word
+            .chars()
+            .filter(|character| character.is_alphabetic())
+            .take(2)
+            .collect();
     }
     (!initials.is_empty()).then(|| initials.to_uppercase())
 }
