@@ -68,6 +68,11 @@ export class NotificationActivationQueue {
     this.scheduleDrain();
   }
 
+  /** Pause routing while a fresh backend epoch is being hydrated. */
+  markNotReady(): void {
+    this.ready = false;
+  }
+
   /** Keep pre-bootstrap clicks valid when WhatsApp reports a JID merge. */
   mergeChatId(oldChatId: string, newChatId: string): void {
     if (!oldChatId || !newChatId || oldChatId === newChatId) return;

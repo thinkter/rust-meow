@@ -57,3 +57,21 @@ export class RestartEpochQueue {
     return epoch;
   }
 }
+
+/** Tokens stale in-flight reads so only the newest epoch may update shared state. */
+export class RequestGeneration {
+  private current = 0;
+
+  begin(): number {
+    this.current += 1;
+    return this.current;
+  }
+
+  invalidate(): void {
+    this.current += 1;
+  }
+
+  isCurrent(generation: number): boolean {
+    return generation === this.current;
+  }
+}

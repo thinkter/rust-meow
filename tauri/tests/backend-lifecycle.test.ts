@@ -4,6 +4,7 @@ import {
   activeConversationIds,
   backendLifecycleDecision,
   bootstrapFailureDecision,
+  RequestGeneration,
   RestartEpochQueue,
 } from "../src/state/backend-lifecycle.ts";
 
@@ -39,6 +40,16 @@ test("a restart queued during another resync is retained and coalesced to the la
   queue.push(4);
   assert.equal(queue.take(), 5);
   assert.equal(queue.take(), undefined);
+});
+
+test("a superseding list refresh invalidates old-epoch completion and cleanup", () => {
+  const generation = new RequestGeneration();
+  const oldEpoch = generation.begin();
+  const freshEpoch = generation.begin();
+  assert.equal(generation.isCurrent(oldEpoch), false);
+  assert.equal(generation.isCurrent(freshEpoch), true);
+  generation.invalidate();
+  assert.equal(generation.isCurrent(freshEpoch), false);
 });
 
 test("transient bootstrap failures wait for lifecycle recovery while terminal failures stay fatal", () => {

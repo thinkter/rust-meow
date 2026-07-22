@@ -1,6 +1,8 @@
 import { For, Show } from "solid-js";
 import { Plus, X } from "lucide-solid";
 import type { AppModel, Pane } from "../state/app";
+import { tabKeyboardCommand } from "../state/tab-keyboard";
+import { samePaneDropIndex } from "../state/workspace";
 import { ChatKind } from "../lib/types";
 import { Avatar } from "./Avatar";
 
@@ -62,6 +64,9 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
     event.preventDefault();
     const payload = readDragPayload(event);
     if (!payload) return;
+    if (payload.fromPaneId === props.pane.id) {
+      index = samePaneDropIndex(props.pane.tabChatIds, payload.chatId, index);
+    }
     actions.moveTab(payload.chatId, payload.fromPaneId, props.pane.id, index);
   }
 

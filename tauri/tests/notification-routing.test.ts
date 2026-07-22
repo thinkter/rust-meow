@@ -22,6 +22,21 @@ test("activation waits for bootstrap and duplicate native deliveries route once"
   assert.equal(queue.enqueue({ chatId: "chat-1", messageId: "message-1" }), false);
 });
 
+test("activation routing pauses across a backend restart until the fresh epoch is ready", async () => {
+  const routed: string[] = [];
+  const queue = new NotificationActivationQueue(({ chatId, messageId }) => {
+    routed.push(`${chatId}/${messageId}`);
+  });
+  queue.markReady();
+  queue.markNotReady();
+  queue.enqueue({ chatId: "chat-2", messageId: "message-2" });
+  await queue.flush();
+  assert.deepEqual(routed, []);
+  queue.markReady();
+  await queue.flush();
+  assert.deepEqual(routed, ["chat-2/message-2"]);
+});
+
 test("queued activation follows a chat merge and remains ordered", async () => {
   const routed: string[] = [];
   const queue = new NotificationActivationQueue(async ({ chatId, messageId }) => {

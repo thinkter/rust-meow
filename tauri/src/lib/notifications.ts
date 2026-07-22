@@ -48,12 +48,16 @@ export async function listenForNotificationActions(
 ): Promise<() => void> {
   if (browserMockEnabled) return () => undefined;
   const disposers: Array<() => void> = [];
+  let active = true;
   const activate = (target: NotificationTarget) => {
     void (async () => {
+      if (!active) return;
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      if (!active) return;
       const window = getCurrentWindow();
       await window.show().catch(() => undefined);
       await window.setFocus().catch(() => undefined);
+      if (!active) return;
       await open(target);
     })();
   };
@@ -88,6 +92,7 @@ export async function listenForNotificationActions(
   for (const target of pending) activate(target);
 
   return () => {
+    active = false;
     for (const dispose of disposers) dispose();
   };
 }

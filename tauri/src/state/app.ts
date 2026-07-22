@@ -34,6 +34,7 @@ import {
   activeConversationIds,
   backendLifecycleDecision,
   bootstrapFailureDecision,
+  RequestGeneration,
   RestartEpochQueue,
 } from "./backend-lifecycle";
 import { createPreferences } from "./preferences";
@@ -256,6 +257,8 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   let eventGapResyncing = false;
   let restartResyncing = false;
   const restartEpochs = new RestartEpochQueue();
+  const chatListGeneration = new RequestGeneration();
+  let disposed = false;
   let toastId = 0;
   const pendingImages = new Set<string>();
   const pollVoteGenerations = new Map<string, number>();
@@ -297,9 +300,11 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   async function bootstrap() {
     try {
       try {
-        disposeNotificationActions = await listenForNotificationActions((target) => {
+        const dispose = await listenForNotificationActions((target) => {
           notificationActivations.enqueue(target);
         });
+        if (disposed) dispose();
+        else disposeNotificationActions = dispose;
       } catch (error) {
         // Notifications are optional desktop integration. A missing or broken
         // platform service must not prevent the messaging bridge from starting.
@@ -373,13 +378,15 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     }
   }
 
-  async function loadChats(reset = false) {
-    if (state.loadingChats) return;
+  async function loadChats(reset = false, supersede = false) {
+    if (state.loadingChats && !supersede) return;
     if (!reset && !state.nextChatCursor) return;
+    const generation = chatListGeneration.begin();
     setState("loadingChats", true);
     try {
       const cursor = reset ? "" : state.nextChatCursor;
       const response = await bridge.listChats(cursor, 100);
+      if (!chatListGeneration.isCurrent(generation)) return;
       // Merge into the current snapshot even on a first-page refresh: a live
       // upsert or already-loaded tail page may have arrived while this request
       // was in flight.
@@ -390,9 +397,9 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
         setState("nextChatCursor", response.nextCursor);
       });
     } catch (error) {
-      toast(normalizeBridgeError(error).message);
+      if (chatListGeneration.isCurrent(generation)) toast(normalizeBridgeError(error).message);
     } finally {
-      setState("loadingChats", false);
+      if (chatListGeneration.isCurrent(generation)) setState("loadingChats", false);
     }
   }
 
@@ -1339,6 +1346,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   }
 
   function dispose() {
+    disposed = true;
     disposeNotificationActions?.();
     disposeNotificationActions = undefined;
     participantAvatarQueue.clear();
@@ -1348,10 +1356,12 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     try {
       stopTyping();
       await bridge.logout();
+      chatListGeneration.invalidate();
       batch(() => {
         setState("logoutConfirmation", false);
         setState("screen", "pairing");
         setState("chats", []);
+        setState("loadingChats", false);
         setState("conversations", {});
         setState("pinnedMessages", {});
         setState("pendingPollVotes", {});
@@ -1486,6 +1496,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
         {
           const decision = backendLifecycleDecision(event.payload);
           if (decision.phase === "reconnecting") {
+            notificationActivations.markNotReady();
             batch(() => {
               setState("connection", ConnectionState.Reconnecting);
               setState("connectionDetail", decision.detail);
@@ -1590,7 +1601,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
               setState("fatalError", "");
             });
             await Promise.all([
-              loadChats(true),
+              loadChats(true, true),
               ...openChatIds.flatMap((chatId) => [
                 loadConversation(chatId),
                 loadPinnedMessages(chatId),

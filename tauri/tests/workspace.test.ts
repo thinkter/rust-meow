@@ -5,6 +5,7 @@ import {
   conversationsToEvict,
   cycleSwitcher,
   moveTabBetweenPanes,
+  samePaneDropIndex,
   normalizeWorkspaceSnapshot,
   openSwitcher,
   openTab,
@@ -86,6 +87,13 @@ test("moving a tab within the same pane reorders it to the requested index", () 
   const moved = moveTabBetweenPanes(panes, "c", "pane-1", "pane-1", 0);
   assert.deepEqual(moved[0]!.tabChatIds, ["c", "a", "b"]);
   assert.equal(moved[0]!.activeChatId, "c");
+});
+
+test("same-pane rightward drops account for removing the source tab", () => {
+  const tabs = ["a", "b", "c"];
+  assert.equal(samePaneDropIndex(tabs, "a", 2), 1);
+  assert.equal(samePaneDropIndex(tabs, "a", 3), 2);
+  assert.equal(samePaneDropIndex(tabs, "c", 0), 0);
 });
 
 test("remapping a chat id updates a pane's tabs and active chat", () => {

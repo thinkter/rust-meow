@@ -104,6 +104,16 @@ export function moveTabBetweenPanes(
   });
 }
 
+/** Convert a DOM drop boundary into the insertion index after removing the dragged tab. */
+export function samePaneDropIndex(
+  tabChatIds: readonly string[],
+  chatId: string,
+  dropBoundary: number,
+): number {
+  const sourceIndex = tabChatIds.indexOf(chatId);
+  return sourceIndex >= 0 && sourceIndex < dropBoundary ? dropBoundary - 1 : dropBoundary;
+}
+
 export interface CloseTabResult {
   panes: Pane[];
   /** Set when closing the tab emptied its pane and that pane was removed. */
