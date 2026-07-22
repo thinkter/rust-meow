@@ -3802,6 +3802,12 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 	}
 	decoded := extractMessageContent(content, evt.Info.Type)
 	m := domain.Message{ID: string(evt.Info.ID), ChatJID: chatID, TransportJID: transportJID, SenderJID: evt.Info.Sender.ToNonAD().String(), Text: decoded.text, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe, Status: domain.StatusDelivered, Kind: decoded.kind, ReplyToID: messageContextInfo(content).GetStanzaID(), Image: decoded.image, Attachment: decoded.attachment, Contacts: decoded.contacts, Location: decoded.location, LinkPreview: decoded.linkPreview}
+	// Pin events point at the pinned message through their own MessageKey, not
+	// ContextInfo. Preserve that target on the ordinary reply/navigation field
+	// so every desktop can fetch and jump to the message that was pinned.
+	if pin := content.GetPinInChatMessage(); pin != nil && pin.GetKey().GetID() != "" {
+		m.ReplyToID = pin.GetKey().GetID()
+	}
 	if evt.IsEdit && protocol != nil && protocol.GetKey().GetID() != "" {
 		m.ID = protocol.GetKey().GetID()
 		m.EditedAt = time.UnixMilli(protocol.GetTimestampMS())

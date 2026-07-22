@@ -205,7 +205,7 @@ Known foundation blockers at this snapshot:
 | Video/GIF attachment and playback | Backend/Core/UI path | UI loops downloaded GIF-playback media inline and falls back to the OS player on codec failure; proof pending | **CP-11:** transcoding/thumbnail/duration, range playback, codec fallback, caption, bounded cache, and registered typed Tauri calls. |
 | Audio file and voice-note recording | Stored-attachment path; no recorder | Partial; recorder missing | **CP-12:** microphone permission, waveform/duration, cancel/lock/pause, upload, playback speed, seeking, background behavior, and registered typed Tauri calls. |
 | Contact and location message | Placeholder only | Missing | **CP-13:** render and send structured contact/location with safe external actions and privacy review. |
-| Poll create/vote/results | Placeholder only | Missing | **CP-14:** single/multi-select, encrypted vote updates, retraction, live totals, and history replay. |
+| Poll create/vote/results | Placeholder only | Read-only creation/options and result-snapshot presentation; create/vote reduction missing | **CP-14:** single/multi-select, encrypted vote updates, retraction, live totals, and history replay. |
 | Edit sent message | Missing | Missing | **CP-15:** eligibility window, optimistic edit, rejection rollback, edit event, and multi-device convergence. |
 | Delete for me/everyone | Missing | Missing | **CP-16:** eligibility/admin rules, confirmation, persistence, media-cache cleanup, and remote revoke result. |
 | Forward/share messages | Missing | Missing | **CP-17:** multi-select targets, forwarded metadata, media reuse/reupload, partial failure, and no wrong-chat sends. |

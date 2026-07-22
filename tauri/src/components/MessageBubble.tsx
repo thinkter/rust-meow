@@ -9,9 +9,11 @@ import {
   FileText,
   FileVideo,
   FolderDown,
+  ListChecks,
   MapPin,
   MessageSquareReply,
   Plus,
+  Pin,
   RefreshCcw,
   SmilePlus,
   TriangleAlert,
@@ -35,6 +37,7 @@ import {
   safeHttpUrl,
 } from "../lib/format";
 import { assetUrl, openUrl } from "../lib/bridge";
+import { parsePollFallback } from "../lib/unsupported";
 import { EmojiPicker } from "./EmojiPicker";
 import { IconButton, Spinner } from "./Primitives";
 
@@ -288,18 +291,41 @@ function MessageContent(props: { message: Message; model: AppModel; chatId: stri
               })()}
             </Show>
             <Show when={"unsupported" in value()}>
-              <div class="attachment-card">
-                <span class="attachment-icon"><TriangleAlert size={21} /></span>
-                <span class="attachment-meta">
-                  <strong>{(value() as { unsupported: { fallbackText: string; typeName: string } }).unsupported.fallbackText || "Unsupported message"}</strong>
-                  <span>{(value() as { unsupported: { fallbackText: string; typeName: string } }).unsupported.typeName}</span>
-                </span>
-              </div>
+              <UnsupportedMessage content={(value() as { unsupported: { fallbackText: string; typeName: string } }).unsupported} />
             </Show>
           </>
         )}
       </Show>
     </Show>
+  );
+}
+
+function UnsupportedMessage(props: { content: { fallbackText: string; typeName: string } }) {
+  const poll = () => parsePollFallback(props.content.fallbackText);
+  return (
+    <Switch>
+      <Match when={props.content.typeName === "poll"}>
+        <section class="poll-card" aria-label={poll().results ? "Poll results" : "Poll"}>
+          <header><ListChecks size={20} /><strong>{poll().title}</strong></header>
+          <For each={poll().options}>
+            {(option) => <div class="poll-option"><span aria-hidden="true" />{option}</div>}
+          </For>
+          <small>{poll().results ? "Poll results snapshot" : "Voting is not available in this build"}</small>
+        </section>
+      </Match>
+      <Match when={props.content.typeName === "pin"}>
+        <div class="system-message-card"><Pin size={17} /><span>{props.content.fallbackText || "Pinned message updated"}</span></div>
+      </Match>
+      <Match when={true}>
+        <div class="attachment-card">
+          <span class="attachment-icon"><TriangleAlert size={21} /></span>
+          <span class="attachment-meta">
+            <strong>{props.content.fallbackText || "Unsupported message"}</strong>
+            <span>{props.content.typeName}</span>
+          </span>
+        </div>
+      </Match>
+    </Switch>
   );
 }
 

@@ -1043,6 +1043,9 @@ func TestDomainMessageDecodesRichContent(t *testing.T) {
 		{"poll", event("poll", &waE2E.Message{PollCreationMessageV3: &waE2E.PollCreationMessage{Name: proto.String("Lunch"), Options: []*waE2E.PollCreationMessage_Option{{OptionName: proto.String("Pizza")}, {OptionName: proto.String("Sushi")}}}}), func(m domain.Message) bool {
 			return m.Kind == "poll" && m.Text == "📊 Poll: Lunch\n• Pizza\n• Sushi"
 		}},
+		{"pin target", event("pin", &waE2E.Message{PinInChatMessage: &waE2E.PinInChatMessage{Key: &waCommon.MessageKey{ID: proto.String("pinned-message")}, Type: waE2E.PinInChatMessage_PIN_FOR_ALL.Enum()}}), func(m domain.Message) bool {
+			return m.Kind == "pin" && m.Text == "📌 Pinned a message" && m.ReplyToID == "pinned-message"
+		}},
 		{"group invite", event("invite", &waE2E.Message{GroupInviteMessage: &waE2E.GroupInviteMessage{GroupName: proto.String("Friends")}}), func(m domain.Message) bool {
 			return m.Kind == "group_invite" && m.Text == "👥 Group invite: Friends"
 		}},

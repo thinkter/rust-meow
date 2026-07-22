@@ -1353,6 +1353,50 @@ html[data-appearance="light"] .message-sender {
   white-space: nowrap;
 }
 
+.poll-card {
+  display: grid;
+  width: min(calc(300px * var(--scale)), 55vw);
+  gap: 8px;
+  margin-bottom: 5px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.poll-card header,
+.system-message-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.poll-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 4px;
+  border-top: 1px solid var(--border);
+}
+
+.poll-option > span {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 2px solid var(--fg-subtle);
+  border-radius: var(--radius-full);
+}
+
+.poll-card small {
+  color: var(--fg-subtle);
+}
+
+.system-message-card {
+  padding: 7px 9px;
+  color: var(--fg-muted);
+  font-size: calc(12px * var(--scale));
+}
+
 .attachment-card,
 .contact-card,
 .location-card,
