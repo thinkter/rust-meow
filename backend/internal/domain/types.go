@@ -111,6 +111,38 @@ type Location struct {
 	Live      bool
 }
 
+// StickerCandidate is a deduplicated sticker sourced from local message
+// history: one representative message stands in for every message carrying
+// the same plaintext content hash.
+type StickerCandidate struct {
+	ID          string // hex(FileSHA256)
+	ChatJID     string
+	MessageID   string
+	MIMEType    string
+	Width       uint32
+	Height      uint32
+	Animated    bool
+	FromMe      bool
+	TimestampMs int64
+}
+
+// FavoriteSticker is a sticker WhatsApp synced through app-state as
+// favourited on another linked device. It has no associated local message,
+// only the raw media descriptor needed to download it directly.
+type FavoriteSticker struct {
+	ID            string // hex(FileEncSHA256): no plaintext hash is ever synced
+	MIMEType      string
+	DirectPath    string
+	MediaKey      []byte
+	FileEncSHA256 []byte
+	Width         uint32
+	Height        uint32
+	Animated      bool
+	FileSize      uint64
+	LocalPath     string
+	UpdatedAtMs   int64
+}
+
 type Reaction struct {
 	ChatJID   string
 	MessageID string
