@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +28,7 @@ type Store struct{ db *sql.DB }
 const (
 	reactionReplaySchemaVersion = 9
 	searchSchemaVersion         = 10
-	supportedSchemaVersion      = 11
+	supportedSchemaVersion      = 12
 )
 
 type ChatMerge struct {
@@ -87,7 +89,7 @@ func (s *Store) ClearAccountData(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{`DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM chats`, `DELETE FROM sync_state`} {
+	for _, statement := range []string{`DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM sticker_favorites`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("clear account data: %w", err)
 		}
@@ -209,6 +211,10 @@ CREATE TABLE IF NOT EXISTS messages(
   FOREIGN KEY(chat_jid) REFERENCES chats(jid) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS messages_page_idx ON messages(chat_jid, timestamp DESC, id DESC);
+-- Every other messages index leads with chat_jid, so a cross-chat sticker
+-- library scan otherwise reads the whole table. This partial index only
+-- covers sticker rows, which are a small fraction of most accounts' history.
+CREATE INDEX IF NOT EXISTS messages_sticker_idx ON messages(timestamp DESC, id DESC) WHERE kind='sticker';
 CREATE TABLE IF NOT EXISTS reactions(
   chat_jid TEXT NOT NULL,
   message_id TEXT NOT NULL,
@@ -262,6 +268,20 @@ CREATE TABLE IF NOT EXISTS legacy_reaction_replays(
   PRIMARY KEY(chat_jid,event_message_id)
 );
 CREATE INDEX IF NOT EXISTS legacy_reaction_replays_request_idx ON legacy_reaction_replays(request_id);
+CREATE TABLE IF NOT EXISTS sticker_favorites(
+  id TEXT PRIMARY KEY,
+  mime_type TEXT NOT NULL DEFAULT '',
+  direct_path TEXT NOT NULL DEFAULT '',
+  media_key BLOB NOT NULL DEFAULT X'',
+  file_enc_sha256 BLOB NOT NULL DEFAULT X'',
+  width INTEGER NOT NULL DEFAULT 0,
+  height INTEGER NOT NULL DEFAULT 0,
+  animated INTEGER NOT NULL DEFAULT 0,
+  file_size INTEGER NOT NULL DEFAULT 0,
+  local_path TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS sticker_favorites_updated_idx ON sticker_favorites(updated_at DESC, id DESC);
 `
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -444,7 +464,7 @@ END;`
 	}
 	if currentVersion < supportedSchemaVersion {
 		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=?`, supportedSchemaVersion); err != nil {
-			return fmt.Errorf("record schema v11: %w", err)
+			return fmt.Errorf("record schema v12: %w", err)
 		}
 	}
 	return tx.Commit()
@@ -1625,6 +1645,143 @@ func (s *Store) SetAttachmentLocalPath(ctx context.Context, chatJID, messageID, 
 	}
 	chatJID = resolved
 	result, err := s.db.ExecContext(ctx, `UPDATE messages SET image_local_path=? WHERE chat_jid=? AND id=? AND kind IN ('video','audio','document')`, localPath, chatJID, messageID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// stickerScanLimit bounds how many sticker messages RecentStickerMessages
+// reads before the caller deduplicates and caps its own pack sizes. It is
+// intentionally larger than any pack's display cap because the same sticker
+// sent repeatedly occupies one row per message (the media cache is keyed by
+// chat+message, not by content), so a naive small scan can under-fill a pack
+// even when the account has plenty of distinct stickers.
+const stickerScanLimit = 2000
+
+// RecentStickerMessages returns sticker messages across every chat, newest
+// first, bounded by scanLimit (RecentStickerMessages uses stickerScanLimit
+// when scanLimit is not a sane positive bound). Only messages with a known
+// plaintext content hash are included, which is every sticker message this
+// client has ever sent or received.
+func (s *Store) RecentStickerMessages(ctx context.Context, scanLimit int) ([]domain.StickerCandidate, error) {
+	if scanLimit <= 0 || scanLimit > 5000 {
+		scanLimit = stickerScanLimit
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT chat_jid,id,from_me,timestamp,image_mime,image_file_sha256,image_width,image_height,image_animated
+FROM messages WHERE kind='sticker' AND revoked=0 AND image_file_sha256<>X'' ORDER BY timestamp DESC,id DESC LIMIT ?`, scanLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]domain.StickerCandidate, 0, scanLimit)
+	for rows.Next() {
+		var chatJID, messageID, mimeType string
+		var fromMe, animated bool
+		var timestamp int64
+		var fileSHA256 []byte
+		var width, height int64
+		if err = rows.Scan(&chatJID, &messageID, &fromMe, &timestamp, &mimeType, &fileSHA256, &width, &height, &animated); err != nil {
+			return nil, err
+		}
+		items = append(items, domain.StickerCandidate{
+			ID: fmt.Sprintf("%x", fileSHA256), ChatJID: chatJID, MessageID: messageID, MIMEType: mimeType,
+			Width: uint32(width), Height: uint32(height), Animated: animated, FromMe: fromMe, TimestampMs: timestamp,
+		})
+	}
+	return items, rows.Err()
+}
+
+// StickerMessageBySHA256 finds one message that can supply the bytes for a
+// sticker identified by the hex encoding of its plaintext content hash, as
+// produced by RecentStickerMessages / StickerCandidate.ID.
+func (s *Store) StickerMessageBySHA256(ctx context.Context, fileSHA256Hex string) (chatJID, messageID, mimeType string, err error) {
+	raw, decodeErr := hex.DecodeString(fileSHA256Hex)
+	if decodeErr != nil || len(raw) != sha256.Size {
+		return "", "", "", sql.ErrNoRows
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT chat_jid,id,image_mime FROM messages WHERE kind='sticker' AND revoked=0 AND image_file_sha256=? ORDER BY timestamp DESC,id DESC LIMIT 1`, raw).
+		Scan(&chatJID, &messageID, &mimeType)
+	return chatJID, messageID, mimeType, err
+}
+
+// FavoriteStickers returns stickers WhatsApp synced as favourited on another
+// linked device, newest first.
+func (s *Store) FavoriteStickers(ctx context.Context, limit int) ([]domain.FavoriteSticker, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 300
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,mime_type,direct_path,media_key,file_enc_sha256,width,height,animated,file_size,local_path,updated_at
+FROM sticker_favorites ORDER BY updated_at DESC,id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]domain.FavoriteSticker, 0, limit)
+	for rows.Next() {
+		item, scanErr := scanFavoriteSticker(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// FavoriteSticker looks up one favourite by ID (see domain.FavoriteSticker.ID).
+func (s *Store) FavoriteSticker(ctx context.Context, id string) (domain.FavoriteSticker, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id,mime_type,direct_path,media_key,file_enc_sha256,width,height,animated,file_size,local_path,updated_at
+FROM sticker_favorites WHERE id=?`, id)
+	return scanFavoriteSticker(row)
+}
+
+type favoriteStickerScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanFavoriteSticker(scanner favoriteStickerScanner) (domain.FavoriteSticker, error) {
+	var f domain.FavoriteSticker
+	var width, height, fileSize, updatedAt int64
+	err := scanner.Scan(&f.ID, &f.MIMEType, &f.DirectPath, &f.MediaKey, &f.FileEncSHA256, &width, &height, &f.Animated, &fileSize, &f.LocalPath, &updatedAt)
+	if err != nil {
+		return domain.FavoriteSticker{}, err
+	}
+	f.Width, f.Height, f.FileSize, f.UpdatedAtMs = uint32(width), uint32(height), uint64(fileSize), updatedAt
+	return f, nil
+}
+
+// UpsertFavoriteSticker records or refreshes a favourite from a WhatsApp
+// app-state `favoriteSticker` SET mutation.
+func (s *Store) UpsertFavoriteSticker(ctx context.Context, fav domain.FavoriteSticker) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sticker_favorites(id,mime_type,direct_path,media_key,file_enc_sha256,width,height,animated,file_size,local_path,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,'',?)
+ON CONFLICT(id) DO UPDATE SET mime_type=excluded.mime_type,direct_path=excluded.direct_path,media_key=excluded.media_key,
+  file_enc_sha256=excluded.file_enc_sha256,width=excluded.width,height=excluded.height,animated=excluded.animated,
+  file_size=excluded.file_size,updated_at=excluded.updated_at`,
+		fav.ID, fav.MIMEType, fav.DirectPath, fav.MediaKey, fav.FileEncSHA256, fav.Width, fav.Height, fav.Animated, fav.FileSize, fav.UpdatedAtMs)
+	return err
+}
+
+// RemoveFavoriteSticker un-favourites a sticker. It reports whether a row was
+// actually removed so the caller only emits a change event when needed.
+func (s *Store) RemoveFavoriteSticker(ctx context.Context, id string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM sticker_favorites WHERE id=?`, id)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed > 0, err
+}
+
+func (s *Store) SetFavoriteStickerLocalPath(ctx context.Context, id, localPath string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE sticker_favorites SET local_path=? WHERE id=?`, localPath, id)
 	if err != nil {
 		return err
 	}

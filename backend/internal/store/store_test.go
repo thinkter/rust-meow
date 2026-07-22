@@ -1381,3 +1381,129 @@ func TestEditAndRevokeUpdateCurrentPreviewAndSurviveReplay(t *testing.T) {
 		t.Fatalf("preview=%q", chat.LastMessageText)
 	}
 }
+
+func TestRecentStickerMessagesFindsAndDedupesStickerHistory(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	hash1 := bytes.Repeat([]byte{0x11}, 32)
+	hash2 := bytes.Repeat([]byte{0x22}, 32)
+	messages := []domain.Message{
+		{ID: "s1", ChatJID: "111@s.whatsapp.net", Kind: "sticker", Timestamp: time.Unix(1, 0), FromMe: true,
+			Image: &domain.Image{MIMEType: "image/webp", FileSHA256: hash1, Width: 512, Height: 512}},
+		// Same content hash sent again in a different chat: RecentStickerMessages
+		// should return only one representative row for hash1.
+		{ID: "s2", ChatJID: "222@s.whatsapp.net", Kind: "sticker", Timestamp: time.Unix(2, 0), FromMe: false,
+			Image: &domain.Image{MIMEType: "image/webp", FileSHA256: hash1, Width: 512, Height: 512}},
+		{ID: "s3", ChatJID: "111@s.whatsapp.net", Kind: "sticker", Timestamp: time.Unix(3, 0), FromMe: true,
+			Image: &domain.Image{MIMEType: "image/webp", FileSHA256: hash2, Width: 256, Height: 256}},
+		// A text message must never be treated as a sticker candidate.
+		{ID: "m1", ChatJID: "111@s.whatsapp.net", Kind: "text", Timestamp: time.Unix(4, 0), Text: "hi"},
+	}
+	if err = s.ApplyMessages(ctx, messages, false); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates, err := s.RecentStickerMessages(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 3 {
+		t.Fatalf("got %d sticker candidates, want 3 (dedup happens by caller, not here): %+v", len(candidates), candidates)
+	}
+	if candidates[0].MessageID != "s3" || candidates[0].ID != fmt.Sprintf("%x", hash2) {
+		// Newest first.
+		t.Fatalf("first candidate = %+v, want newest (s3)", candidates[0])
+	}
+
+	wantChatJID, err := s.ResolveChat(ctx, "222@s.whatsapp.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatJID, messageID, mimeType, err := s.StickerMessageBySHA256(ctx, fmt.Sprintf("%x", hash1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mimeType != "image/webp" {
+		t.Fatalf("mime_type=%q", mimeType)
+	}
+	if chatJID != wantChatJID || messageID != "s2" {
+		t.Fatalf("StickerMessageBySHA256 = (%q,%q), want the newest message carrying hash1 (%q,s2)", chatJID, messageID, wantChatJID)
+	}
+
+	if _, _, _, err = s.StickerMessageBySHA256(ctx, "not-hex"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("invalid hex hash: err=%v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestFavoriteStickerUpsertAndRemove(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	fav := domain.FavoriteSticker{
+		ID: "abc123", MIMEType: "image/webp", DirectPath: "/v/t1/abc", MediaKey: []byte("key"),
+		FileEncSHA256: []byte("enc"), Width: 100, Height: 100, Animated: true, FileSize: 1024, UpdatedAtMs: 5,
+	}
+	if err = s.UpsertFavoriteSticker(ctx, fav); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.FavoriteSticker(ctx, fav.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MIMEType != fav.MIMEType || got.Width != fav.Width || !got.Animated {
+		t.Fatalf("round trip = %+v, want %+v", got, fav)
+	}
+
+	// Re-favouriting the same ID with a fresher record updates in place rather
+	// than duplicating the row.
+	fav.Width = 200
+	fav.UpdatedAtMs = 9
+	if err = s.UpsertFavoriteSticker(ctx, fav); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.FavoriteStickers(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].Width != 200 {
+		t.Fatalf("favourites = %+v, want one row with width 200", all)
+	}
+
+	if err = s.SetFavoriteStickerLocalPath(ctx, fav.ID, "/cache/fav-abc.webp"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.FavoriteSticker(ctx, fav.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LocalPath != "/cache/fav-abc.webp" {
+		t.Fatalf("local_path=%q", got.LocalPath)
+	}
+
+	removed, err := s.RemoveFavoriteSticker(ctx, fav.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed {
+		t.Fatal("want removed=true for an existing favourite")
+	}
+	removed, err = s.RemoveFavoriteSticker(ctx, fav.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed {
+		t.Fatal("want removed=false: already gone")
+	}
+	if _, err = s.FavoriteSticker(ctx, fav.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("err=%v, want sql.ErrNoRows after removal", err)
+	}
+}
