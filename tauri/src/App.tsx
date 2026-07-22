@@ -28,6 +28,13 @@ import { IconButton } from "./components/Primitives";
 export default function App() {
   const model = createAppModel();
   const { state, actions, preferences, prefActions } = model;
+  if (window.__RUST_MEOW_PERF_CONFIG__) {
+    window.__RUST_MEOW_PERF_INSPECT__ = {
+      chatCount: () => state.chats.length,
+      messageCount: () => state.conversations[state.selectedChatId]?.messages.length ?? 0,
+      participantCount: () => state.chatInfo?.participantCount ?? 0,
+    };
+  }
   let searchInput: HTMLInputElement | undefined;
 
   onMount(() => {

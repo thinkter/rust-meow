@@ -126,14 +126,18 @@ async function hydrateFixture(): Promise<void> {
   await waitFor(() => document.querySelectorAll(".message-row").length > 0);
   await waitFor(() => window.__RUST_MEOW_PERF_INSPECT__?.participantCount() === 1_000);
   const scroller = requiredElement<HTMLElement>(".message-scroller");
-  // Forty 50-row pages cover the complete 2,000-message fixture. A few extra
-  // iterations prove that top-edge loading becomes idempotent at exhaustion.
-  for (let page = 0; page < 44; page += 1) {
+  // Forty 50-row pages cover the complete 2,000-message fixture. Wait for
+  // each page rather than relying on timing so a slow IPC round trip cannot
+  // make the next top-edge event disappear behind the in-flight guard.
+  for (let page = 0; page < 44 && window.__RUST_MEOW_PERF_INSPECT__!.messageCount() < 2_000; page += 1) {
+    const before = window.__RUST_MEOW_PERF_INSPECT__!.messageCount();
     scroller.scrollTop = 0;
     scroller.dispatchEvent(new Event("scroll"));
-    await delay(50);
+    await waitFor(() => window.__RUST_MEOW_PERF_INSPECT__!.messageCount() > before, 2_000);
   }
-  await waitFor(() => window.__RUST_MEOW_PERF_INSPECT__?.messageCount() === 2_000, 30_000);
+  if (window.__RUST_MEOW_PERF_INSPECT__!.messageCount() !== 2_000) {
+    throw new Error("performance fixture did not hydrate all 2,000 messages");
+  }
 }
 
 async function measureChatSwitches(trials: number): Promise<number[]> {
