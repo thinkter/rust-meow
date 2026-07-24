@@ -10,6 +10,7 @@ import {
 } from "../lib/theme";
 
 const STORAGE_KEY = "rust-meow-preferences";
+const OPTIONAL_MEMBER_PANEL_MIGRATION_KEY = "rust-meow-member-panel-opt-in-v1";
 
 export type Density = "comfortable" | "compact";
 
@@ -19,7 +20,7 @@ export interface Preferences {
   uiScale: number;
   /** `compact` is the experimental condensed message view. */
   density: Density;
-  /** Discord-style always-on member list beside group conversations. */
+  /** Whether the optional member list is docked beside group conversations. */
   memberPanelOpen: boolean;
   /** Persisted so the sidebar remembers a collapsed workspace. */
   sidebarCollapsed: boolean;
@@ -46,7 +47,7 @@ const defaults: Preferences = {
   customThemes: [],
   uiScale: 1,
   density: "comfortable",
-  memberPanelOpen: true,
+  memberPanelOpen: false,
   sidebarCollapsed: false,
   downloadDir: "",
   linuxBrowserApp: "",
@@ -62,9 +63,21 @@ const defaults: Preferences = {
 function readStored(): Partial<Preferences> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return legacyPreferences();
+    if (!raw) {
+      localStorage.setItem(OPTIONAL_MEMBER_PANEL_MIGRATION_KEY, "1");
+      return legacyPreferences();
+    }
     const parsed: unknown = JSON.parse(raw);
-    return typeof parsed === "object" && parsed !== null ? (parsed as Partial<Preferences>) : {};
+    if (typeof parsed !== "object" || parsed === null) return {};
+    const stored = parsed as Partial<Preferences>;
+    // Older releases persisted the always-on default along with unrelated
+    // settings. Reset it once so the new optional panel truly starts closed;
+    // later user toggles remain persisted normally.
+    if (localStorage.getItem(OPTIONAL_MEMBER_PANEL_MIGRATION_KEY) !== "1") {
+      stored.memberPanelOpen = false;
+      localStorage.setItem(OPTIONAL_MEMBER_PANEL_MIGRATION_KEY, "1");
+    }
+    return stored;
   } catch {
     return {};
   }

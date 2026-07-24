@@ -519,10 +519,10 @@ export function SettingsPanel(props: { model: AppModel }) {
                   onChange={(value) => prefActions.update("sidebarCollapsed", !value)}
                 />
               </SettingRow>
-              <SettingRow title="Always show member list" description="Keep the member list docked open for group chats">
+              <SettingRow title="Show member list" description="Dock the optional member list beside group chats">
                 <Toggle
                   checked={preferences.memberPanelOpen}
-                  label="Always show member list"
+                  label="Show member list"
                   onChange={(value) => prefActions.update("memberPanelOpen", value)}
                 />
               </SettingRow>

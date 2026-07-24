@@ -3,7 +3,6 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import {
   Archive,
   CheckCheck,
-  LoaderCircle,
   MessageSquarePlus,
   Pin,
   Search,
@@ -108,7 +107,7 @@ export function Sidebar(props: SidebarProps) {
         <Show
           when={chats().length > 0}
           fallback={
-            <Show when={!state.loadingChats} fallback={<EmptyState title="Loading chats…"><Spinner /></EmptyState>}>
+            <Show when={!state.loadingChats} fallback={<EmptyState><Spinner label="Loading chats…" /></EmptyState>}>
               <EmptyState title={emptyLabel(state.chatFilter)}>
                 {state.chatFilter === "archived" ? <Archive size={22} /> : <CheckCheck size={22} />}
               </EmptyState>
@@ -271,7 +270,7 @@ function SearchResults(props: { model: AppModel; ref?: (element: HTMLDivElement)
     >
       <Switch>
         <Match when={state.searchLoading}>
-          <EmptyState title="Searching…"><LoaderCircle class="spinner" size={22} /></EmptyState>
+          <EmptyState><Spinner label="Searching…" /></EmptyState>
         </Match>
         <Match when={state.searchError}>
           <EmptyState title={state.searchError}><X size={22} /></EmptyState>

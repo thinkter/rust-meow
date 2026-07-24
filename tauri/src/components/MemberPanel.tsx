@@ -7,8 +7,8 @@ import { ParticipantList } from "./ParticipantList";
 import { Spinner } from "./Primitives";
 
 /**
- * Discord-style member list, docked open beside group conversations (goal
- * G8). Info loads through `actions.ensureMentionDirectory()` — the same
+ * Optional member list, docked beside group conversations when the user
+ * toggles it on. Info loads through `actions.ensureMentionDirectory()` — the same
  * fetch the mention autocomplete uses — so opening this panel never flips
  * on `state.chatInfoOpen` and pops the full chat-info sheet on top of it.
  *
