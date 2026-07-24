@@ -34,25 +34,27 @@ type MessageWindow struct {
 }
 
 type Message struct {
-	ID           string
-	ChatJID      string
-	TransportJID string
-	SenderJID    string
-	Text         string
-	Timestamp    time.Time
-	FromMe       bool
-	Status       MessageStatus
-	Kind         string
-	ReplyToID    string
-	EditedAt     time.Time
-	Revoked      bool
-	Reactions    []Reaction
-	Image        *Image
-	Attachment   *Attachment
-	Contacts     []Contact
-	Location     *Location
-	LinkPreview  *LinkPreview
-	Poll         *Poll
+	ID              string
+	ChatJID         string
+	TransportJID    string
+	SenderJID       string
+	Text            string
+	Timestamp       time.Time
+	FromMe          bool
+	Status          MessageStatus
+	Kind            string
+	ReplyToID       string
+	ReplyToChatID   string
+	EditedAt        time.Time
+	Revoked         bool
+	ForwardingScore uint32
+	Reactions       []Reaction
+	Image           *Image
+	Attachment      *Attachment
+	Contacts        []Contact
+	Location        *Location
+	LinkPreview     *LinkPreview
+	Poll            *Poll
 }
 
 type Poll struct {
@@ -66,6 +68,12 @@ type PollOption struct {
 	Name         string
 	VoteCount    uint32
 	SelectedByMe bool
+	Voters       []PollVoter
+}
+
+type PollVoter struct {
+	JID    string
+	FromMe bool
 }
 
 type PollVote struct {

@@ -50,6 +50,8 @@ message RpcRequest {
     VotePollRequest vote_poll = 29;
     SetMessagePinRequest set_message_pin = 30;
     ListPinnedMessagesRequest list_pinned_messages = 31;
+    ForwardMessageRequest forward_message = 32;
+    EditMessageRequest edit_message = 33;
   }
 }
 
@@ -88,6 +90,8 @@ message RpcResponse {
     VotePollResponse vote_poll = 38;
     SetMessagePinResponse set_message_pin = 39;
     ListPinnedMessagesResponse list_pinned_messages = 40;
+    ForwardMessageResponse forward_message = 41;
+    EditMessageResponse edit_message = 42;
   }
 }
 
@@ -253,17 +257,36 @@ message SendTextRequest {
   string chat_id = 2;
   string text = 3;
   // Empty for a normal message. Otherwise this message is sent as a native
-  // WhatsApp reply to the referenced message in the same chat.
+  // WhatsApp reply to the referenced message in reply_to_chat_id (or this chat).
   string reply_to_message_id = 4;
   // Full JIDs of participants tagged in `text`. Each tagged participant is
   // referenced in the text as `@<jid-user>`; WhatsApp clients render that
   // token as the contact's name and notify the mentioned member.
   repeated string mentioned_jids = 5;
+  // Empty or equal to chat_id for an ordinary reply. For "reply privately",
+  // this is the group containing reply_to_message_id while chat_id is the DM.
+  string reply_to_chat_id = 6;
 }
 
 message SendTextResponse {
   Message message = 1;
 }
+
+message ForwardMessageRequest {
+  // Stable UUID with the same idempotency contract as SendTextRequest.
+  string client_message_id = 1;
+  string source_chat_id = 2;
+  string message_id = 3;
+  string target_chat_id = 4;
+}
+message ForwardMessageResponse { Message message = 1; }
+
+message EditMessageRequest {
+  string chat_id = 1;
+  string message_id = 2;
+  string text = 3;
+}
+message EditMessageResponse { Message message = 1; }
 
 message SendImageRequest {
   // Stable UUID with the same idempotency contract as SendTextRequest.
@@ -273,6 +296,7 @@ message SendImageRequest {
   string image_path = 3;
   string caption = 4;
   string reply_to_message_id = 5;
+  string reply_to_chat_id = 6;
 }
 
 message SendImageResponse { Message message = 1; }
@@ -506,6 +530,15 @@ message Message {
   repeated Reaction reactions = 13;
   // The message this one quotes, when it is a native WhatsApp reply.
   string reply_to_message_id = 14;
+  // Zero means this was not forwarded. WhatsApp increments the score each
+  // time a forwarded message is forwarded again.
+  uint32 forwarding_score = 15;
+  // Rendered labels, without the leading @, that occur as native mentions in
+  // the message body or caption.
+  repeated string mention_texts = 16;
+  // The conversation containing reply_to_message_id. Empty means this chat.
+  // A different value is a native private reply to a group message.
+  string reply_to_chat_id = 17;
 
   oneof content {
     TextContent text = 20;
@@ -622,6 +655,13 @@ message PollOption {
   string name = 1;
   uint32 vote_count = 2;
   bool selected_by_me = 3;
+  repeated PollVoter voters = 4;
+}
+message PollVoter {
+  string user_id = 1;
+  string display_name = 2;
+  string avatar_path = 3;
+  bool from_me = 4;
 }
 message PollContent {
   string question = 1;
@@ -674,6 +714,7 @@ message SendStickerRequest {
   // A complete WhatsApp-compatible WebP file prepared by the desktop.
   bytes webp_data = 3;
   string reply_to_message_id = 4;
+  string reply_to_chat_id = 5;
 }
 
 message SendStickerResponse { Message message = 1; }
@@ -720,6 +761,7 @@ message SendStickerFromLibraryRequest {
   // A Sticker.id from a previous ListStickers response.
   string sticker_id = 3;
   string reply_to_message_id = 4;
+  string reply_to_chat_id = 5;
 }
 
 message SendStickerFromLibraryResponse { Message message = 1; }
@@ -751,6 +793,7 @@ message SendAttachmentRequest {
   string reply_to_message_id = 6;
   // Audio only. Voice notes must contain Ogg Opus data.
   bool voice_note = 7;
+  string reply_to_chat_id = 8;
 }
 
 message SendAttachmentResponse { Message message = 1; }

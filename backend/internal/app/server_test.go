@@ -322,9 +322,15 @@ func TestWireMessageIncludesImageMetadata(t *testing.T) {
 }
 
 func TestWireMessageIncludesReplyTarget(t *testing.T) {
-	message := wireMessage(domain.Message{ID: "reply", ChatJID: "chat", Kind: "text", Text: "yes", ReplyToID: "original"})
+	message := wireMessage(domain.Message{ID: "reply", ChatJID: "chat", Kind: "text", Text: "yes", ReplyToID: "original", ReplyToChatID: "source-chat", ForwardingScore: 3})
 	if message.GetReplyToMessageId() != "original" {
 		t.Fatalf("reply target=%q", message.GetReplyToMessageId())
+	}
+	if message.GetReplyToChatId() != "source-chat" {
+		t.Fatalf("reply source chat=%q", message.GetReplyToChatId())
+	}
+	if message.GetForwardingScore() != 3 {
+		t.Fatalf("forwarding score=%d", message.GetForwardingScore())
 	}
 }
 
@@ -362,8 +368,8 @@ func TestWireRichMessageContent(t *testing.T) {
 	if location == nil || location.GetLatitude() != 12.9 || location.GetName() != "Office" {
 		t.Fatalf("location=%+v", location)
 	}
-	poll := wireMessage(domain.Message{Kind: "poll", Poll: &domain.Poll{Question: "Lunch?", SelectableOptionsCount: 1, TotalVoters: 2, Options: []domain.PollOption{{Name: "Pizza", VoteCount: 2, SelectedByMe: true}, {Name: "Sushi"}}}}).GetPoll()
-	if poll == nil || poll.GetQuestion() != "Lunch?" || poll.GetTotalVoters() != 2 || len(poll.GetOptions()) != 2 || !poll.GetOptions()[0].GetSelectedByMe() {
+	poll := wireMessage(domain.Message{Kind: "poll", Poll: &domain.Poll{Question: "Lunch?", SelectableOptionsCount: 1, TotalVoters: 2, Options: []domain.PollOption{{Name: "Pizza", VoteCount: 2, SelectedByMe: true, Voters: []domain.PollVoter{{JID: "alice@s.whatsapp.net"}}}, {Name: "Sushi"}}}}).GetPoll()
+	if poll == nil || poll.GetQuestion() != "Lunch?" || poll.GetTotalVoters() != 2 || len(poll.GetOptions()) != 2 || !poll.GetOptions()[0].GetSelectedByMe() || len(poll.GetOptions()[0].GetVoters()) != 1 || poll.GetOptions()[0].GetVoters()[0].GetUserId() != "alice@s.whatsapp.net" {
 		t.Fatalf("poll=%+v", poll)
 	}
 }

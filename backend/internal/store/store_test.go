@@ -117,6 +117,20 @@ func TestRichMessageContentRoundTrips(t *testing.T) {
 	if err = s.ApplyMessages(ctx, messages, false); err != nil {
 		t.Fatal(err)
 	}
+	privateReply := domain.Message{
+		ID: "private-reply", ChatJID: "alice@s.whatsapp.net", Timestamp: now.Add(5 * time.Millisecond), Kind: "text", Text: "I will answer privately",
+		ReplyToID: "link", ReplyToChatID: "123@g.us",
+	}
+	if err = s.ApplyMessage(ctx, privateReply, false); err != nil {
+		t.Fatal(err)
+	}
+	storedPrivateReply, err := s.Message(ctx, privateReply.ChatJID, privateReply.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedPrivateReply.ReplyToID != "link" || storedPrivateReply.ReplyToChatID != "123@g.us" {
+		t.Fatalf("private reply source was not persisted: %+v", storedPrivateReply)
+	}
 	page, err := s.Messages(ctx, "123@g.us", "", 20)
 	if err != nil {
 		t.Fatal(err)
@@ -1346,7 +1360,7 @@ func TestEditAndRevokeUpdateCurrentPreviewAndSurviveReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	original := domain.Message{ID: "m", ChatJID: "c@g.us", Text: "original", Kind: "text", Timestamp: time.Unix(1, 0)}
+	original := domain.Message{ID: "m", ChatJID: "c@g.us", Text: "original", Kind: "text", Timestamp: time.Unix(1, 0), ForwardingScore: 2}
 	if err = s.ApplyMessage(ctx, original, false); err != nil {
 		t.Fatal(err)
 	}
@@ -1365,6 +1379,9 @@ func TestEditAndRevokeUpdateCurrentPreviewAndSurviveReplay(t *testing.T) {
 	}
 	if got.Text != "edited" {
 		t.Fatalf("replay overwrote edit: %+v", got)
+	}
+	if got.ForwardingScore != 2 {
+		t.Fatalf("forwarding score was not persisted: %+v", got)
 	}
 	revoked := edited
 	revoked.Text = "Message deleted"
@@ -1583,7 +1600,7 @@ func TestPollVotesAndPinsConvergeAndSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message.Poll == nil || message.Poll.TotalVoters != 1 || len(message.Poll.Options) != 3 || message.Poll.Options[0].VoteCount != 1 || message.Poll.Options[1].VoteCount != 0 || message.Poll.Options[1].SelectedByMe {
+	if message.Poll == nil || message.Poll.TotalVoters != 1 || len(message.Poll.Options) != 3 || message.Poll.Options[0].VoteCount != 1 || len(message.Poll.Options[0].Voters) != 1 || message.Poll.Options[0].Voters[0].JID != "alice" || message.Poll.Options[1].VoteCount != 0 || message.Poll.Options[1].SelectedByMe {
 		t.Fatalf("poll after replay = %+v", message.Poll)
 	}
 	snapshot, err := s.Message(ctx, "group@g.us", "snapshot")

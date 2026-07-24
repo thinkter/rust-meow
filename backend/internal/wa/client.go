@@ -169,6 +169,8 @@ type LogoutError struct {
 
 var (
 	ErrInvalidAttachment       = errors.New("invalid attachment")
+	ErrForwardUnsupported      = errors.New("this message type cannot be forwarded")
+	ErrEditNotAllowed          = errors.New("this message can no longer be edited")
 	errAttachmentDownloadLimit = errors.New("attachment exceeds the 2 GiB download limit")
 	errImageDownloadLimit      = errors.New("image exceeds the 32 MiB download limit")
 )
@@ -1438,7 +1440,7 @@ func canonicalMentionJIDs(rawJIDs []string) []string {
 	return mentions
 }
 
-func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID string, mentionedJIDs []string) (domain.Message, error) {
+func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID, replyToChatID string, mentionedJIDs []string) (domain.Message, error) {
 	transport, err := c.store.PreferredJID(ctx, chatID)
 	if err != nil {
 		return domain.Message{}, err
@@ -1456,12 +1458,15 @@ func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID
 	if err != nil {
 		return domain.Message{}, err
 	}
-	replyContext, err := c.replyContext(ctx, chatID, replyToID)
+	if replyToChatID == "" {
+		replyToChatID = chatID
+	}
+	replyContext, err := c.replyContext(ctx, replyToChatID, replyToID)
 	if err != nil {
 		return domain.Message{}, err
 	}
 	waID := string(c.wa.GenerateMessageID())
-	pending := domain.Message{ID: waID, ChatJID: chatID, TransportJID: jid.String(), SenderJID: c.OwnID(), Text: text, Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "text", ReplyToID: replyToID}
+	pending := domain.Message{ID: waID, ChatJID: chatID, TransportJID: jid.String(), SenderJID: c.OwnID(), Text: text, Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "text", ReplyToID: replyToID, ReplyToChatID: replyToChatID}
 	waID, existed, err := c.store.ReserveOutgoingMessage(ctx, clientID, pending)
 	if err != nil {
 		return domain.Message{}, err
@@ -1495,6 +1500,265 @@ func (c *Client) SendText(ctx context.Context, clientID, chatID, text, replyToID
 	err = c.store.ApplyMessage(ctx, msg, false)
 	c.emitChat(chatID)
 	return msg, err
+}
+
+// ForwardMessage sends a new WhatsApp message carrying the original payload
+// and WhatsApp's native forwarding metadata. Re-forwarding increments the
+// score instead of flattening every forwarded message to the same marker.
+func (c *Client) ForwardMessage(ctx context.Context, clientID, sourceChatID, messageID, targetChatID string) (domain.Message, error) {
+	source, err := c.store.Message(ctx, sourceChatID, messageID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if source.Revoked {
+		return domain.Message{}, ErrForwardUnsupported
+	}
+	transport, err := c.store.PreferredJID(ctx, targetChatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	targetChatID, _, err = c.resolveConversation(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	transport, err = c.store.PreferredJID(ctx, targetChatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	jid, err := types.ParseJID(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	score := source.ForwardingScore
+	if score < ^uint32(0) {
+		score++
+	}
+	if score == 0 {
+		score = 1
+	}
+	contextInfo := &waE2E.ContextInfo{IsForwarded: proto.Bool(true), ForwardingScore: proto.Uint32(score)}
+	var outgoing *waE2E.Message
+	var forwardedPoll *domain.Poll
+	if source.Kind == "poll" && source.Poll != nil && len(source.Poll.Options) >= 2 {
+		selectable := source.Poll.SelectableOptionsCount
+		if selectable == 0 {
+			selectable = 1
+		}
+		options := make([]string, 0, len(source.Poll.Options))
+		for _, option := range source.Poll.Options {
+			if name := strings.TrimSpace(option.Name); name != "" {
+				options = append(options, name)
+			}
+		}
+		if len(options) < 2 {
+			return domain.Message{}, ErrForwardUnsupported
+		}
+		outgoing = c.wa.BuildPollCreation(source.Poll.Question, options, int(selectable))
+		messagePoll(outgoing).ContextInfo = contextInfo
+		forwardedPoll = &domain.Poll{Question: source.Poll.Question, SelectableOptionsCount: selectable}
+		for _, name := range options {
+			forwardedPoll.Options = append(forwardedPoll.Options, domain.PollOption{Name: name})
+		}
+	} else {
+		outgoing, err = forwardedContent(source, contextInfo)
+		if err != nil {
+			return domain.Message{}, err
+		}
+	}
+	waID := string(c.wa.GenerateMessageID())
+	pending := source
+	pending.ID = waID
+	pending.ChatJID = targetChatID
+	pending.TransportJID = jid.String()
+	pending.SenderJID = c.OwnID()
+	pending.Timestamp = time.Now()
+	pending.FromMe = true
+	pending.Status = domain.StatusPending
+	pending.ReplyToID = ""
+	pending.ReplyToChatID = ""
+	pending.EditedAt = time.Time{}
+	pending.ForwardingScore = score
+	pending.Reactions = nil
+	if forwardedPoll != nil {
+		pending.Poll = forwardedPoll
+		pending.Text = pollText(messagePoll(outgoing))
+	}
+	fingerprint, _ := json.Marshal(struct {
+		SourceChatID string `json:"source_chat_id"`
+		MessageID    string `json:"message_id"`
+		TargetChatID string `json:"target_chat_id"`
+	}{sourceChatID, messageID, targetChatID})
+	waID, existed, err := c.store.ReserveOutgoingMessageWithPayload(ctx, clientID, string(fingerprint), pending)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if existed {
+		return c.store.Message(ctx, targetChatID, waID)
+	}
+	message := pending
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	response, err := c.wa.SendMessage(sendCtx, jid, outgoing, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
+	if err != nil {
+		message.Status = domain.StatusFailed
+		_ = c.store.ApplyMessage(ctx, message, false)
+		c.emitChat(targetChatID)
+		return message, err
+	}
+	message.Timestamp = response.Timestamp
+	message.Status = domain.StatusSent
+	err = c.store.ApplyMessage(ctx, message, false)
+	c.emitChat(targetChatID)
+	return message, err
+}
+
+// EditText uses WhatsApp's protocol-level edit wrapper. The stored message is
+// updated immediately and the later echo from WhatsApp converges through the
+// same ApplyMessage reducer.
+func (c *Client) EditText(ctx context.Context, chatID, messageID, text string) (domain.Message, error) {
+	message, err := c.store.Message(ctx, chatID, messageID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if !message.FromMe || message.Revoked || message.Kind != "text" ||
+		message.Timestamp.IsZero() || time.Since(message.Timestamp) > whatsmeow.EditWindow {
+		return domain.Message{}, ErrEditNotAllowed
+	}
+	transport, err := c.store.PreferredJID(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	jid, err := types.ParseJID(transport)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	contextInfo, err := c.replyContext(ctx, firstNonEmpty(message.ReplyToChatID, chatID), message.ReplyToID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if message.ForwardingScore > 0 {
+		if contextInfo == nil {
+			contextInfo = &waE2E.ContextInfo{}
+		}
+		contextInfo.IsForwarded = proto.Bool(true)
+		contextInfo.ForwardingScore = proto.Uint32(message.ForwardingScore)
+	}
+	content := &waE2E.Message{Conversation: proto.String(text)}
+	if contextInfo != nil {
+		content = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text), ContextInfo: contextInfo,
+		}}
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	response, err := c.wa.SendMessage(sendCtx, jid, c.wa.BuildEdit(jid, types.MessageID(message.ID), content))
+	if err != nil {
+		return domain.Message{}, err
+	}
+	message.Text = text
+	message.EditedAt = response.Timestamp
+	if message.EditedAt.IsZero() {
+		message.EditedAt = time.Now()
+	}
+	if err = c.store.ApplyMessage(ctx, message, false); err != nil {
+		return domain.Message{}, err
+	}
+	c.emitChat(message.ChatJID)
+	return message, nil
+}
+
+func forwardedContent(message domain.Message, contextInfo *waE2E.ContextInfo) (*waE2E.Message, error) {
+	switch message.Kind {
+	case "text":
+		extended := &waE2E.ExtendedTextMessage{Text: proto.String(message.Text), ContextInfo: contextInfo}
+		if message.LinkPreview != nil {
+			extended.MatchedText = proto.String(message.LinkPreview.URL)
+			extended.Title = proto.String(message.LinkPreview.Title)
+			extended.Description = proto.String(message.LinkPreview.Description)
+			extended.JPEGThumbnail = append([]byte(nil), message.LinkPreview.JPEGThumbnail...)
+			extended.ThumbnailWidth = proto.Uint32(message.LinkPreview.ThumbnailWidth)
+			extended.ThumbnailHeight = proto.Uint32(message.LinkPreview.ThumbnailHeight)
+		}
+		return &waE2E.Message{ExtendedTextMessage: extended}, nil
+	case "image":
+		if message.Image == nil {
+			return nil, ErrForwardUnsupported
+		}
+		media := message.Image
+		return &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			Mimetype: proto.String(media.MIMEType), Caption: proto.String(media.Caption),
+			FileSHA256: append([]byte(nil), media.FileSHA256...), FileLength: proto.Uint64(media.FileSize),
+			Height: proto.Uint32(media.Height), Width: proto.Uint32(media.Width),
+			MediaKey: append([]byte(nil), media.MediaKey...), FileEncSHA256: append([]byte(nil), media.FileEncSHA256...),
+			DirectPath: proto.String(media.DirectPath), ContextInfo: contextInfo,
+		}}, nil
+	case "sticker":
+		if message.Image == nil {
+			return nil, ErrForwardUnsupported
+		}
+		media := message.Image
+		return &waE2E.Message{StickerMessage: &waE2E.StickerMessage{
+			Mimetype: proto.String(media.MIMEType), FileSHA256: append([]byte(nil), media.FileSHA256...),
+			FileEncSHA256: append([]byte(nil), media.FileEncSHA256...), MediaKey: append([]byte(nil), media.MediaKey...),
+			Height: proto.Uint32(media.Height), Width: proto.Uint32(media.Width), DirectPath: proto.String(media.DirectPath),
+			FileLength: proto.Uint64(media.FileSize), IsAnimated: proto.Bool(media.Animated), ContextInfo: contextInfo,
+		}}, nil
+	case "video", "audio", "document":
+		if message.Attachment == nil {
+			return nil, ErrForwardUnsupported
+		}
+		media := message.Attachment
+		switch message.Kind {
+		case "video":
+			return &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+				Mimetype: proto.String(media.MIMEType), FileSHA256: append([]byte(nil), media.FileSHA256...),
+				FileLength: proto.Uint64(media.FileSize), Seconds: proto.Uint32(media.DurationSeconds),
+				MediaKey: append([]byte(nil), media.MediaKey...), Caption: proto.String(media.Caption),
+				Height: proto.Uint32(media.Height), Width: proto.Uint32(media.Width),
+				FileEncSHA256: append([]byte(nil), media.FileEncSHA256...), DirectPath: proto.String(media.DirectPath),
+				GifPlayback: proto.Bool(media.Animated), ContextInfo: contextInfo,
+			}}, nil
+		case "audio":
+			return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+				Mimetype: proto.String(media.MIMEType), FileSHA256: append([]byte(nil), media.FileSHA256...),
+				FileLength: proto.Uint64(media.FileSize), Seconds: proto.Uint32(media.DurationSeconds),
+				PTT: proto.Bool(media.VoiceNote), MediaKey: append([]byte(nil), media.MediaKey...),
+				FileEncSHA256: append([]byte(nil), media.FileEncSHA256...), DirectPath: proto.String(media.DirectPath),
+				ContextInfo: contextInfo,
+			}}, nil
+		default:
+			return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+				Mimetype: proto.String(media.MIMEType), FileSHA256: append([]byte(nil), media.FileSHA256...),
+				FileLength: proto.Uint64(media.FileSize), MediaKey: append([]byte(nil), media.MediaKey...),
+				FileName: proto.String(media.FileName), FileEncSHA256: append([]byte(nil), media.FileEncSHA256...),
+				DirectPath: proto.String(media.DirectPath), Caption: proto.String(media.Caption), ContextInfo: contextInfo,
+			}}, nil
+		}
+	case "contact", "contacts":
+		contacts := make([]*waE2E.ContactMessage, 0, len(message.Contacts))
+		for _, contact := range message.Contacts {
+			contacts = append(contacts, &waE2E.ContactMessage{DisplayName: proto.String(contact.DisplayName), Vcard: proto.String(contact.VCard)})
+		}
+		if len(contacts) == 1 {
+			contacts[0].ContextInfo = contextInfo
+			return &waE2E.Message{ContactMessage: contacts[0]}, nil
+		}
+		if len(contacts) > 1 {
+			return &waE2E.Message{ContactsArrayMessage: &waE2E.ContactsArrayMessage{
+				DisplayName: proto.String(message.Text), Contacts: contacts, ContextInfo: contextInfo,
+			}}, nil
+		}
+	case "location":
+		if message.Location != nil {
+			location := message.Location
+			return &waE2E.Message{LocationMessage: &waE2E.LocationMessage{
+				DegreesLatitude: proto.Float64(location.Latitude), DegreesLongitude: proto.Float64(location.Longitude),
+				Name: proto.String(location.Name), Address: proto.String(location.Address), URL: proto.String(location.URL),
+				IsLive: proto.Bool(location.Live), ContextInfo: contextInfo,
+			}}, nil
+		}
+	}
+	return nil, ErrForwardUnsupported
 }
 
 func domainPoll(poll *waE2E.PollCreationMessage) *domain.Poll {
@@ -2289,7 +2553,7 @@ func (c *Client) cacheImageBytes(chatID, messageID, mimeType string, data []byte
 	return path, thumbnailPath, nil
 }
 
-func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, caption, replyToID string) (domain.Message, error) {
+func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, caption, replyToID, replyToChatID string) (domain.Message, error) {
 	transport, err := c.store.PreferredJID(ctx, chatID)
 	if err != nil {
 		return domain.Message{}, err
@@ -2307,7 +2571,10 @@ func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, ca
 	if err != nil {
 		return domain.Message{}, err
 	}
-	replyContext, err := c.replyContext(ctx, chatID, replyToID)
+	if replyToChatID == "" {
+		replyToChatID = chatID
+	}
+	replyContext, err := c.replyContext(ctx, replyToChatID, replyToID)
 	if err != nil {
 		return domain.Message{}, err
 	}
@@ -2338,7 +2605,7 @@ func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, ca
 	if err != nil {
 		return domain.Message{}, err
 	}
-	pending := domain.Message{ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(), Text: caption, Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "image", ReplyToID: replyToID,
+	pending := domain.Message{ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(), Text: caption, Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "image", ReplyToID: replyToID, ReplyToChatID: replyToChatID,
 		Image: &domain.Image{Caption: caption, MIMEType: mimeType, LocalPath: localPath, Width: width, Height: height, FileSize: uint64(len(data))}}
 	if pending.Text == "" {
 		pending.Text = "📷 Photo"
@@ -2389,7 +2656,7 @@ func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, ca
 	return pending, err
 }
 
-func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data []byte, replyToID string) (domain.Message, error) {
+func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data []byte, replyToID, replyToChatID string) (domain.Message, error) {
 	width, height, animated, err := stickerMetadata(data)
 	if err != nil {
 		return domain.Message{}, err
@@ -2411,7 +2678,10 @@ func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data 
 	if err != nil {
 		return domain.Message{}, err
 	}
-	replyContext, err := c.replyContext(ctx, chatID, replyToID)
+	if replyToChatID == "" {
+		replyToChatID = chatID
+	}
+	replyContext, err := c.replyContext(ctx, replyToChatID, replyToID)
 	if err != nil {
 		return domain.Message{}, err
 	}
@@ -2422,7 +2692,7 @@ func (c *Client) SendSticker(ctx context.Context, clientID, chatID string, data 
 	}
 	pending := domain.Message{
 		ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(), Text: "Sticker",
-		Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "sticker", ReplyToID: replyToID,
+		Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "sticker", ReplyToID: replyToID, ReplyToChatID: replyToChatID,
 		Image: &domain.Image{MIMEType: "image/webp", LocalPath: localPath, Width: width, Height: height, FileSize: uint64(len(data)), Animated: animated},
 	}
 	waID, existed, err := c.store.ReserveOutgoingMessage(ctx, clientID, pending)
@@ -2575,12 +2845,12 @@ func (c *Client) wireStickerCandidate(candidate domain.StickerCandidate, favorit
 // history), downloading it into the cache first if necessary, then hands the
 // plaintext bytes to SendSticker so upload, validation, and the
 // client_message_id idempotency contract all stay in one place.
-func (c *Client) SendStickerFromLibrary(ctx context.Context, clientID, chatID, stickerID, replyToID string) (domain.Message, error) {
+func (c *Client) SendStickerFromLibrary(ctx context.Context, clientID, chatID, stickerID, replyToID, replyToChatID string) (domain.Message, error) {
 	data, err := c.stickerLibraryBytes(ctx, stickerID)
 	if err != nil {
 		return domain.Message{}, err
 	}
-	return c.SendSticker(ctx, clientID, chatID, data, replyToID)
+	return c.SendSticker(ctx, clientID, chatID, data, replyToID, replyToChatID)
 }
 
 func (c *Client) stickerLibraryBytes(ctx context.Context, stickerID string) ([]byte, error) {
@@ -2657,10 +2927,10 @@ func attachmentFallback(kind, caption, fileName string, voiceNote bool) string {
 	}
 }
 
-func attachmentPayloadFingerprint(source attachmentSource, kind, caption, replyToID string, voiceNote bool) string {
+func attachmentPayloadFingerprint(source attachmentSource, kind, caption, replyToID, replyToChatID string, voiceNote bool) string {
 	digest := sha256.New()
 	var encodedLength [8]byte
-	for _, value := range []string{kind, source.path, source.mimeType, caption, replyToID} {
+	for _, value := range []string{kind, source.path, source.mimeType, caption, replyToID, replyToChatID} {
 		binary.BigEndian.PutUint64(encodedLength[:], uint64(len(value)))
 		_, _ = digest.Write(encodedLength[:])
 		_, _ = digest.Write([]byte(value))
@@ -2705,7 +2975,7 @@ func validUploadResponse(upload whatsmeow.UploadResponse, expectedSize int64) bo
 		len(upload.MediaKey) == sha256.Size && len(upload.FileSHA256) == sha256.Size && len(upload.FileEncSHA256) == sha256.Size
 }
 
-func (c *Client) SendAttachment(ctx context.Context, clientID, chatID, sourcePath, kind, caption, replyToID string, voiceNote bool) (domain.Message, error) {
+func (c *Client) SendAttachment(ctx context.Context, clientID, chatID, sourcePath, kind, caption, replyToID, replyToChatID string, voiceNote bool) (domain.Message, error) {
 	if !utf8.ValidString(caption) || len(caption) > 4096 {
 		return domain.Message{}, fmt.Errorf("%w: caption must be valid UTF-8 up to 4096 bytes", ErrInvalidAttachment)
 	}
@@ -2734,7 +3004,10 @@ func (c *Client) SendAttachment(ctx context.Context, clientID, chatID, sourcePat
 	if err != nil {
 		return domain.Message{}, err
 	}
-	replyContext, err := c.replyContext(ctx, chatID, replyToID)
+	if replyToChatID == "" {
+		replyToChatID = chatID
+	}
+	replyContext, err := c.replyContext(ctx, replyToChatID, replyToID)
 	if err != nil {
 		return domain.Message{}, err
 	}
@@ -2752,9 +3025,9 @@ func (c *Client) SendAttachment(ctx context.Context, clientID, chatID, sourcePat
 	pending := domain.Message{
 		ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(),
 		Text: attachmentFallback(kind, caption, source.fileName, voiceNote), Timestamp: time.Now(), FromMe: true,
-		Status: domain.StatusPending, Kind: kind, ReplyToID: replyToID, Attachment: attachment,
+		Status: domain.StatusPending, Kind: kind, ReplyToID: replyToID, ReplyToChatID: replyToChatID, Attachment: attachment,
 	}
-	payloadFingerprint := attachmentPayloadFingerprint(source, kind, caption, replyToID, voiceNote)
+	payloadFingerprint := attachmentPayloadFingerprint(source, kind, caption, replyToID, replyToChatID, voiceNote)
 	waID, existed, err := c.store.ReserveOutgoingMessageWithPayload(ctx, clientID, payloadFingerprint, pending)
 	if err != nil {
 		return domain.Message{}, err
@@ -4000,6 +4273,7 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 		return
 	}
 	m := domainMessage(evt, chatID, transportJID)
+	c.resolveMessageReplyChat(&m)
 	if err := c.store.ApplyMessage(c.ctx, m, unread); err != nil {
 		c.log.Error("persist message", "error", err)
 		return
@@ -4126,12 +4400,18 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 	if poll == nil {
 		poll = domainPollSnapshot(messagePollResultSnapshot(content))
 	}
-	m := domain.Message{ID: string(evt.Info.ID), ChatJID: chatID, TransportJID: transportJID, SenderJID: evt.Info.Sender.ToNonAD().String(), Text: decoded.text, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe, Status: domain.StatusDelivered, Kind: decoded.kind, ReplyToID: messageContextInfo(content).GetStanzaID(), Image: decoded.image, Attachment: decoded.attachment, Contacts: decoded.contacts, Location: decoded.location, LinkPreview: decoded.linkPreview, Poll: poll}
+	contextInfo := messageContextInfo(content)
+	forwardingScore := contextInfo.GetForwardingScore()
+	if contextInfo.GetIsForwarded() && forwardingScore == 0 {
+		forwardingScore = 1
+	}
+	m := domain.Message{ID: string(evt.Info.ID), ChatJID: chatID, TransportJID: transportJID, SenderJID: evt.Info.Sender.ToNonAD().String(), Text: decoded.text, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe, Status: domain.StatusDelivered, Kind: decoded.kind, ReplyToID: contextInfo.GetStanzaID(), ReplyToChatID: contextInfo.GetRemoteJID(), ForwardingScore: forwardingScore, Image: decoded.image, Attachment: decoded.attachment, Contacts: decoded.contacts, Location: decoded.location, LinkPreview: decoded.linkPreview, Poll: poll}
 	// Pin events point at the pinned message through their own MessageKey, not
 	// ContextInfo. Preserve that target on the ordinary reply/navigation field
 	// so every desktop can fetch and jump to the message that was pinned.
 	if pin := content.GetPinInChatMessage(); pin != nil && pin.GetKey().GetID() != "" {
 		m.ReplyToID = pin.GetKey().GetID()
+		m.ReplyToChatID = chatID
 	}
 	if evt.IsEdit && protocol != nil && protocol.GetKey().GetID() != "" {
 		m.ID = protocol.GetKey().GetID()
@@ -4145,6 +4425,24 @@ func domainMessage(evt *events.Message, chatID, transportJID string) domain.Mess
 		m.EditedAt = evt.Info.Timestamp
 	}
 	return m
+}
+
+func (c *Client) resolveMessageReplyChat(message *domain.Message) {
+	if message.ReplyToID == "" {
+		message.ReplyToChatID = ""
+		return
+	}
+	if message.ReplyToChatID == "" {
+		message.ReplyToChatID = message.ChatJID
+		return
+	}
+	chatID, _, err := c.resolveConversation(message.ReplyToChatID)
+	if err != nil {
+		c.log.Warn("resolve reply source conversation", "reply_chat_id", message.ReplyToChatID, "message_id", message.ID, "error", err)
+		message.ReplyToChatID = message.ChatJID
+		return
+	}
+	message.ReplyToChatID = chatID
 }
 
 type messageContent struct {
@@ -5004,7 +5302,9 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 				}
 			}
 			if snapshot := messagePollResultSnapshot(parsed.Message); snapshot != nil && snapshot.GetContextInfo().GetStanzaID() != "" {
-				historyPollSnapshots = append(historyPollSnapshots, historyPollSnapshot{messageID: snapshot.GetContextInfo().GetStanzaID(), poll: domainPollSnapshot(snapshot), at: parsed.Info.Timestamp, fallback: domainMessage(parsed, chatID, transportJID)})
+				fallback := domainMessage(parsed, chatID, transportJID)
+				c.resolveMessageReplyChat(&fallback)
+				historyPollSnapshots = append(historyPollSnapshots, historyPollSnapshot{messageID: snapshot.GetContextInfo().GetStanzaID(), poll: domainPollSnapshot(snapshot), at: parsed.Info.Timestamp, fallback: fallback})
 			}
 			if pin := raw.GetMessage().GetPinInChat(); pin != nil && pin.GetKey().GetID() != "" {
 				atMS := pin.GetSenderTimestampMS()
@@ -5032,7 +5332,9 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 				// bubble. Apply it after the history batch creates that target.
 				continue
 			}
-			batch = append(batch, domainMessage(parsed, chatID, transportJID))
+			message := domainMessage(parsed, chatID, transportJID)
+			c.resolveMessageReplyChat(&message)
+			batch = append(batch, message)
 		}
 		if err = c.store.ApplyMessages(c.ctx, batch, false); err != nil {
 			c.log.Error("persist history batch", "chat_id", chatID, "count", len(batch), "error", err)

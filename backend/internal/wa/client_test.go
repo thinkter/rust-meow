@@ -280,12 +280,39 @@ func TestDomainMessagePreservesNativeReplyTarget(t *testing.T) {
 		Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender}, ID: "reply-1", Timestamp: time.UnixMilli(1234)},
 		Message: &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 			Text:        proto.String("answer"),
-			ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("original-1")},
+			ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("original-1"), RemoteJID: proto.String("source@g.us")},
 		}},
 	}
 	got := domainMessage(evt, chat.String(), chat.String())
-	if got.ReplyToID != "original-1" || got.Text != "answer" {
+	if got.ReplyToID != "original-1" || got.ReplyToChatID != "source@g.us" || got.Text != "answer" {
 		t.Fatalf("message=%+v", got)
+	}
+}
+
+func TestReplyContextPreservesPrivateReplySourceGroup(t *testing.T) {
+	ctx := context.Background()
+	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	original := domain.Message{
+		ID: "original-1", ChatJID: "source-chat", TransportJID: "123@g.us",
+		SenderJID: "456@s.whatsapp.net", Text: "answer me privately", Kind: "text", Timestamp: time.Now(),
+	}
+	if err = productStore.ApplyMessage(ctx, original, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{store: productStore}
+	reply, err := client.replyContext(ctx, original.ChatJID, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.GetStanzaID() != original.ID || reply.GetParticipant() != original.SenderJID || reply.GetRemoteJID() != original.TransportJID {
+		t.Fatalf("reply context=%+v", reply)
+	}
+	if reply.GetQuotedMessage().GetConversation() != original.Text {
+		t.Fatalf("quoted message=%+v", reply.GetQuotedMessage())
 	}
 }
 
@@ -529,17 +556,18 @@ func TestOutgoingAttachmentMessagesCarryUploadMetadata(t *testing.T) {
 
 func TestAttachmentPayloadFingerprintCoversBinaryRequest(t *testing.T) {
 	source := attachmentSource{path: "/tmp/notes.pdf", mimeType: "application/pdf", size: 42}
-	base := attachmentPayloadFingerprint(source, "document", "caption", "reply", false)
-	if len(base) != 64 || base != attachmentPayloadFingerprint(source, "document", "caption", "reply", false) {
+	base := attachmentPayloadFingerprint(source, "document", "caption", "reply", "source-chat", false)
+	if len(base) != 64 || base != attachmentPayloadFingerprint(source, "document", "caption", "reply", "source-chat", false) {
 		t.Fatalf("fingerprint=%q is not a stable SHA-256 value", base)
 	}
 	variants := []string{
-		attachmentPayloadFingerprint(attachmentSource{path: "/tmp/other.pdf", mimeType: source.mimeType, size: source.size}, "document", "caption", "reply", false),
-		attachmentPayloadFingerprint(attachmentSource{path: source.path, mimeType: source.mimeType, size: source.size + 1}, "document", "caption", "reply", false),
-		attachmentPayloadFingerprint(source, "video", "caption", "reply", false),
-		attachmentPayloadFingerprint(source, "document", "different", "reply", false),
-		attachmentPayloadFingerprint(source, "document", "caption", "other-reply", false),
-		attachmentPayloadFingerprint(source, "document", "caption", "reply", true),
+		attachmentPayloadFingerprint(attachmentSource{path: "/tmp/other.pdf", mimeType: source.mimeType, size: source.size}, "document", "caption", "reply", "source-chat", false),
+		attachmentPayloadFingerprint(attachmentSource{path: source.path, mimeType: source.mimeType, size: source.size + 1}, "document", "caption", "reply", "source-chat", false),
+		attachmentPayloadFingerprint(source, "video", "caption", "reply", "source-chat", false),
+		attachmentPayloadFingerprint(source, "document", "different", "reply", "source-chat", false),
+		attachmentPayloadFingerprint(source, "document", "caption", "other-reply", "source-chat", false),
+		attachmentPayloadFingerprint(source, "document", "caption", "reply", "other-source-chat", false),
+		attachmentPayloadFingerprint(source, "document", "caption", "reply", "source-chat", true),
 	}
 	for _, variant := range variants {
 		if variant == base {
@@ -1047,6 +1075,12 @@ func TestDomainMessageDecodesRichContent(t *testing.T) {
 		{"poll snapshot", event("poll-results", &waE2E.Message{PollResultSnapshotMessage: &waE2E.PollResultSnapshotMessage{Name: proto.String("Lunch"), PollVotes: []*waE2E.PollResultSnapshotMessage_PollVote{{OptionName: proto.String("Pizza"), OptionVoteCount: proto.Int64(4)}, {OptionName: proto.String("Sushi"), OptionVoteCount: proto.Int64(2)}}}}), func(m domain.Message) bool {
 			return m.Kind == "poll" && m.Poll != nil && m.Poll.SelectableOptionsCount == 0 && m.Poll.Options[0].VoteCount == 4
 		}},
+		{"forwarded", event("forwarded", &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String("passed along"), ContextInfo: &waE2E.ContextInfo{IsForwarded: proto.Bool(true), ForwardingScore: proto.Uint32(3)}}}), func(m domain.Message) bool {
+			return m.Kind == "text" && m.ForwardingScore == 3
+		}},
+		{"forwarded without score", event("forwarded-zero", &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String("passed along"), ContextInfo: &waE2E.ContextInfo{IsForwarded: proto.Bool(true)}}}), func(m domain.Message) bool {
+			return m.ForwardingScore == 1
+		}},
 		{"pin target", event("pin", &waE2E.Message{PinInChatMessage: &waE2E.PinInChatMessage{Key: &waCommon.MessageKey{ID: proto.String("pinned-message")}, Type: waE2E.PinInChatMessage_PIN_FOR_ALL.Enum()}}), func(m domain.Message) bool {
 			return m.Kind == "pin" && m.Text == "📌 Pinned a message" && m.ReplyToID == "pinned-message"
 		}},
@@ -1122,6 +1156,29 @@ func TestCanonicalMentionJIDsKeepsOnlyUserAddresses(t *testing.T) {
 	want := []string{"15551234567@s.whatsapp.net", "203635027103105@lid"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("mentions=%v want=%v", got, want)
+	}
+}
+
+func TestForwardedContentKeepsPayloadAndNativeForwardMetadata(t *testing.T) {
+	contextInfo := &waE2E.ContextInfo{IsForwarded: proto.Bool(true), ForwardingScore: proto.Uint32(4)}
+	outgoing, err := forwardedContent(domain.Message{
+		Kind: "image",
+		Image: &domain.Image{
+			Caption: "photo", MIMEType: "image/jpeg", DirectPath: "/encrypted",
+			MediaKey: []byte{1}, FileSHA256: []byte{2}, FileEncSHA256: []byte{3},
+			Width: 640, Height: 480, FileSize: 99,
+		},
+	}, contextInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := outgoing.GetImageMessage()
+	if image == nil || image.GetCaption() != "photo" || image.GetDirectPath() != "/encrypted" ||
+		!image.GetContextInfo().GetIsForwarded() || image.GetContextInfo().GetForwardingScore() != 4 {
+		t.Fatalf("forwarded image=%+v", image)
+	}
+	if _, err = forwardedContent(domain.Message{Kind: "poll"}, contextInfo); !errors.Is(err, ErrForwardUnsupported) {
+		t.Fatalf("unsupported forward error=%v", err)
 	}
 }
 

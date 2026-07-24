@@ -28,7 +28,7 @@ type Store struct{ db *sql.DB }
 const (
 	reactionReplaySchemaVersion = 9
 	searchSchemaVersion         = 10
-	supportedSchemaVersion      = 13
+	supportedSchemaVersion      = 14
 )
 
 type ChatMerge struct {
@@ -177,8 +177,10 @@ CREATE TABLE IF NOT EXISTS messages(
   status INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL DEFAULT 'text',
   reply_to_id TEXT NOT NULL DEFAULT '',
+  reply_to_chat_id TEXT NOT NULL DEFAULT '',
   edited_at INTEGER NOT NULL DEFAULT 0,
   revoked INTEGER NOT NULL DEFAULT 0,
+  forwarding_score INTEGER NOT NULL DEFAULT 0,
   unread INTEGER NOT NULL DEFAULT 0,
   image_mime TEXT NOT NULL DEFAULT '',
   image_caption TEXT NOT NULL DEFAULT '',
@@ -312,6 +314,15 @@ CREATE INDEX IF NOT EXISTS sticker_favorites_updated_idx ON sticker_favorites(up
 			return fmt.Errorf("migrate messages to v2: %w", err)
 		}
 	}
+	hasReplyToChatID, err := hasColumn(ctx, db, "messages", "reply_to_chat_id")
+	if err != nil {
+		return fmt.Errorf("inspect private reply schema: %w", err)
+	}
+	if !hasReplyToChatID {
+		if _, err = db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN reply_to_chat_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add private reply source chat: %w", err)
+		}
+	}
 	if _, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS messages_unread_cursor_idx ON messages(chat_jid,unread,timestamp,id)`); err != nil {
 		return fmt.Errorf("create unread cursor index: %w", err)
 	}
@@ -325,6 +336,7 @@ CREATE INDEX IF NOT EXISTS sticker_favorites_updated_idx ON sticker_favorites(up
 		}
 	}
 	mediaColumns := []struct{ name, definition string }{
+		{"forwarding_score", "INTEGER NOT NULL DEFAULT 0"},
 		{"image_mime", "TEXT NOT NULL DEFAULT ''"},
 		{"image_caption", "TEXT NOT NULL DEFAULT ''"},
 		{"image_local_path", "TEXT NOT NULL DEFAULT ''"},
@@ -490,7 +502,7 @@ END;`
 	}
 	if currentVersion < supportedSchemaVersion {
 		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=?`, supportedSchemaVersion); err != nil {
-			return fmt.Errorf("record schema v12: %w", err)
+			return fmt.Errorf("record schema v14: %w", err)
 		}
 	}
 	return tx.Commit()
@@ -801,11 +813,11 @@ func mergeChatsTx(ctx context.Context, tx *sql.Tx, loser, winner string) error {
 	if loser == winner {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO messages(id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,edited_at,revoked,unread,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO messages(id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,unread,
 image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height)
-SELECT id,?,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,edited_at,revoked,unread,
+SELECT id,?,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,unread,
 image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
@@ -814,9 +826,9 @@ ON CONFLICT(chat_jid,id) DO UPDATE SET
 transport_jid=CASE WHEN excluded.transport_jid LIKE '%@lid' OR messages.transport_jid='' THEN excluded.transport_jid ELSE messages.transport_jid END,
 sender_jid=excluded.sender_jid,timestamp=max(messages.timestamp,excluded.timestamp),from_me=excluded.from_me,
 status=CASE WHEN excluded.status=5 AND messages.status<=1 THEN 5 WHEN excluded.status=5 THEN messages.status WHEN messages.status=5 THEN excluded.status ELSE max(messages.status,excluded.status) END,
-kind=excluded.kind,reply_to_id=excluded.reply_to_id,
+kind=excluded.kind,reply_to_id=excluded.reply_to_id,reply_to_chat_id=excluded.reply_to_chat_id,
 text=CASE WHEN excluded.edited_at>=messages.edited_at THEN excluded.text ELSE messages.text END,
-edited_at=max(messages.edited_at,excluded.edited_at),revoked=(messages.revoked OR excluded.revoked),unread=(messages.unread OR excluded.unread),
+edited_at=max(messages.edited_at,excluded.edited_at),revoked=(messages.revoked OR excluded.revoked),forwarding_score=max(messages.forwarding_score,excluded.forwarding_score),unread=(messages.unread OR excluded.unread),
 image_mime=CASE WHEN excluded.image_mime<>'' THEN excluded.image_mime ELSE messages.image_mime END,
 image_caption=CASE WHEN excluded.image_caption<>'' THEN excluded.image_caption ELSE messages.image_caption END,
 image_local_path=CASE WHEN excluded.image_local_path<>'' THEN excluded.image_local_path ELSE messages.image_local_path END,
@@ -854,6 +866,9 @@ ON CONFLICT(chat_jid,poll_message_id,voter_jid) DO UPDATE SET selected_json=excl
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE chat_jid=?`, loser); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET reply_to_chat_id=? WHERE reply_to_chat_id=?`, winner, loser); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO reactions(chat_jid,message_id,sender_jid,emoji,timestamp,from_me)
@@ -1278,7 +1293,7 @@ func (s *Store) Messages(ctx context.Context, chatJID, cursor string, limit int)
 		return domain.Page[domain.Message]{}, fmt.Errorf("decode cursor: %w", err)
 	}
 	limit = clampLimit(limit)
-	rows, err := s.db.QueryContext(ctx, `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,edited_at,revoked,
+	rows, err := s.db.QueryContext(ctx, `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,
 image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
@@ -1409,7 +1424,7 @@ func (s *Store) messagesRelative(ctx context.Context, chatID string, timestamp i
 	if older {
 		operator, direction = "<", "DESC"
 	}
-	query := `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,edited_at,revoked,
+	query := `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,
 image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
@@ -1445,14 +1460,14 @@ type messageScanner interface{ Scan(...any) error }
 
 func scanStoredMessage(scanner messageScanner) (domain.Message, int64, error) {
 	var m domain.Message
-	var timestamp, edited, width, height, size, duration int64
+	var timestamp, edited, forwardingScore, width, height, size, duration int64
 	var media domain.Image
 	var animated, voice, locationLive bool
 	var fileName, contactsJSON string
 	var location domain.Location
 	var preview domain.LinkPreview
 	var previewWidth, previewHeight int64
-	err := scanner.Scan(&m.ID, &m.ChatJID, &m.TransportJID, &m.SenderJID, &m.Text, &timestamp, &m.FromMe, &m.Status, &m.Kind, &m.ReplyToID, &edited, &m.Revoked,
+	err := scanner.Scan(&m.ID, &m.ChatJID, &m.TransportJID, &m.SenderJID, &m.Text, &timestamp, &m.FromMe, &m.Status, &m.Kind, &m.ReplyToID, &m.ReplyToChatID, &edited, &m.Revoked, &forwardingScore,
 		&media.MIMEType, &media.Caption, &media.LocalPath, &media.DirectPath, &media.MediaKey, &media.FileSHA256, &media.FileEncSHA256, &width, &height, &size,
 		&animated, &fileName, &duration, &voice, &contactsJSON, &location.Latitude, &location.Longitude, &location.Name, &location.Address, &location.URL, &locationLive,
 		&preview.URL, &preview.Title, &preview.Description, &preview.JPEGThumbnail, &previewWidth, &previewHeight)
@@ -1460,6 +1475,7 @@ func scanStoredMessage(scanner messageScanner) (domain.Message, int64, error) {
 		return m, 0, err
 	}
 	m.Timestamp, m.EditedAt = unixMilli(timestamp), unixMilli(edited)
+	m.ForwardingScore = uint32(max(forwardingScore, 0))
 	media.Width, media.Height, media.FileSize, media.Animated = uint32(width), uint32(height), uint64(size), animated
 	switch m.Kind {
 	case "image", "sticker":
@@ -1597,18 +1613,18 @@ func applyMessageTx(ctx context.Context, tx *sql.Tx, message domain.Message, inc
 			preview.JPEGThumbnail = []byte{}
 		}
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO messages(id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,edited_at,revoked,unread,
+	_, err = tx.ExecContext(ctx, `INSERT INTO messages(id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,unread,
 image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_jid,id) DO UPDATE SET
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_jid,id) DO UPDATE SET
 transport_jid=CASE WHEN excluded.transport_jid LIKE '%@lid' OR messages.transport_jid='' THEN excluded.transport_jid ELSE messages.transport_jid END,
 sender_jid=excluded.sender_jid,
 timestamp=excluded.timestamp,from_me=excluded.from_me,
 status=CASE WHEN excluded.status=5 AND messages.status<=1 THEN 5 WHEN excluded.status=5 THEN messages.status WHEN messages.status=5 THEN excluded.status ELSE max(messages.status,excluded.status) END,
-kind=excluded.kind,reply_to_id=excluded.reply_to_id,
+kind=excluded.kind,reply_to_id=excluded.reply_to_id,reply_to_chat_id=excluded.reply_to_chat_id,
 text=CASE WHEN excluded.edited_at>=messages.edited_at THEN excluded.text ELSE messages.text END,
-edited_at=max(messages.edited_at,excluded.edited_at),revoked=(messages.revoked OR excluded.revoked),
+edited_at=max(messages.edited_at,excluded.edited_at),revoked=(messages.revoked OR excluded.revoked),forwarding_score=max(messages.forwarding_score,excluded.forwarding_score),
 image_mime=excluded.image_mime,image_caption=excluded.image_caption,
 image_local_path=CASE WHEN excluded.image_local_path<>'' THEN excluded.image_local_path ELSE messages.image_local_path END,
 image_direct_path=excluded.image_direct_path,image_media_key=excluded.image_media_key,
@@ -1619,7 +1635,7 @@ contacts_json=excluded.contacts_json,location_lat=excluded.location_lat,location
 location_name=excluded.location_name,location_address=excluded.location_address,location_url=excluded.location_url,location_live=excluded.location_live,
 link_preview_url=excluded.link_preview_url,link_preview_title=excluded.link_preview_title,link_preview_description=excluded.link_preview_description,
 link_preview_thumbnail=excluded.link_preview_thumbnail,link_preview_width=excluded.link_preview_width,link_preview_height=excluded.link_preview_height`,
-		message.ID, message.ChatJID, message.TransportJID, message.SenderJID, message.Text, ts, message.FromMe, message.Status, message.Kind, message.ReplyToID, editedAt, message.Revoked, unreadValue,
+		message.ID, message.ChatJID, message.TransportJID, message.SenderJID, message.Text, ts, message.FromMe, message.Status, message.Kind, message.ReplyToID, message.ReplyToChatID, editedAt, message.Revoked, message.ForwardingScore, unreadValue,
 		image.MIMEType, image.Caption, image.LocalPath, image.DirectPath, image.MediaKey, image.FileSHA256, image.FileEncSHA256, image.Width, image.Height, image.FileSize,
 		image.Animated, fileName, duration, voice, contactsJSON, location.Latitude, location.Longitude, location.Name, location.Address, location.URL, location.Live,
 		preview.URL, preview.Title, preview.Description, preview.JPEGThumbnail, preview.ThumbnailWidth, preview.ThumbnailHeight)
@@ -1667,7 +1683,7 @@ func (s *Store) Message(ctx context.Context, chatJID, messageID string) (domain.
 		return m, err
 	}
 	chatJID = resolved
-	row := s.db.QueryRowContext(ctx, `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,edited_at,revoked,
+	row := s.db.QueryRowContext(ctx, `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,
 image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
@@ -1698,15 +1714,15 @@ func (s *Store) Poll(ctx context.Context, chatJID, messageID string) (*domain.Po
 	for i, option := range poll.Options {
 		byName[option.Name] = i
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT selected_json,from_me FROM poll_votes WHERE chat_jid=? AND poll_message_id=?`, resolved, messageID)
+	rows, err := s.db.QueryContext(ctx, `SELECT voter_jid,selected_json,from_me FROM poll_votes WHERE chat_jid=? AND poll_message_id=?`, resolved, messageID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var raw string
+		var voterJID, raw string
 		var fromMe bool
-		if err = rows.Scan(&raw, &fromMe); err != nil {
+		if err = rows.Scan(&voterJID, &raw, &fromMe); err != nil {
 			return nil, err
 		}
 		var selected []string
@@ -1719,6 +1735,10 @@ func (s *Store) Poll(ctx context.Context, chatJID, messageID string) (*domain.Po
 		for _, name := range selected {
 			if i, ok := byName[name]; ok {
 				poll.Options[i].VoteCount++
+				poll.Options[i].Voters = append(poll.Options[i].Voters, domain.PollVoter{
+					JID:    voterJID,
+					FromMe: fromMe,
+				})
 				if fromMe {
 					poll.Options[i].SelectedByMe = true
 				}

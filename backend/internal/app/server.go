@@ -25,7 +25,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 15
+const ProtocolVersion uint32 = 16
 const maxTextBytes = 65_536
 const maxConcurrentMediaJobs = 4
 const maxMediaJobsInFlight = 32
@@ -55,11 +55,17 @@ func fail(code, message string, retryable bool) error {
 	return &rpcFailure{code: code, message: message, retryable: retryable}
 }
 
-func (s *Server) validateReplyTarget(chatID, messageID string) error {
+func (s *Server) validateReplyTarget(chatID, replyChatID, messageID string) error {
 	if messageID == "" {
+		if replyChatID != "" {
+			return fail("invalid_argument", "reply_to_chat_id requires reply_to_message_id", false)
+		}
 		return nil
 	}
-	if _, err := s.store.Message(s.ctx, chatID, messageID); err != nil {
+	if replyChatID == "" {
+		replyChatID = chatID
+	}
+	if _, err := s.store.Message(s.ctx, replyChatID, messageID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fail("invalid_argument", "reply target was not found in this chat", false)
 		}
@@ -455,17 +461,54 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		if _, err := uuid.Parse(req.SendText.GetClientMessageId()); err != nil {
 			return nil, fail("invalid_argument", "client_message_id must be a UUID", false)
 		}
-		if err := s.validateReplyTarget(req.SendText.GetChatId(), req.SendText.GetReplyToMessageId()); err != nil {
+		if err := s.validateReplyTarget(req.SendText.GetChatId(), req.SendText.GetReplyToChatId(), req.SendText.GetReplyToMessageId()); err != nil {
 			return nil, err
 		}
 		if !s.wa.IsConnected() {
 			return nil, fail("not_connected", "WhatsApp is not connected", true)
 		}
-		message, err := s.wa.SendText(s.ctx, req.SendText.GetClientMessageId(), req.SendText.GetChatId(), req.SendText.GetText(), req.SendText.GetReplyToMessageId(), req.SendText.GetMentionedJids())
+		message, err := s.wa.SendText(s.ctx, req.SendText.GetClientMessageId(), req.SendText.GetChatId(), req.SendText.GetText(), req.SendText.GetReplyToMessageId(), req.SendText.GetReplyToChatId(), req.SendText.GetMentionedJids())
 		if err != nil {
 			return nil, err
 		}
 		return &bridgev1.RpcResponse_SendText{SendText: &bridgev1.SendTextResponse{Message: s.wireMessage(message)}}, nil
+	case *bridgev1.RpcRequest_ForwardMessage:
+		if req.ForwardMessage.GetClientMessageId() == "" || req.ForwardMessage.GetSourceChatId() == "" ||
+			req.ForwardMessage.GetMessageId() == "" || req.ForwardMessage.GetTargetChatId() == "" {
+			return nil, fail("invalid_argument", "client_message_id, source_chat_id, message_id and target_chat_id are required", false)
+		}
+		if _, err := uuid.Parse(req.ForwardMessage.GetClientMessageId()); err != nil {
+			return nil, fail("invalid_argument", "client_message_id must be a UUID", false)
+		}
+		if !s.wa.IsConnected() {
+			return nil, fail("not_connected", "WhatsApp is not connected", true)
+		}
+		message, err := s.wa.ForwardMessage(s.ctx, req.ForwardMessage.GetClientMessageId(), req.ForwardMessage.GetSourceChatId(), req.ForwardMessage.GetMessageId(), req.ForwardMessage.GetTargetChatId())
+		if errors.Is(err, wa.ErrForwardUnsupported) {
+			return nil, fail("invalid_argument", err.Error(), false)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_ForwardMessage{ForwardMessage: &bridgev1.ForwardMessageResponse{Message: s.wireMessage(message)}}, nil
+	case *bridgev1.RpcRequest_EditMessage:
+		if req.EditMessage.GetChatId() == "" || req.EditMessage.GetMessageId() == "" || req.EditMessage.GetText() == "" {
+			return nil, fail("invalid_argument", "chat_id, message_id and text are required", false)
+		}
+		if !utf8.ValidString(req.EditMessage.GetText()) || len(req.EditMessage.GetText()) > maxTextBytes {
+			return nil, fail("invalid_argument", "text must be valid UTF-8 up to 65536 bytes", false)
+		}
+		if !s.wa.IsConnected() {
+			return nil, fail("not_connected", "WhatsApp is not connected", true)
+		}
+		message, err := s.wa.EditText(s.ctx, req.EditMessage.GetChatId(), req.EditMessage.GetMessageId(), req.EditMessage.GetText())
+		if errors.Is(err, wa.ErrEditNotAllowed) {
+			return nil, fail("edit_not_allowed", err.Error(), false)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_EditMessage{EditMessage: &bridgev1.EditMessageResponse{Message: s.wireMessage(message)}}, nil
 	case *bridgev1.RpcRequest_SendImage:
 		if req.SendImage.GetClientMessageId() == "" || req.SendImage.GetChatId() == "" || req.SendImage.GetImagePath() == "" {
 			return nil, fail("invalid_argument", "client_message_id, chat_id and image_path are required", false)
@@ -476,13 +519,13 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		if !utf8.ValidString(req.SendImage.GetCaption()) || len(req.SendImage.GetCaption()) > 4096 {
 			return nil, fail("invalid_argument", "caption must be valid UTF-8 up to 4096 bytes", false)
 		}
-		if err := s.validateReplyTarget(req.SendImage.GetChatId(), req.SendImage.GetReplyToMessageId()); err != nil {
+		if err := s.validateReplyTarget(req.SendImage.GetChatId(), req.SendImage.GetReplyToChatId(), req.SendImage.GetReplyToMessageId()); err != nil {
 			return nil, err
 		}
 		if !s.wa.IsConnected() {
 			return nil, fail("not_connected", "WhatsApp is not connected", true)
 		}
-		message, err := s.wa.SendImage(s.ctx, req.SendImage.GetClientMessageId(), req.SendImage.GetChatId(), req.SendImage.GetImagePath(), req.SendImage.GetCaption(), req.SendImage.GetReplyToMessageId())
+		message, err := s.wa.SendImage(s.ctx, req.SendImage.GetClientMessageId(), req.SendImage.GetChatId(), req.SendImage.GetImagePath(), req.SendImage.GetCaption(), req.SendImage.GetReplyToMessageId(), req.SendImage.GetReplyToChatId())
 		if err != nil {
 			return nil, err
 		}
@@ -494,13 +537,13 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		if _, err := uuid.Parse(req.SendSticker.GetClientMessageId()); err != nil {
 			return nil, fail("invalid_argument", "client_message_id must be a UUID", false)
 		}
-		if err := s.validateReplyTarget(req.SendSticker.GetChatId(), req.SendSticker.GetReplyToMessageId()); err != nil {
+		if err := s.validateReplyTarget(req.SendSticker.GetChatId(), req.SendSticker.GetReplyToChatId(), req.SendSticker.GetReplyToMessageId()); err != nil {
 			return nil, err
 		}
 		if !s.wa.IsConnected() {
 			return nil, fail("not_connected", "WhatsApp is not connected", true)
 		}
-		message, err := s.wa.SendSticker(s.ctx, req.SendSticker.GetClientMessageId(), req.SendSticker.GetChatId(), req.SendSticker.GetWebpData(), req.SendSticker.GetReplyToMessageId())
+		message, err := s.wa.SendSticker(s.ctx, req.SendSticker.GetClientMessageId(), req.SendSticker.GetChatId(), req.SendSticker.GetWebpData(), req.SendSticker.GetReplyToMessageId(), req.SendSticker.GetReplyToChatId())
 		if err != nil {
 			return nil, err
 		}
@@ -532,13 +575,13 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		if kind != "audio" && req.SendAttachment.GetVoiceNote() {
 			return nil, fail("invalid_argument", "voice_note is only valid for audio attachments", false)
 		}
-		if err := s.validateReplyTarget(req.SendAttachment.GetChatId(), req.SendAttachment.GetReplyToMessageId()); err != nil {
+		if err := s.validateReplyTarget(req.SendAttachment.GetChatId(), req.SendAttachment.GetReplyToChatId(), req.SendAttachment.GetReplyToMessageId()); err != nil {
 			return nil, err
 		}
 		if !s.wa.IsConnected() {
 			return nil, fail("not_connected", "WhatsApp is not connected", true)
 		}
-		message, err := s.wa.SendAttachment(s.ctx, req.SendAttachment.GetClientMessageId(), req.SendAttachment.GetChatId(), req.SendAttachment.GetFilePath(), kind, req.SendAttachment.GetCaption(), req.SendAttachment.GetReplyToMessageId(), req.SendAttachment.GetVoiceNote())
+		message, err := s.wa.SendAttachment(s.ctx, req.SendAttachment.GetClientMessageId(), req.SendAttachment.GetChatId(), req.SendAttachment.GetFilePath(), kind, req.SendAttachment.GetCaption(), req.SendAttachment.GetReplyToMessageId(), req.SendAttachment.GetReplyToChatId(), req.SendAttachment.GetVoiceNote())
 		if errors.Is(err, wa.ErrInvalidAttachment) {
 			return nil, fail("invalid_argument", err.Error(), false)
 		}
@@ -559,13 +602,13 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		if _, err := uuid.Parse(req.SendStickerFromLibrary.GetClientMessageId()); err != nil {
 			return nil, fail("invalid_argument", "client_message_id must be a UUID", false)
 		}
-		if err := s.validateReplyTarget(req.SendStickerFromLibrary.GetChatId(), req.SendStickerFromLibrary.GetReplyToMessageId()); err != nil {
+		if err := s.validateReplyTarget(req.SendStickerFromLibrary.GetChatId(), req.SendStickerFromLibrary.GetReplyToChatId(), req.SendStickerFromLibrary.GetReplyToMessageId()); err != nil {
 			return nil, err
 		}
 		if !s.wa.IsConnected() {
 			return nil, fail("not_connected", "WhatsApp is not connected", true)
 		}
-		message, err := s.wa.SendStickerFromLibrary(s.ctx, req.SendStickerFromLibrary.GetClientMessageId(), req.SendStickerFromLibrary.GetChatId(), req.SendStickerFromLibrary.GetStickerId(), req.SendStickerFromLibrary.GetReplyToMessageId())
+		message, err := s.wa.SendStickerFromLibrary(s.ctx, req.SendStickerFromLibrary.GetClientMessageId(), req.SendStickerFromLibrary.GetChatId(), req.SendStickerFromLibrary.GetStickerId(), req.SendStickerFromLibrary.GetReplyToMessageId(), req.SendStickerFromLibrary.GetReplyToChatId())
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fail("invalid_argument", "sticker_id was not found in the library", false)
 		}
@@ -836,6 +879,10 @@ func success(result any) *bridgev1.RpcResponse {
 		response.Result = value
 	case *bridgev1.RpcResponse_ListPinnedMessages:
 		response.Result = value
+	case *bridgev1.RpcResponse_ForwardMessage:
+		response.Result = value
+	case *bridgev1.RpcResponse_EditMessage:
+		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageImage:
 		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageAttachment:
@@ -928,7 +975,7 @@ func wireChatWithPresentation(c domain.Chat, presentation wa.ChatPresentation) *
 	return chat
 }
 func wireMessage(m domain.Message) *bridgev1.Message {
-	message := &bridgev1.Message{Id: m.ID, ChatId: m.ChatJID, SenderId: m.SenderJID, FromMe: m.FromMe, TimestampMs: m.Timestamp.UnixMilli(), Status: wireStatus(m.Status), Edited: !m.EditedAt.IsZero(), Revoked: m.Revoked, ReplyToMessageId: m.ReplyToID}
+	message := &bridgev1.Message{Id: m.ID, ChatId: m.ChatJID, SenderId: m.SenderJID, FromMe: m.FromMe, TimestampMs: m.Timestamp.UnixMilli(), Status: wireStatus(m.Status), Edited: !m.EditedAt.IsZero(), Revoked: m.Revoked, ReplyToMessageId: m.ReplyToID, ReplyToChatId: m.ReplyToChatID, ForwardingScore: m.ForwardingScore}
 	if m.Image != nil {
 		message.Content = &bridgev1.Message_Image{Image: &bridgev1.ImageContent{Caption: m.Image.Caption, MimeType: m.Image.MIMEType, LocalPath: m.Image.LocalPath,
 			Width: m.Image.Width, Height: m.Image.Height, FileSize: m.Image.FileSize, Downloadable: !m.Revoked, Sticker: m.Kind == "sticker", Animated: m.Image.Animated}}
@@ -956,7 +1003,11 @@ func wireMessage(m domain.Message) *bridgev1.Message {
 	} else if m.Poll != nil {
 		poll := &bridgev1.PollContent{Question: m.Poll.Question, SelectableOptionsCount: m.Poll.SelectableOptionsCount, TotalVoters: m.Poll.TotalVoters}
 		for _, option := range m.Poll.Options {
-			poll.Options = append(poll.Options, &bridgev1.PollOption{Name: option.Name, VoteCount: option.VoteCount, SelectedByMe: option.SelectedByMe})
+			wired := &bridgev1.PollOption{Name: option.Name, VoteCount: option.VoteCount, SelectedByMe: option.SelectedByMe}
+			for _, voter := range option.Voters {
+				wired.Voters = append(wired.Voters, &bridgev1.PollVoter{UserId: voter.JID, FromMe: voter.FromMe})
+			}
+			poll.Options = append(poll.Options, wired)
 		}
 		message.Content = &bridgev1.Message_Poll{Poll: poll}
 	} else {
@@ -1013,13 +1064,29 @@ func (s *Server) identity(jid string, memo map[string]wireIdentity) wireIdentity
 func (s *Server) wireMessageWithIdentities(m domain.Message, identities map[string]wireIdentity) *bridgev1.Message {
 	message := wireMessage(m)
 	if text := message.GetText(); text != nil {
-		text.Text = replaceMentionIDs(text.Text, func(user string) string { return s.mentionDisplayName(user) })
+		text.Text, message.MentionTexts = replaceMentionIDsWithNames(text.Text, func(user string) string { return s.mentionDisplayName(user) })
 	}
 	if image := message.GetImage(); image != nil {
-		image.Caption = replaceMentionIDs(image.Caption, func(user string) string { return s.mentionDisplayName(user) })
+		var names []string
+		image.Caption, names = replaceMentionIDsWithNames(image.Caption, func(user string) string { return s.mentionDisplayName(user) })
+		message.MentionTexts = append(message.MentionTexts, names...)
 	}
 	if attachment := message.GetAttachment(); attachment != nil {
-		attachment.Caption = replaceMentionIDs(attachment.Caption, func(user string) string { return s.mentionDisplayName(user) })
+		var names []string
+		attachment.Caption, names = replaceMentionIDsWithNames(attachment.Caption, func(user string) string { return s.mentionDisplayName(user) })
+		message.MentionTexts = append(message.MentionTexts, names...)
+	}
+	if poll := message.GetPoll(); poll != nil {
+		for _, option := range poll.Options {
+			for _, voter := range option.Voters {
+				identity := s.identity(voter.UserId, identities)
+				if voter.FromMe {
+					identity.name = "You"
+				}
+				voter.DisplayName = identity.name
+				voter.AvatarPath = identity.avatar
+			}
+		}
 	}
 	if image := message.GetImage(); image != nil && s.wa != nil {
 		// The cache is bounded and may have evicted the path persisted in SQLite.
@@ -1072,8 +1139,14 @@ func (s *Server) mentionDisplayName(user string) string {
 // the original @user token, which preserves the WhatsApp identity for future
 // re-resolution when a PN/LID mapping or contact name arrives later.
 func replaceMentionIDs(text string, resolve func(user string) string) string {
+	rendered, _ := replaceMentionIDsWithNames(text, resolve)
+	return rendered
+}
+
+func replaceMentionIDsWithNames(text string, resolve func(user string) string) (string, []string) {
 	var out strings.Builder
 	changed := false
+	var names []string
 	for cursor := 0; cursor < len(text); {
 		at := strings.IndexByte(text[cursor:], '@')
 		if at < 0 {
@@ -1093,6 +1166,7 @@ func replaceMentionIDs(text string, resolve func(user string) string) string {
 			if name := resolve(text[at+1 : end]); name != "" {
 				out.WriteByte('@')
 				out.WriteString(name)
+				names = append(names, name)
 				cursor = end
 				changed = true
 				continue
@@ -1102,9 +1176,9 @@ func replaceMentionIDs(text string, resolve func(user string) string) string {
 		cursor = at + 1
 	}
 	if !changed {
-		return text
+		return text, nil
 	}
-	return out.String()
+	return out.String(), names
 }
 
 func preferredContactName(details wa.ContactDetails, fallback string) string {
