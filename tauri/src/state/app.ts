@@ -1,6 +1,7 @@
 import { batch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { bridge, normalizeBridgeError, openFile, openUrl, revealMediaPath } from "../lib/bridge";
+import { messageText } from "../lib/format";
 import { BoundedSet, boundWindowAround } from "../lib/performance";
 import { ParticipantAvatarQueue } from "../lib/participant-avatar-queue";
 import { clearMergedPollVotes } from "../lib/chat-merge";
@@ -89,7 +90,26 @@ export interface Mention {
 export interface Draft {
   text: string;
   replyToMessageId: string;
+  replyToChatId: string;
+  replyPreviewText: string;
+  replySenderName: string;
+  editingMessageId: string;
   mentions: Mention[];
+}
+
+export interface ForwardDialogState {
+  sourceChatId: string;
+  messageId: string;
+}
+
+export type FileSendMode = "image" | "sticker" | "attachment";
+
+export interface FileSendConfirmationState {
+  chatId: string;
+  paths: string[];
+  mode: FileSendMode;
+  attachmentKind: AttachmentKind;
+  voiceNote: boolean;
 }
 
 export interface TypingPresence {
@@ -181,6 +201,8 @@ export interface AppState {
   imageFailures: Record<string, string>;
   attachmentFailures: Record<string, string>;
   imageViewer: ImageViewerState | null;
+  forwardDialog: ForwardDialogState | null;
+  fileSendConfirmation: FileSendConfirmationState | null;
   settingsOpen: boolean;
   stickers: StickersState;
   logoutConfirmation: boolean;
@@ -189,7 +211,15 @@ export interface AppState {
   fatalError: string;
 }
 
-const emptyDraft = (): Draft => ({ text: "", replyToMessageId: "", mentions: [] });
+const emptyDraft = (): Draft => ({
+  text: "",
+  replyToMessageId: "",
+  replyToChatId: "",
+  replyPreviewText: "",
+  replySenderName: "",
+  editingMessageId: "",
+  mentions: [],
+});
 /** Cap on simultaneously hydrated conversations; least-recently-focused ones are evicted. */
 const MAX_HYDRATED_CONVERSATIONS = 8;
 const MAX_AVATAR_ATTEMPTS = 4_096;
@@ -262,6 +292,8 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     imageFailures: {},
     attachmentFailures: {},
     imageViewer: null,
+    forwardDialog: null,
+    fileSendConfirmation: null,
     settingsOpen: false,
     stickers: { packs: [], loading: false, error: "" },
     logoutConfirmation: false,
@@ -301,6 +333,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   /** A brand-new conversation emits its message immediately before its chat row. */
   const pendingNotifications = new Map<string, Message>();
   const notifiedMessages = new Set<string>();
+  let fileSendQueue: Promise<void> = Promise.resolve();
   let disposeNotificationActions: (() => void) | undefined;
   const notificationActivations = new NotificationActivationQueue(openNotificationTarget);
   const participantAvatarQueue = new ParticipantAvatarQueue({
@@ -914,12 +947,112 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
 
   function replyTo(messageId: string, chatId = state.selectedChatId) {
     if (!chatId) return;
+    const message = state.conversations[chatId]?.messages.find((candidate) => candidate.id === messageId);
     ensureDraft(chatId);
-    setState("drafts", chatId, "replyToMessageId", messageId);
+    batch(() => {
+      setState("drafts", chatId, "replyToMessageId", messageId);
+      setState("drafts", chatId, "replyToChatId", chatId);
+      setState("drafts", chatId, "replyPreviewText", message ? messageText(message) : "");
+      setState("drafts", chatId, "replySenderName", message?.fromMe ? "You" : message?.senderName || "");
+    });
   }
 
   function cancelReply(chatId = state.selectedChatId) {
-    if (chatId && state.drafts[chatId]) setState("drafts", chatId, "replyToMessageId", "");
+    if (chatId && state.drafts[chatId]) {
+      batch(() => {
+        setState("drafts", chatId, "replyToMessageId", "");
+        setState("drafts", chatId, "replyToChatId", "");
+        setState("drafts", chatId, "replyPreviewText", "");
+        setState("drafts", chatId, "replySenderName", "");
+      });
+    }
+  }
+
+  async function replyPrivately(message: Message, sourceChatId = message.chatId) {
+    const sourceChat = state.chats.find((chat) => chat.id === sourceChatId);
+    if (
+      sourceChat?.kind !== ChatKind.Group ||
+      message.fromMe ||
+      message.revoked ||
+      !message.senderId
+    ) return;
+    try {
+      const response = await bridge.openContact(message.senderId);
+      if (!response.chat) throw new Error("The sender did not produce a direct chat");
+      const target = {
+        ...response.chat,
+        title: message.senderName || response.chat.title || message.senderPhoneNumber,
+      };
+      upsertChat(target);
+      ensureDraft(target.id);
+      batch(() => {
+        setState("drafts", target.id, "replyToMessageId", message.id);
+        setState("drafts", target.id, "replyToChatId", sourceChatId);
+        setState("drafts", target.id, "replyPreviewText", messageText(message));
+        setState("drafts", target.id, "replySenderName", message.senderName || message.senderPhoneNumber);
+        setState("drafts", target.id, "editingMessageId", "");
+        setState("drafts", target.id, "mentions", []);
+      });
+      await selectChat(target.id);
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+    }
+  }
+
+  function editMessage(messageId: string, chatId = state.selectedChatId) {
+    if (!chatId) return;
+    const message = state.conversations[chatId]?.messages.find((candidate) => candidate.id === messageId);
+    if (!message?.fromMe || message.revoked || !message.content || !("text" in message.content)) return;
+    const text = message.content.text.text;
+    ensureDraft(chatId);
+    batch(() => {
+      setState("drafts", chatId, "text", text);
+      setState("drafts", chatId, "replyToMessageId", "");
+      setState("drafts", chatId, "replyToChatId", "");
+      setState("drafts", chatId, "replyPreviewText", "");
+      setState("drafts", chatId, "replySenderName", "");
+      setState("drafts", chatId, "editingMessageId", messageId);
+      setState("drafts", chatId, "mentions", []);
+    });
+  }
+
+  function cancelEdit(chatId = state.selectedChatId) {
+    if (!chatId || !state.drafts[chatId]) return;
+    setState("drafts", chatId, emptyDraft());
+    scheduleTyping(chatId, false);
+  }
+
+  function startForward(messageId: string, sourceChatId = state.selectedChatId) {
+    if (!sourceChatId) return;
+    setState("forwardDialog", { sourceChatId, messageId });
+  }
+
+  function cancelForward() {
+    setState("forwardDialog", null);
+  }
+
+  async function forwardMessage(targetChatIds: string[]) {
+    const source = state.forwardDialog;
+    const targets = [...new Set(targetChatIds.filter(Boolean))];
+    if (!source || targets.length === 0) return;
+    const results = await Promise.allSettled(
+      targets.map((targetChatId) =>
+        bridge.forwardMessage(source.sourceChatId, source.messageId, targetChatId),
+      ),
+    );
+    let forwarded = 0;
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        forwarded++;
+        if (result.value.message) upsertMessage(result.value.message, true);
+      }
+    }
+    if (forwarded > 0) {
+      setState("forwardDialog", null);
+      toast(`Forwarded to ${forwarded} ${forwarded === 1 ? "chat" : "chats"}`, "info");
+    }
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed) toast(normalizeBridgeError(failed.reason).message);
   }
 
   function addMention(
@@ -951,6 +1084,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       return;
     }
     const previous = cloneDraft(draft);
+    const editingMessageId = previous.editingMessageId;
     const encoded = encodeMentions(text, previous.mentions);
     batch(() => {
       setState("sending", true);
@@ -958,12 +1092,15 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     });
     scheduleTyping(chatId, false);
     try {
-      const response = await bridge.sendText(
-        chatId,
-        encoded.text,
-        previous.replyToMessageId,
-        encoded.jids,
-      );
+      const response = editingMessageId
+        ? await bridge.editMessage(chatId, editingMessageId, text)
+        : await bridge.sendText(
+            chatId,
+            encoded.text,
+            previous.replyToMessageId,
+            encoded.jids,
+            previous.replyToChatId,
+          );
       if (response.message) upsertMessage(response.message, true);
     } catch (error) {
       if (draftIsEmpty(state.drafts[chatId])) setState("drafts", chatId, previous);
@@ -1024,11 +1161,11 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   }
 
   async function sendImage(path: string, chatId = state.selectedChatId) {
-    await sendFile(chatId, path, "image");
+    await enqueueFileSend(chatId, path, "image");
   }
 
   async function sendSticker(path: string, chatId = state.selectedChatId) {
-    await sendFile(chatId, path, "sticker");
+    await enqueueFileSend(chatId, path, "sticker");
   }
 
   async function sendAttachment(
@@ -1037,42 +1174,137 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     voiceNote = false,
     chatId = state.selectedChatId,
   ) {
-    await sendFile(chatId, path, "attachment", kind, voiceNote);
+    await enqueueFileSend(chatId, path, "attachment", kind, voiceNote);
   }
 
-  async function sendFile(
-    chatId: string,
-    path: string,
-    mode: "image" | "sticker" | "attachment",
+  function requestFileSend(
+    paths: string[],
+    mode: FileSendMode,
     attachmentKind: AttachmentKind = AttachmentKind.Document,
     voiceNote = false,
+    chatId = state.selectedChatId,
   ) {
+    const selectedPaths = paths.filter(Boolean);
+    if (!chatId || selectedPaths.length === 0 || state.sending) return;
+    setState("fileSendConfirmation", {
+      chatId,
+      paths: selectedPaths,
+      mode,
+      attachmentKind,
+      voiceNote,
+    });
+  }
+
+  function cancelFileSend() {
+    setState("fileSendConfirmation", null);
+  }
+
+  async function confirmFileSend() {
+    const request = state.fileSendConfirmation;
+    if (!request) return;
+    setState("fileSendConfirmation", null);
+    await enqueueFileBatch(request);
+  }
+
+  function enqueueFileSend(
+    chatId: string,
+    path: string,
+    mode: FileSendMode,
+    attachmentKind: AttachmentKind = AttachmentKind.Document,
+    voiceNote = false,
+  ): Promise<void> {
+    return enqueueFileBatch({
+      chatId,
+      paths: [path],
+      mode,
+      attachmentKind,
+      voiceNote,
+    });
+  }
+
+  function enqueueFileBatch(request: FileSendConfirmationState): Promise<void> {
+    const operation = fileSendQueue.then(async () => {
+      while (state.sending) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 16));
+      }
+      await sendFileBatch(request);
+    });
+    fileSendQueue = operation.catch(() => undefined);
+    return operation;
+  }
+
+  async function sendFileBatch(request: FileSendConfirmationState) {
+    const { chatId, paths, mode, attachmentKind, voiceNote } = request;
     const draft = state.drafts[chatId] ?? emptyDraft();
-    if (!chatId || state.sending) return;
+    if (!chatId || paths.length === 0 || state.sending) return;
     const previous = cloneDraft(draft);
+    const supportsCaption =
+      mode === "image" ||
+      (mode === "attachment" && attachmentKind !== AttachmentKind.Audio);
+    const retainedDraft = supportsCaption
+      ? emptyDraft()
+      : {
+          ...cloneDraft(previous),
+          replyToMessageId: "",
+          replyToChatId: "",
+          replyPreviewText: "",
+          replySenderName: "",
+        };
     batch(() => {
       setState("sending", true);
-      setState("drafts", chatId, emptyDraft());
+      setState("drafts", chatId, retainedDraft);
     });
     scheduleTyping(chatId, false);
+    const failures: Array<{ path: string; error: unknown }> = [];
+    let sent = 0;
     try {
-      const response =
-        mode === "image"
-          ? await bridge.sendImage(chatId, path, previous.text.trim(), previous.replyToMessageId)
-          : mode === "sticker"
-            ? await bridge.sendSticker(chatId, path, previous.replyToMessageId)
-            : await bridge.sendAttachment(
-                chatId,
-                path,
-                attachmentKind,
-                attachmentKind === AttachmentKind.Audio ? "" : previous.text.trim(),
-                previous.replyToMessageId,
-                voiceNote,
-              );
-      if (response.message) upsertMessage(response.message, true);
-    } catch (error) {
-      if (draftIsEmpty(state.drafts[chatId])) setState("drafts", chatId, previous);
-      toast(normalizeBridgeError(error).message);
+      for (let index = 0; index < paths.length; index++) {
+        const path = paths[index]!;
+        // WhatsApp sends each selected file as its own message. Apply the
+        // current caption/reply only to the first one, matching album-style
+        // multi-file sending without duplicating the caption on every item.
+        const context = index === 0 ? previous : emptyDraft();
+        try {
+          const response =
+            mode === "image"
+              ? await bridge.sendImage(chatId, path, context.text.trim(), context.replyToMessageId, context.replyToChatId)
+              : mode === "sticker"
+                ? await bridge.sendSticker(chatId, path, context.replyToMessageId, context.replyToChatId)
+                : await bridge.sendAttachment(
+                    chatId,
+                    path,
+                    attachmentKind,
+                    attachmentKind === AttachmentKind.Audio ? "" : context.text.trim(),
+                    context.replyToMessageId,
+                    voiceNote,
+                    context.replyToChatId,
+                  );
+          if (response.message) upsertMessage(response.message, true);
+          sent++;
+        } catch (error) {
+          failures.push({ path, error });
+        }
+      }
+      if (failures.length === 0 && paths.length > 1) {
+        toast(`Sent ${sent} files`, "info");
+      } else if (failures.length > 0) {
+        const currentDraft = state.drafts[chatId];
+        const draftWasUntouched =
+          supportsCaption
+            ? draftIsEmpty(currentDraft)
+            : currentDraft?.text === retainedDraft.text &&
+              currentDraft?.editingMessageId === retainedDraft.editingMessageId &&
+              currentDraft?.replyToMessageId === retainedDraft.replyToMessageId;
+        if (failures[0]?.path === paths[0] && draftWasUntouched) {
+          setState("drafts", chatId, previous);
+        }
+        const firstError = normalizeBridgeError(failures[0]!.error).message;
+        toast(
+          paths.length === 1
+            ? firstError
+            : `Sent ${sent} of ${paths.length} files. ${failures.length} failed: ${firstError}`,
+        );
+      }
     } finally {
       setState("sending", false);
     }
@@ -1985,6 +2217,10 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     window.setTimeout(() => dismissToast(id), 6_000);
   }
 
+  function notifyError(error: unknown) {
+    toast(normalizeBridgeError(error).message);
+  }
+
   function dismissToast(id: number) {
     setState("toasts", (toasts) => toasts.filter((toast) => toast.id !== id));
   }
@@ -2045,7 +2281,13 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       openMessageResult,
       setDraftText,
       replyTo,
+      replyPrivately,
       cancelReply,
+      editMessage,
+      cancelEdit,
+      startForward,
+      cancelForward,
+      forwardMessage,
       addMention,
       sendCurrentText,
       createPoll,
@@ -2055,6 +2297,9 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       sendImage,
       sendSticker,
       sendAttachment,
+      requestFileSend,
+      confirmFileSend,
+      cancelFileSend,
       hydrateImage,
       hydrateAttachment,
       openAttachment,
@@ -2079,6 +2324,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       typingLabel,
       filteredChats,
       selectedChat,
+      notifyError,
       activeDraft,
       dismissToast,
       dispose,

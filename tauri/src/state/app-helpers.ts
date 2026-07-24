@@ -26,6 +26,10 @@ export function cloneDraft(draft: Draft): Draft {
   return {
     text: draft.text,
     replyToMessageId: draft.replyToMessageId,
+    replyToChatId: draft.replyToChatId,
+    replyPreviewText: draft.replyPreviewText,
+    replySenderName: draft.replySenderName,
+    editingMessageId: draft.editingMessageId,
     mentions: draft.mentions.map((mention) => ({ ...mention })),
   };
 }
@@ -35,6 +39,10 @@ export function draftIsEmpty(draft: Draft | undefined): boolean {
     draft &&
       draft.text === "" &&
       draft.replyToMessageId === "" &&
+      draft.replyToChatId === "" &&
+      draft.replyPreviewText === "" &&
+      draft.replySenderName === "" &&
+      draft.editingMessageId === "" &&
       draft.mentions.length === 0,
   );
 }
