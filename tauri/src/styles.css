@@ -3764,7 +3764,8 @@ html[data-battery-saver="true"] .modal-backdrop {
 }
 
 html[data-theme-style="skeuomorphic"] {
-  font-family: "Lucida Grande", "Lucida Sans Unicode", Tahoma, Geneva, sans-serif;
+  font-family: "Nimbus Sans", "Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif;
+  -webkit-font-smoothing: antialiased;
   --radius-sm: calc(5px * var(--scale));
   --radius-md: calc(7px * var(--scale));
   --radius-lg: calc(9px * var(--scale));
@@ -3801,7 +3802,7 @@ html[data-theme-style="skeuomorphic"] .settings-nav-item.active .theme-icon-skeu
 }
 
 html[data-theme-style="skeuomorphic"] body {
-  text-shadow: 0 1px color-mix(in srgb, var(--bg-app) 68%, transparent);
+  text-shadow: none;
 }
 
 html[data-theme-style="skeuomorphic"] ::-webkit-scrollbar {
@@ -3861,7 +3862,7 @@ html[data-theme-style="skeuomorphic"] .conversation-heading strong,
 html[data-theme-style="skeuomorphic"] .right-panel-header h2,
 html[data-theme-style="skeuomorphic"] .member-panel-header h2 {
   font-weight: 700;
-  text-shadow: 0 1px rgba(255, 255, 255, 0.22), 0 -1px rgba(0, 0, 0, 0.48);
+  text-shadow: none;
 }
 
 html[data-theme-style="skeuomorphic"] .nav-rail,
@@ -3893,7 +3894,7 @@ html[data-theme-style="skeuomorphic"] .segmented-control button {
     inset 0 1px rgba(255, 255, 255, 0.48),
     0 1px 1px rgba(0, 0, 0, 0.34);
   color: var(--fg);
-  text-shadow: 0 1px rgba(255, 255, 255, 0.18), 0 -1px rgba(0, 0, 0, 0.45);
+  text-shadow: none;
 }
 
 html[data-theme-style="skeuomorphic"] .icon-button:hover:not(:disabled),
@@ -4007,7 +4008,7 @@ html[data-theme-style="skeuomorphic"] .switcher-row.active {
     color-mix(in srgb, var(--accent) 86%, #000)
   );
   color: var(--accent-fg);
-  text-shadow: 0 1px rgba(255, 255, 255, 0.22);
+  text-shadow: none;
 }
 
 html[data-theme-style="skeuomorphic"] .chat-row.selected .chat-preview,
@@ -4151,7 +4152,7 @@ html[data-theme-style="skeuomorphic"] .settings-nav-item.active {
     color-mix(in srgb, var(--accent) 80%, #000)
   );
   color: var(--accent-fg);
-  text-shadow: 0 1px rgba(255, 255, 255, 0.20);
+  text-shadow: none;
 }
 
 html[data-theme-style="skeuomorphic"] .theme-card {
@@ -4210,7 +4211,7 @@ html[data-theme-style="skeuomorphic"][data-appearance="dark"] .composer-input-wr
 html[data-theme-style="skeuomorphic"][data-appearance="dark"] .conversation-search,
 html[data-theme-style="skeuomorphic"][data-appearance="dark"] .spotlight-input input {
   color: #f3f3f3;
-  text-shadow: 0 1px #000;
+  text-shadow: none;
 }
 
 html[data-theme-style="skeuomorphic"][data-appearance="dark"] .message-row.from-me .message-meta .read {
@@ -4222,7 +4223,7 @@ html[data-theme-style="skeuomorphic"][data-appearance="light"] body {
   background:
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.22) 0 1px, rgba(86, 104, 128, 0.08) 1px 3px),
     var(--bg-app);
-  text-shadow: 0 1px rgba(255, 255, 255, 0.72);
+  text-shadow: none;
 }
 
 html[data-theme-style="skeuomorphic"][data-appearance="light"] .titlebar,
@@ -4235,7 +4236,7 @@ html[data-theme-style="skeuomorphic"][data-appearance="light"] .member-panel-hea
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.09) 0 1px, transparent 1px 3px),
     linear-gradient(#aebed1, #7790ad 48%, #526d8b 52%, #6e88a5);
   color: #fff;
-  text-shadow: 0 -1px #32465e;
+  text-shadow: none;
 }
 
 html[data-theme-style="skeuomorphic"][data-appearance="light"] .titlebar-brand,
@@ -4286,7 +4287,7 @@ html[data-theme-style="skeuomorphic"][data-appearance="light"] .send-button {
   border-color: #214e83;
   background: linear-gradient(#a9d1f7, #4f91d4 48%, #2d6caf 52%, #4a85c4);
   color: #fff;
-  text-shadow: 0 -1px #254d78;
+  text-shadow: none;
 }
 
 html[data-theme-style="skeuomorphic"][data-appearance="light"] .chat-row.selected,
@@ -4297,7 +4298,7 @@ html[data-theme-style="skeuomorphic"][data-appearance="light"] .settings-nav-ite
   border-color: #315d91;
   background: linear-gradient(#91b9e2, #568ac2 49%, #3d73ad 51%, #5b8fc7);
   color: #fff;
-  text-shadow: 0 -1px #315578;
+  text-shadow: none;
 }
 
 @media (max-width: 760px) {
