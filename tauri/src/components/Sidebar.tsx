@@ -3,7 +3,6 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import {
   Archive,
   CheckCheck,
-  MessageSquarePlus,
   Pin,
   Search,
   VolumeX,
@@ -57,13 +56,6 @@ export function Sidebar(props: SidebarProps) {
 
   return (
     <aside class="sidebar" aria-label="Chats">
-      <header class="sidebar-header">
-        <h1 class="sidebar-title">Chats</h1>
-        <IconButton label="New chat" onClick={() => focusSearch()}>
-          <ThemeIcon icon={MessageSquarePlus} name="new-chat" size={20} />
-        </IconButton>
-      </header>
-
       <div class="sidebar-search-wrap">
         <label class="search-field">
           <ThemeIcon icon={Search} name="search" size={17} />
@@ -151,11 +143,6 @@ export function Sidebar(props: SidebarProps) {
       </Show>
     </aside>
   );
-
-  function focusSearch() {
-    const input = document.querySelector<HTMLInputElement>('.search-field input');
-    input?.focus();
-  }
 }
 
 function FilterButton(props: { filter: ChatFilter; label: string; model: AppModel }) {

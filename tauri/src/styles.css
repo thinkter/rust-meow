@@ -700,7 +700,7 @@ html[data-appearance="light"] .avatar {
 
 .sidebar-search-wrap {
   flex: none;
-  padding: calc(4px * var(--scale)) calc(12px * var(--scale)) calc(8px * var(--scale));
+  padding: calc(12px * var(--scale)) calc(12px * var(--scale)) calc(8px * var(--scale));
 }
 
 .search-field {

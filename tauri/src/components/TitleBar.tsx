@@ -1,5 +1,5 @@
 import { For, onCleanup, onMount, Show, createSignal } from "solid-js";
-import { Columns2, MessageCircle, Minus, Square, X } from "lucide-solid";
+import { Columns2, Minus, Square, X } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import { browserMockEnabled } from "../lib/bridge";
 import { IconButton } from "./Primitives";
@@ -156,9 +156,6 @@ export function TitleBar(props: { model: AppModel }) {
           collapsed that column shrinks to zero and the tabs slide fully left. */}
       <header class="titlebar">
         <div class="titlebar-brand" aria-hidden="true">
-          <span class="brand-mark">
-            <ThemeIcon icon={MessageCircle} name="chat" size={16} />
-          </span>
           <span class="titlebar-title">Rust Meow</span>
         </div>
         <div class="titlebar-main">
