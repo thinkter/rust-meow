@@ -199,6 +199,8 @@ const CATEGORIES: EmojiCategory[] = [
 
 /** Flat data derived once for search and accessible labels. */
 const ALL_ENTRIES = CATEGORIES.flatMap((category) => category.entries);
+/** Curated emoji catalog shared with composer autocomplete. */
+export const EMOJI_ENTRIES: readonly EmojiEntry[] = ALL_ENTRIES;
 const KEYWORDS: Record<string, string> = Object.fromEntries(ALL_ENTRIES);
 
 const DEFAULT_RECENT_KEY = "rust-meow-recent-emoji";

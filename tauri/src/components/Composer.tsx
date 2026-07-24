@@ -12,11 +12,12 @@ import {
   ListChecks,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
-import { openFile } from "../lib/bridge";
+import { discardStagedImage, normalizeBridgeError, openFile, readClipboardText, stageClipboardImage } from "../lib/bridge";
+import { applyEmojiSuggestion, getEmojiAutocomplete } from "../lib/emoji-autocomplete";
 import { AttachmentKind, ChatKind, ConnectionState, type ChatParticipant } from "../lib/types";
 import { messageText } from "../lib/format";
 import { IconButton } from "./Primitives";
-import { EmojiPicker } from "./EmojiPicker";
+import { EMOJI_ENTRIES, EmojiPicker } from "./EmojiPicker";
 import { StickerTray } from "./StickerTray";
 
 type PopoverKind = "emoji" | "sticker" | "attachment" | "poll" | null;
@@ -26,6 +27,8 @@ export function Composer(props: { model: AppModel; chatId: string }) {
   const [openPopover, setOpenPopover] = createSignal<PopoverKind>(null);
   const [mentionRange, setMentionRange] = createSignal<{ start: number; end: number; query: string } | null>(null);
   const [mentionIndex, setMentionIndex] = createSignal(0);
+  const [composerCaret, setComposerCaret] = createSignal(0);
+  const [emojiIndex, setEmojiIndex] = createSignal(0);
   const [pollQuestion, setPollQuestion] = createSignal("");
   const [pollOptions, setPollOptions] = createSignal("Yes\nNo");
   const [pollMultiple, setPollMultiple] = createSignal(false);
@@ -37,7 +40,14 @@ export function Composer(props: { model: AppModel; chatId: string }) {
   // and must never read or write another chat's draft/reply/mentions.
   const draft = () => actions.activeDraft(props.chatId);
   const conversation = () => actions.conversation(props.chatId);
-  const reply = () => conversation().messages.find((message) => message.id === draft().replyToMessageId);
+  const replySourceChatId = () => draft().replyToChatId || props.chatId;
+  const reply = () =>
+    state.conversations[replySourceChatId()]?.messages.find(
+      (message) => message.id === draft().replyToMessageId,
+    );
+  const privateReply = () =>
+    Boolean(draft().replyToMessageId) && replySourceChatId() !== props.chatId;
+  const editing = () => conversation().messages.find((message) => message.id === draft().editingMessageId);
   const chat = () => state.chats.find((candidate) => candidate.id === props.chatId);
   const connected = () => state.connection === ConnectionState.Connected;
   const togglePopover = (kind: Exclude<PopoverKind, null>) => setOpenPopover((open) => open === kind ? null : kind);
@@ -59,6 +69,18 @@ export function Composer(props: { model: AppModel; chatId: string }) {
       )
       .slice(0, 8);
   });
+  const emojiAutocomplete = createMemo(() =>
+    getEmojiAutocomplete(draft().text, composerCaret(), EMOJI_ENTRIES),
+  );
+  const emojiSuggestions = () => emojiAutocomplete()?.suggestions ?? [];
+
+  createEffect(() => {
+    const autocomplete = emojiAutocomplete();
+    // Reset selection whenever the active token/query changes.
+    autocomplete?.match.token;
+    autocomplete?.match.query;
+    setEmojiIndex(0);
+  });
 
   createEffect(() => {
     // Only steal focus into this composer when its chat is the focused
@@ -66,7 +88,16 @@ export function Composer(props: { model: AppModel; chatId: string }) {
     // keyboard focus away from whatever the user is actually looking at.
     const focused = isFocusedChat();
     const replyId = draft().replyToMessageId;
-    if (focused && (props.chatId || replyId)) requestAnimationFrame(() => textarea?.focus());
+    const editingId = draft().editingMessageId;
+    if (focused && (props.chatId || replyId || editingId)) requestAnimationFrame(() => textarea?.focus());
+  });
+
+  createEffect(() => {
+    // Input events resize while typing, but sends, edits, chat switches, and
+    // restored drafts change the controlled value programmatically. Track the
+    // draft so clearing a long message also collapses the textarea immediately.
+    draft().text;
+    if (textarea) resizeTextarea(textarea);
   });
 
   onMount(() => {
@@ -89,14 +120,29 @@ export function Composer(props: { model: AppModel; chatId: string }) {
 
   return (
     <div class="composer-wrap" ref={root}>
-      <Show when={reply()}>
+      <Show when={draft().replyToMessageId}>
+        <div class="reply-composer">
+          <div class="reply-composer-card">
+            <strong>
+              {privateReply()
+                ? `Privately replying to ${reply()?.senderName || draft().replySenderName || chat()?.title || "sender"}`
+                : reply()?.fromMe
+                  ? "You"
+                  : reply()?.senderName || draft().replySenderName || chat()?.title}
+            </strong>
+            <span>{reply() ? messageText(reply()!) : draft().replyPreviewText || "Message outside the loaded history"}</span>
+          </div>
+          <IconButton label="Cancel reply" onClick={() => actions.cancelReply(props.chatId)}><X size={18} /></IconButton>
+        </div>
+      </Show>
+      <Show when={editing()}>
         {(message) => (
-          <div class="reply-composer">
+          <div class="reply-composer edit-composer">
             <div class="reply-composer-card">
-              <strong>{message().fromMe ? "You" : message().senderName || chat()?.title}</strong>
+              <strong>Edit message</strong>
               <span>{messageText(message())}</span>
             </div>
-            <IconButton label="Cancel reply" onClick={() => actions.cancelReply(props.chatId)}><X size={18} /></IconButton>
+            <IconButton label="Cancel edit" onClick={() => actions.cancelEdit(props.chatId)}><X size={18} /></IconButton>
           </div>
         )}
       </Show>
@@ -143,17 +189,32 @@ export function Composer(props: { model: AppModel; chatId: string }) {
             rows={1}
             value={draft().text}
             disabled={!connected()}
-            placeholder={connected() ? "Type a message" : "Waiting for connection…"}
+            placeholder={connected() ? (draft().editingMessageId ? "Edit message" : "Type a message") : "Waiting for connection…"}
             aria-label="Message"
             onInput={(event) => {
               actions.setDraftText(event.currentTarget.value, props.chatId);
+              setComposerCaret(event.currentTarget.selectionStart ?? event.currentTarget.value.length);
               resizeTextarea(event.currentTarget);
               updateMention(event.currentTarget);
             }}
+            onClick={(event) => updateComposerContext(event.currentTarget)}
+            onSelect={(event) => updateComposerContext(event.currentTarget)}
+            onKeyUp={(event) => {
+              if (event.key !== "Escape") updateComposerContext(event.currentTarget);
+            }}
             onBlur={() => actions.stopTyping()}
             onKeyDown={(event) => {
+              if (
+                event.key.toLocaleLowerCase() === "v"
+                && (event.ctrlKey || event.metaKey)
+                && !event.altKey
+              ) {
+                event.preventDefault();
+                void pasteClipboard();
+                return;
+              }
               // Mention autocomplete always wins, regardless of enterToSend.
-              if (mentionMatches().length > 0) {
+              if (openPopover() === null && mentionMatches().length > 0) {
                 if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                   const direction = event.key === "ArrowDown" ? 1 : -1;
                   setMentionIndex((index) =>
@@ -162,7 +223,13 @@ export function Composer(props: { model: AppModel; chatId: string }) {
                   event.preventDefault();
                   return;
                 }
-                if (event.key === "Tab" || event.key === "Enter") {
+                if (
+                  (event.key === "Tab" || event.key === "Enter")
+                  && !event.altKey
+                  && !event.ctrlKey
+                  && !event.metaKey
+                  && !event.shiftKey
+                ) {
                   const participant = mentionMatches()[mentionIndex()];
                   if (participant) selectMention(participant);
                   event.preventDefault();
@@ -170,6 +237,33 @@ export function Composer(props: { model: AppModel; chatId: string }) {
                 }
                 if (event.key === "Escape") {
                   setMentionRange(null);
+                  event.preventDefault();
+                  return;
+                }
+              }
+              if (openPopover() === null && emojiSuggestions().length > 0) {
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                  const direction = event.key === "ArrowDown" ? 1 : -1;
+                  setEmojiIndex((index) =>
+                    (index + direction + emojiSuggestions().length) % emojiSuggestions().length,
+                  );
+                  event.preventDefault();
+                  return;
+                }
+                if (
+                  (event.key === "Tab" || event.key === "Enter")
+                  && !event.altKey
+                  && !event.ctrlKey
+                  && !event.metaKey
+                  && !event.shiftKey
+                ) {
+                  const suggestion = emojiSuggestions()[emojiIndex()];
+                  if (suggestion) selectEmojiSuggestion(suggestion.emoji);
+                  event.preventDefault();
+                  return;
+                }
+                if (event.key === "Escape") {
+                  setComposerCaret(-1);
                   event.preventDefault();
                   return;
                 }
@@ -193,14 +287,14 @@ export function Composer(props: { model: AppModel; chatId: string }) {
 
         <IconButton
           type="submit"
-          label="Send"
+          label={draft().editingMessageId ? "Save edit" : "Send"}
           class="send-button"
           disabled={!connected() || state.sending || !draft().text.trim()}
         >
           <Send size={20} />
         </IconButton>
 
-        <Show when={mentionRange() && mentionMatches().length > 0}>
+        <Show when={openPopover() === null && mentionRange() && mentionMatches().length > 0}>
           <div class="popover mention-picker" role="listbox" aria-label="Mention a group member">
             <For each={mentionMatches()}>
               {(participant, index) => (
@@ -219,6 +313,26 @@ export function Composer(props: { model: AppModel; chatId: string }) {
                     <strong>{participant.displayName || participant.phoneNumber}</strong>
                     <span>{participant.phoneNumber}</span>
                   </span>
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+
+        <Show when={openPopover() === null && !mentionRange() && emojiAutocomplete() && emojiSuggestions().length > 0}>
+          <div class="popover emoji-autocomplete" role="listbox" aria-label="Emoji suggestions">
+            <For each={emojiSuggestions()}>
+              {(suggestion, index) => (
+                <button
+                  type="button"
+                  class={`emoji-autocomplete-row ${index() === emojiIndex() ? "active" : ""}`}
+                  role="option"
+                  aria-selected={index() === emojiIndex()}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => selectEmojiSuggestion(suggestion.emoji)}
+                >
+                  <span class="emoji-autocomplete-glyph" aria-hidden="true">{suggestion.emoji}</span>
+                  <span>:{suggestion.label}:</span>
                 </button>
               )}
             </For>
@@ -279,15 +393,23 @@ export function Composer(props: { model: AppModel; chatId: string }) {
     void actions.ensureMentionDirectory();
   }
 
+  function updateComposerContext(element: HTMLTextAreaElement) {
+    setComposerCaret(element.selectionStart ?? element.value.length);
+    updateMention(element);
+  }
+
   function selectMention(participant: ChatParticipant) {
     const range = mentionRange();
     if (!range) return;
+    const displayName = participant.displayName || participant.phoneNumber;
+    const caret = range.start + displayName.length + 2;
     actions.addMention(participant, range.start, range.end, props.chatId);
     setMentionRange(null);
+    setComposerCaret(caret);
     queueMicrotask(() => {
       if (!textarea) return;
       textarea.focus();
-      textarea.selectionStart = textarea.selectionEnd = actions.activeDraft(props.chatId).text.length;
+      textarea.selectionStart = textarea.selectionEnd = caret;
       resizeTextarea(textarea);
     });
   }
@@ -298,48 +420,121 @@ export function Composer(props: { model: AppModel; chatId: string }) {
     const start = element?.selectionStart ?? draftText.length;
     const end = element?.selectionEnd ?? start;
     actions.setDraftText(`${draftText.slice(0, start)}${emoji}${draftText.slice(end)}`, props.chatId);
+    const caret = start + emoji.length;
+    setComposerCaret(caret);
     queueMicrotask(() => {
       if (!textarea) return;
       textarea.focus();
-      textarea.selectionStart = textarea.selectionEnd = start + emoji.length;
+      textarea.selectionStart = textarea.selectionEnd = caret;
       resizeTextarea(textarea);
     });
   }
 
+  function insertClipboardText(text: string) {
+    if (!text) return;
+    const element = textarea;
+    const draftText = draft().text;
+    const start = element?.selectionStart ?? draftText.length;
+    const end = element?.selectionEnd ?? start;
+    actions.setDraftText(`${draftText.slice(0, start)}${text}${draftText.slice(end)}`, props.chatId);
+    const caret = start + text.length;
+    setComposerCaret(caret);
+    queueMicrotask(() => {
+      if (!textarea) return;
+      textarea.focus();
+      textarea.selectionStart = textarea.selectionEnd = caret;
+      resizeTextarea(textarea);
+      updateMention(textarea);
+    });
+  }
+
+  function selectEmojiSuggestion(emoji: string) {
+    const autocomplete = emojiAutocomplete();
+    if (!autocomplete) return;
+    const replacement = applyEmojiSuggestion(draft().text, autocomplete.match, emoji);
+    actions.setDraftText(replacement.text, props.chatId);
+    setComposerCaret(replacement.caret);
+    queueMicrotask(() => {
+      if (!textarea) return;
+      textarea.focus();
+      textarea.selectionStart = textarea.selectionEnd = replacement.caret;
+      resizeTextarea(textarea);
+    });
+  }
+
+  async function pasteClipboard() {
+    let stagedPath = "";
+    try {
+      stagedPath = await stageClipboardImage();
+      await actions.sendImage(stagedPath, props.chatId);
+      return;
+    } catch (error) {
+      const clipboardError = normalizeBridgeError(error);
+      if (clipboardError.code !== "clipboard_no_image") {
+        actions.notifyError(clipboardError);
+        return;
+      }
+      try {
+        insertClipboardText(await readClipboardText());
+      } catch (textError) {
+        actions.notifyError(textError);
+      }
+    } finally {
+      if (stagedPath) {
+        void discardStagedImage(stagedPath).catch((error) => {
+          console.warn("Could not remove staged clipboard image", error);
+        });
+      }
+    }
+  }
+
   async function chooseImage() {
-    await chooseVisual("Choose a photo", (path) => actions.sendImage(path, props.chatId));
+    await chooseFiles(
+      "Choose photos",
+      "image",
+      AttachmentKind.Document,
+      [{ name: "Images", extensions: ["jpg", "jpeg", "png", "gif", "webp"] }],
+    );
   }
 
   async function chooseSticker() {
-    await chooseVisual("Choose an image to turn into a sticker", (path) => actions.sendSticker(path, props.chatId));
-  }
-
-  async function chooseVisual(title: string, send: (path: string) => Promise<void>) {
-    setOpenPopover(null);
-    const path = await openFile({
-      multiple: false,
-      directory: false,
-      title,
-      filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "gif", "webp"] }],
-    });
-    if (typeof path === "string") await send(path);
+    await chooseFiles(
+      "Choose images to turn into stickers",
+      "sticker",
+      AttachmentKind.Document,
+      [{ name: "Images", extensions: ["jpg", "jpeg", "png", "gif", "webp"] }],
+    );
   }
 
   async function chooseAttachment(kind: number) {
-    setOpenPopover(null);
     const filters =
       kind === AttachmentKind.Video
         ? [{ name: "Videos", extensions: ["mp4", "mkv", "mov", "webm"] }]
         : kind === AttachmentKind.Audio
           ? [{ name: "Audio", extensions: ["ogg", "opus", "mp3", "m4a", "wav", "aac"] }]
           : undefined;
-    const path = await openFile({
-      multiple: false,
+    await chooseFiles(
+      kind === AttachmentKind.Document ? "Choose documents" : kind === AttachmentKind.Video ? "Choose videos" : "Choose audio files",
+      "attachment",
+      kind as AttachmentKind,
+      filters,
+    );
+  }
+
+  async function chooseFiles(
+    title: string,
+    mode: "image" | "sticker" | "attachment",
+    attachmentKind: AttachmentKind,
+    filters?: Array<{ name: string; extensions: string[] }>,
+  ) {
+    setOpenPopover(null);
+    const paths = await openFile({
+      multiple: true,
       directory: false,
-      title: kind === AttachmentKind.Document ? "Choose a document" : kind === AttachmentKind.Video ? "Choose a video" : "Choose audio",
+      title,
       filters,
     });
-    if (typeof path === "string") await actions.sendAttachment(path, kind as 1 | 2 | 3, false, props.chatId);
+    if (paths?.length) actions.requestFileSend(paths, mode, attachmentKind, false, props.chatId);
   }
 }
 
