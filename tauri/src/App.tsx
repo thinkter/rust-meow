@@ -28,6 +28,7 @@ import {
   Toasts,
 } from "./components/Screens";
 import { IconButton } from "./components/Primitives";
+import { ThemeIcon } from "./components/ThemeIcon";
 
 export default function App() {
   const model = createAppModel();
@@ -85,40 +86,43 @@ export default function App() {
           <TitleBar model={model} />
           <nav class="nav-rail" aria-label="Primary navigation">
             <div class="brand-mark" aria-label="Rust Meow">
-              <MessageCircle size={22} />
+              <ThemeIcon icon={MessageCircle} name="chat" size={22} />
             </div>
             <IconButton
               label="Chats"
               active={state.chatFilter !== "archived"}
               onClick={() => actions.setFilter("all")}
             >
-              <MessageCircle size={21} />
+              <ThemeIcon icon={MessageCircle} name="chat" size={21} />
             </IconButton>
             <IconButton label="Quick search (Ctrl+K)" onClick={toggleSpotlight}>
-              <Search size={20} />
+              <ThemeIcon icon={Search} name="search" size={20} />
             </IconButton>
             <IconButton
               label="Archived chats"
               active={state.chatFilter === "archived"}
               onClick={() => actions.setFilter("archived")}
             >
-              <Archive size={20} />
+              <ThemeIcon icon={Archive} name="archive" size={20} />
             </IconButton>
             <IconButton
               label={preferences.sidebarCollapsed ? "Show chat list" : "Hide chat list"}
               active={!preferences.sidebarCollapsed}
               onClick={() => prefActions.update("sidebarCollapsed", !preferences.sidebarCollapsed)}
             >
-              <Show when={preferences.sidebarCollapsed} fallback={<PanelLeftClose size={20} />}>
-                <PanelLeftOpen size={20} />
+              <Show
+                when={preferences.sidebarCollapsed}
+                fallback={<ThemeIcon icon={PanelLeftClose} name="sidebar" size={20} />}
+              >
+                <ThemeIcon icon={PanelLeftOpen} name="sidebar" size={20} />
               </Show>
             </IconButton>
             <div class="nav-spacer" />
             <IconButton label="Privacy architecture" onClick={() => actions.toggleSettings(true)}>
-              <ShieldCheck size={20} />
+              <ThemeIcon icon={ShieldCheck} name="shield" size={20} />
             </IconButton>
             <IconButton label="Settings" active={state.settingsOpen} onClick={() => actions.toggleSettings()}>
-              <Settings size={20} />
+              <ThemeIcon icon={Settings} name="settings" size={20} />
             </IconButton>
           </nav>
           <Sidebar model={model} searchInputRef={(element) => (searchInput = element)} />

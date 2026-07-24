@@ -3,6 +3,7 @@ import { Columns2, MessageCircle, Minus, Square, X } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import { browserMockEnabled } from "../lib/bridge";
 import { IconButton } from "./Primitives";
+import { ThemeIcon } from "./ThemeIcon";
 import { Tabs } from "./Tabs";
 
 /**
@@ -156,7 +157,7 @@ export function TitleBar(props: { model: AppModel }) {
       <header class="titlebar">
         <div class="titlebar-brand" aria-hidden="true">
           <span class="brand-mark">
-            <MessageCircle size={16} />
+            <ThemeIcon icon={MessageCircle} name="chat" size={16} />
           </span>
           <span class="titlebar-title">Rust Meow</span>
         </div>
@@ -178,11 +179,11 @@ export function TitleBar(props: { model: AppModel }) {
                 active={state.panes.length >= 2}
                 onClick={togglePaneSplit}
               >
-                <Columns2 size={16} />
+                <ThemeIcon icon={Columns2} name="split" size={16} />
               </IconButton>
             </Show>
             <button type="button" class="window-button" aria-label="Minimize" onClick={() => void minimize()}>
-              <Minus size={15} />
+              <ThemeIcon icon={Minus} name="minimize" size={15} />
             </button>
             <button
               type="button"
@@ -190,10 +191,10 @@ export function TitleBar(props: { model: AppModel }) {
               aria-label={maximized() ? "Restore" : "Maximize"}
               onClick={() => void toggleMaximizeRestore()}
             >
-              <Square size={13} />
+              <ThemeIcon icon={Square} name="maximize" size={13} />
             </button>
             <button type="button" class="window-button close" aria-label="Close" onClick={() => void closeWindow()}>
-              <X size={16} />
+              <ThemeIcon icon={X} name="close" size={16} />
             </button>
           </div>
         </div>

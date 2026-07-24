@@ -2707,7 +2707,7 @@ html[data-appearance="light"] .message-sender {
 
 .theme-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(calc(140px * var(--scale)), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(calc(180px * var(--scale)), 1fr));
   gap: calc(12px * var(--scale));
   padding: calc(12px * var(--scale)) calc(20px * var(--scale));
 }
@@ -3610,5 +3610,702 @@ html[data-battery-saver="true"] .modal-backdrop {
 
   .settings-nav-item {
     min-width: max-content;
+  }
+}
+
+/* ==========================================================================
+   Throwback materials
+
+   This is intentionally a structural theme rather than a second application
+   stylesheet. Imported themes can opt into this known-safe treatment with
+   `visualStyle: "skeuomorphic"`; their light/dark appearance chooses the
+   period material palette. Every texture below is procedural CSS, so themes
+   never fetch an image, font, or other remote asset.
+   ========================================================================== */
+
+.theme-card-select {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-material-preview {
+  --preview-bg: #111;
+  --preview-panel: #222;
+  --preview-border: #444;
+  --preview-in: #333;
+  --preview-out: #777;
+  --preview-accent: #08f;
+  position: relative;
+  display: grid;
+  height: calc(72px * var(--scale));
+  grid-template-columns: 34% 1fr;
+  grid-template-rows: 17px 1fr;
+  overflow: hidden;
+  border: 1px solid var(--preview-border);
+  border-radius: var(--radius-sm);
+  background: var(--preview-bg);
+}
+
+.theme-preview-bar {
+  grid-column: 1 / -1;
+  border-bottom: 1px solid var(--preview-border);
+  background: var(--preview-panel);
+}
+
+.theme-preview-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 5px;
+  border-right: 1px solid var(--preview-border);
+  background: var(--preview-panel);
+}
+
+.theme-preview-sidebar i {
+  display: block;
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--preview-border) 70%, var(--preview-panel));
+}
+
+.theme-preview-sidebar i.active {
+  background: var(--preview-accent);
+}
+
+.theme-preview-chat {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 6px;
+}
+
+.theme-preview-chat i {
+  display: block;
+  width: 66%;
+  height: 9px;
+  border-radius: 6px;
+  background: var(--preview-in);
+}
+
+.theme-preview-chat i.outgoing {
+  width: 72%;
+  align-self: flex-end;
+  background: var(--preview-out);
+}
+
+.theme-preview-chat i.short {
+  width: 46%;
+}
+
+.theme-material-preview.skeuomorphic {
+  border-color: color-mix(in srgb, var(--preview-border) 75%, #000);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.34),
+    0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.theme-material-preview.skeuomorphic .theme-preview-bar {
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.07) 0 1px, transparent 1px 3px),
+    linear-gradient(#78828f, var(--preview-panel) 48%, color-mix(in srgb, var(--preview-panel) 72%, #000));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.45);
+}
+
+.theme-material-preview.skeuomorphic .theme-preview-chat i {
+  border: 1px solid color-mix(in srgb, var(--preview-in) 68%, #000);
+  background: linear-gradient(
+    color-mix(in srgb, var(--preview-in) 72%, #fff),
+    var(--preview-in) 54%,
+    color-mix(in srgb, var(--preview-in) 88%, #000)
+  );
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.65), 0 1px 1px rgba(0, 0, 0, 0.28);
+}
+
+.theme-material-preview.skeuomorphic .theme-preview-chat i.outgoing {
+  border-color: color-mix(in srgb, var(--preview-out) 68%, #000);
+  background: linear-gradient(
+    color-mix(in srgb, var(--preview-out) 70%, #fff),
+    var(--preview-out) 54%,
+    color-mix(in srgb, var(--preview-out) 84%, #000)
+  );
+}
+
+.theme-card-name {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.theme-card-name > span {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-card-name small {
+  flex: none;
+  color: var(--fg-subtle);
+  font-size: 9px;
+  letter-spacing: 0.35px;
+  text-transform: uppercase;
+}
+
+html[data-theme-style="skeuomorphic"] {
+  font-family: "Lucida Grande", "Lucida Sans Unicode", Tahoma, Geneva, sans-serif;
+  --radius-sm: calc(5px * var(--scale));
+  --radius-md: calc(7px * var(--scale));
+  --radius-lg: calc(9px * var(--scale));
+}
+
+.theme-icon-skeuo {
+  display: none;
+  overflow: visible;
+  fill: currentColor;
+  filter: drop-shadow(0 1px rgba(0, 0, 0, 0.34));
+}
+
+.theme-icon-skeuo .icon-highlight {
+  fill: rgba(255, 255, 255, 0.38);
+}
+
+.theme-icon-skeuo .icon-cutout {
+  fill: var(--bg-panel);
+  filter: none;
+}
+
+html[data-theme-style="skeuomorphic"] .theme-icon-modern {
+  display: none;
+}
+
+html[data-theme-style="skeuomorphic"] .theme-icon-skeuo {
+  display: block;
+}
+
+html[data-theme-style="skeuomorphic"] .icon-button.active .theme-icon-skeuo .icon-cutout,
+html[data-theme-style="skeuomorphic"] .send-button .theme-icon-skeuo .icon-cutout,
+html[data-theme-style="skeuomorphic"] .settings-nav-item.active .theme-icon-skeuo .icon-cutout {
+  fill: var(--accent-fg);
+}
+
+html[data-theme-style="skeuomorphic"] body {
+  text-shadow: 0 1px color-mix(in srgb, var(--bg-app) 68%, transparent);
+}
+
+html[data-theme-style="skeuomorphic"] ::-webkit-scrollbar {
+  width: 13px;
+  height: 13px;
+}
+
+html[data-theme-style="skeuomorphic"] ::-webkit-scrollbar-track {
+  border-left: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 2px, rgba(255, 255, 255, 0.035) 2px 3px),
+    var(--bg-panel);
+}
+
+html[data-theme-style="skeuomorphic"] ::-webkit-scrollbar-thumb {
+  border: 1px solid color-mix(in srgb, var(--border-strong) 70%, #000);
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--bg-active) 70%, #fff),
+    var(--bg-active) 45%,
+    color-mix(in srgb, var(--bg-active) 82%, #000)
+  );
+  box-shadow: inset 1px 0 rgba(255, 255, 255, 0.32);
+}
+
+html[data-theme-style="skeuomorphic"] button:focus-visible,
+html[data-theme-style="skeuomorphic"] input:focus-visible,
+html[data-theme-style="skeuomorphic"] textarea:focus-visible,
+html[data-theme-style="skeuomorphic"] a:focus-visible,
+html[data-theme-style="skeuomorphic"] [tabindex]:focus-visible {
+  outline-width: 3px;
+  outline-color: color-mix(in srgb, var(--border-focus) 72%, transparent);
+}
+
+html[data-theme-style="skeuomorphic"] .titlebar,
+html[data-theme-style="skeuomorphic"] .sidebar-header,
+html[data-theme-style="skeuomorphic"] .conversation-header,
+html[data-theme-style="skeuomorphic"] .right-panel-header,
+html[data-theme-style="skeuomorphic"] .member-panel-header {
+  border-color: color-mix(in srgb, var(--border) 82%, #000);
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.045) 0 1px, rgba(0, 0, 0, 0.025) 1px 3px),
+    linear-gradient(
+      color-mix(in srgb, var(--bg-active) 60%, #fff),
+      var(--bg-panel) 46%,
+      color-mix(in srgb, var(--bg-panel) 78%, #000) 52%,
+      var(--bg-panel)
+    );
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.38),
+    inset 0 -1px rgba(0, 0, 0, 0.34);
+}
+
+html[data-theme-style="skeuomorphic"] .sidebar-title,
+html[data-theme-style="skeuomorphic"] .conversation-heading strong,
+html[data-theme-style="skeuomorphic"] .right-panel-header h2,
+html[data-theme-style="skeuomorphic"] .member-panel-header h2 {
+  font-weight: 700;
+  text-shadow: 0 1px rgba(255, 255, 255, 0.22), 0 -1px rgba(0, 0, 0, 0.48);
+}
+
+html[data-theme-style="skeuomorphic"] .nav-rail,
+html[data-theme-style="skeuomorphic"] .sidebar,
+html[data-theme-style="skeuomorphic"] .member-panel,
+html[data-theme-style="skeuomorphic"] .right-panel {
+  border-color: color-mix(in srgb, var(--border) 82%, #000);
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 4px),
+    linear-gradient(90deg, var(--bg-panel), color-mix(in srgb, var(--bg-panel) 91%, #fff), var(--bg-panel));
+}
+
+html[data-theme-style="skeuomorphic"] .icon-button,
+html[data-theme-style="skeuomorphic"] .window-button,
+html[data-theme-style="skeuomorphic"] .primary-button,
+html[data-theme-style="skeuomorphic"] .secondary-button,
+html[data-theme-style="skeuomorphic"] .danger-button,
+html[data-theme-style="skeuomorphic"] .filter-chip,
+html[data-theme-style="skeuomorphic"] .segmented-control button {
+  border: 1px solid color-mix(in srgb, var(--border-strong) 62%, #000);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    color-mix(in srgb, var(--bg-active) 62%, #fff),
+    var(--bg-active) 48%,
+    color-mix(in srgb, var(--bg-active) 82%, #000) 52%,
+    var(--bg-hover)
+  );
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.48),
+    0 1px 1px rgba(0, 0, 0, 0.34);
+  color: var(--fg);
+  text-shadow: 0 1px rgba(255, 255, 255, 0.18), 0 -1px rgba(0, 0, 0, 0.45);
+}
+
+html[data-theme-style="skeuomorphic"] .icon-button:hover:not(:disabled),
+html[data-theme-style="skeuomorphic"] .window-button:hover,
+html[data-theme-style="skeuomorphic"] .secondary-button:hover,
+html[data-theme-style="skeuomorphic"] .filter-chip:hover,
+html[data-theme-style="skeuomorphic"] .segmented-control button:hover {
+  background: linear-gradient(
+    color-mix(in srgb, var(--bg-active) 70%, #fff),
+    color-mix(in srgb, var(--bg-active) 92%, #fff) 48%,
+    var(--bg-active) 52%,
+    var(--bg-hover)
+  );
+}
+
+html[data-theme-style="skeuomorphic"] .icon-button:active:not(:disabled),
+html[data-theme-style="skeuomorphic"] .window-button:active,
+html[data-theme-style="skeuomorphic"] .primary-button:active,
+html[data-theme-style="skeuomorphic"] .secondary-button:active,
+html[data-theme-style="skeuomorphic"] .filter-chip:active,
+html[data-theme-style="skeuomorphic"] .segmented-control button:active {
+  background: linear-gradient(
+    color-mix(in srgb, var(--bg-active) 76%, #000),
+    var(--bg-active) 55%,
+    color-mix(in srgb, var(--bg-active) 62%, #fff)
+  );
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.36);
+}
+
+html[data-theme-style="skeuomorphic"] .icon-button.active,
+html[data-theme-style="skeuomorphic"] .filter-chip.active,
+html[data-theme-style="skeuomorphic"] .segmented-control button.active {
+  border-color: color-mix(in srgb, var(--accent) 70%, #000);
+  background: linear-gradient(
+    color-mix(in srgb, var(--accent) 70%, #fff),
+    var(--accent) 48%,
+    color-mix(in srgb, var(--accent) 76%, #000) 52%,
+    color-mix(in srgb, var(--accent) 88%, #000)
+  );
+  color: var(--accent-fg);
+}
+
+html[data-theme-style="skeuomorphic"] .primary-button,
+html[data-theme-style="skeuomorphic"] .send-button,
+html[data-theme-style="skeuomorphic"] .toggle-switch.on {
+  border-color: color-mix(in srgb, var(--accent) 72%, #000);
+  background: linear-gradient(
+    color-mix(in srgb, var(--accent) 65%, #fff),
+    var(--accent) 48%,
+    color-mix(in srgb, var(--accent) 76%, #000) 52%,
+    color-mix(in srgb, var(--accent) 84%, #000)
+  );
+  color: var(--accent-fg);
+}
+
+html[data-theme-style="skeuomorphic"] .search-field,
+html[data-theme-style="skeuomorphic"] .conversation-search,
+html[data-theme-style="skeuomorphic"] .composer-input-wrap,
+html[data-theme-style="skeuomorphic"] .forward-search,
+html[data-theme-style="skeuomorphic"] .setting-select,
+html[data-theme-style="skeuomorphic"] .path-value,
+html[data-theme-style="skeuomorphic"] .theme-editor input[type="text"],
+html[data-theme-style="skeuomorphic"] .settings-section textarea {
+  border: 1px solid color-mix(in srgb, var(--border) 78%, #000);
+  background:
+    linear-gradient(rgba(0, 0, 0, 0.13), transparent 5px),
+    var(--bg-input);
+  box-shadow:
+    inset 0 1px 4px rgba(0, 0, 0, 0.50),
+    0 1px rgba(255, 255, 255, 0.16);
+}
+
+html[data-theme-style="skeuomorphic"] .search-field:focus-within,
+html[data-theme-style="skeuomorphic"] .conversation-search:focus-within,
+html[data-theme-style="skeuomorphic"] .composer-input-wrap:focus-within,
+html[data-theme-style="skeuomorphic"] .forward-search:focus-within {
+  border-color: var(--border-focus);
+  box-shadow:
+    inset 0 1px 4px rgba(0, 0, 0, 0.48),
+    0 0 0 2px color-mix(in srgb, var(--border-focus) 30%, transparent);
+}
+
+html[data-theme-style="skeuomorphic"] .conversation-shell::before {
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0 2px, rgba(255, 255, 255, 0.025) 2px 3px),
+    repeating-linear-gradient(90deg, transparent 0 3px, rgba(0, 0, 0, 0.035) 3px 4px);
+  background-size: auto;
+  opacity: 1;
+}
+
+html[data-theme-style="skeuomorphic"] .chat-row-body {
+  border-bottom-color: color-mix(in srgb, var(--border) 72%, transparent);
+  box-shadow: 0 1px rgba(255, 255, 255, 0.06);
+}
+
+html[data-theme-style="skeuomorphic"] .chat-row:hover {
+  background: linear-gradient(
+    color-mix(in srgb, var(--bg-hover) 84%, #fff),
+    color-mix(in srgb, var(--bg-hover) 88%, #000)
+  );
+}
+
+html[data-theme-style="skeuomorphic"] .chat-row.selected,
+html[data-theme-style="skeuomorphic"] .search-result-row.selected,
+html[data-theme-style="skeuomorphic"] .spotlight-row.active,
+html[data-theme-style="skeuomorphic"] .switcher-row.active {
+  background: linear-gradient(
+    color-mix(in srgb, var(--accent) 72%, #fff),
+    var(--accent) 49%,
+    color-mix(in srgb, var(--accent) 78%, #000) 51%,
+    color-mix(in srgb, var(--accent) 86%, #000)
+  );
+  color: var(--accent-fg);
+  text-shadow: 0 1px rgba(255, 255, 255, 0.22);
+}
+
+html[data-theme-style="skeuomorphic"] .chat-row.selected .chat-preview,
+html[data-theme-style="skeuomorphic"] .chat-row.selected .chat-time,
+html[data-theme-style="skeuomorphic"] .spotlight-row.active .spotlight-row-copy > span,
+html[data-theme-style="skeuomorphic"] .spotlight-row.active time {
+  color: color-mix(in srgb, var(--accent-fg) 75%, transparent);
+}
+
+html[data-theme-style="skeuomorphic"] .avatar {
+  border: 1px solid color-mix(in srgb, var(--border-strong) 70%, #000);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.42),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+html[data-theme-style="skeuomorphic"] .message-bubble {
+  border: 1px solid color-mix(in srgb, var(--bubble-in-bg) 68%, #000);
+  border-radius: calc(13px * var(--scale));
+  background: linear-gradient(
+    color-mix(in srgb, var(--bubble-in-bg) 73%, #fff),
+    var(--bubble-in-bg) 50%,
+    color-mix(in srgb, var(--bubble-in-bg) 91%, #000)
+  );
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.42),
+    0 1px 2px rgba(0, 0, 0, 0.36);
+}
+
+html[data-theme-style="skeuomorphic"] .message-row.from-me .message-bubble {
+  border-color: color-mix(in srgb, var(--bubble-out-bg) 68%, #000);
+  background: linear-gradient(
+    color-mix(in srgb, var(--bubble-out-bg) 67%, #fff),
+    var(--bubble-out-bg) 50%,
+    color-mix(in srgb, var(--bubble-out-bg) 84%, #000)
+  );
+}
+
+html[data-theme-style="skeuomorphic"] .message-bubble::after {
+  position: absolute;
+  bottom: calc(2px * var(--scale));
+  left: calc(-7px * var(--scale));
+  width: calc(11px * var(--scale));
+  height: calc(13px * var(--scale));
+  border-bottom: 1px solid color-mix(in srgb, var(--bubble-in-bg) 68%, #000);
+  background: color-mix(in srgb, var(--bubble-in-bg) 90%, #000);
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  content: "";
+}
+
+html[data-theme-style="skeuomorphic"] .message-row.from-me .message-bubble::after {
+  right: calc(-7px * var(--scale));
+  left: auto;
+  border-right: 1px solid color-mix(in srgb, var(--bubble-out-bg) 68%, #000);
+  background: color-mix(in srgb, var(--bubble-out-bg) 84%, #000);
+  clip-path: polygon(0 0, 100% 100%, 0 100%);
+}
+
+html[data-theme-style="skeuomorphic"] .message-actions,
+html[data-theme-style="skeuomorphic"] .popover,
+html[data-theme-style="skeuomorphic"] .dialog-card,
+html[data-theme-style="skeuomorphic"] .dialog,
+html[data-theme-style="skeuomorphic"] .chat-switcher,
+html[data-theme-style="skeuomorphic"] .toast,
+html[data-theme-style="skeuomorphic"] .spotlight {
+  border-color: color-mix(in srgb, var(--border-strong) 64%, #000);
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.026) 0 1px, transparent 1px 3px),
+    var(--bg-elevated);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.34),
+    var(--shadow-lg);
+}
+
+html[data-theme-style="skeuomorphic"] .spotlight {
+  border-radius: calc(10px * var(--scale));
+}
+
+html[data-theme-style="skeuomorphic"] .spotlight-input,
+html[data-theme-style="skeuomorphic"] .spotlight-footer {
+  border-color: color-mix(in srgb, var(--border) 78%, #000);
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.045) 0 1px, transparent 1px 3px),
+    linear-gradient(
+      color-mix(in srgb, var(--bg-active) 55%, #fff),
+      var(--bg-panel) 50%,
+      color-mix(in srgb, var(--bg-panel) 82%, #000)
+    );
+}
+
+html[data-theme-style="skeuomorphic"] .spotlight-input input {
+  margin: calc(9px * var(--scale)) 0;
+  padding: calc(8px * var(--scale)) calc(11px * var(--scale));
+  border: 1px solid color-mix(in srgb, var(--border) 78%, #000);
+  border-radius: calc(14px * var(--scale));
+  background: var(--bg-input);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.58), 0 1px rgba(255, 255, 255, 0.16);
+}
+
+html[data-theme-style="skeuomorphic"] .spotlight-row {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+html[data-theme-style="skeuomorphic"] .spotlight-row.active {
+  border-color: color-mix(in srgb, var(--accent) 65%, #000);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.38), 0 1px 1px rgba(0, 0, 0, 0.30);
+}
+
+html[data-theme-style="skeuomorphic"] .composer-wrap {
+  border-color: color-mix(in srgb, var(--border) 80%, #000);
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 3px),
+    linear-gradient(var(--bg-active), var(--bg-panel) 18%, color-mix(in srgb, var(--bg-panel) 86%, #000));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.30);
+}
+
+html[data-theme-style="skeuomorphic"] .tab {
+  border-radius: calc(6px * var(--scale)) calc(6px * var(--scale)) 0 0;
+}
+
+html[data-theme-style="skeuomorphic"] .tab.active {
+  border-color: color-mix(in srgb, var(--border) 72%, #000);
+  background: linear-gradient(
+    color-mix(in srgb, var(--bg-elevated) 82%, #fff),
+    var(--bg-elevated) 54%,
+    color-mix(in srgb, var(--bg-elevated) 94%, #000)
+  );
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.36);
+}
+
+html[data-theme-style="skeuomorphic"] .settings-nav-item {
+  border: 1px solid transparent;
+}
+
+html[data-theme-style="skeuomorphic"] .settings-nav-item.active {
+  border-color: color-mix(in srgb, var(--accent) 66%, #000);
+  background: linear-gradient(
+    color-mix(in srgb, var(--accent) 72%, #fff),
+    var(--accent) 50%,
+    color-mix(in srgb, var(--accent) 80%, #000)
+  );
+  color: var(--accent-fg);
+  text-shadow: 0 1px rgba(255, 255, 255, 0.20);
+}
+
+html[data-theme-style="skeuomorphic"] .theme-card {
+  border-color: color-mix(in srgb, var(--border-strong) 64%, #000);
+  background: linear-gradient(
+    color-mix(in srgb, var(--bg-elevated) 86%, #fff),
+    var(--bg-elevated)
+  );
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.30), 0 1px 2px rgba(0, 0, 0, 0.28);
+}
+
+html[data-theme-style="skeuomorphic"] .toggle-switch {
+  border-color: color-mix(in srgb, var(--border) 75%, #000);
+  background: var(--bg-input);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.52);
+}
+
+html[data-theme-style="skeuomorphic"] .toggle-knob {
+  border: 1px solid color-mix(in srgb, var(--border-strong) 68%, #000);
+  background: linear-gradient(#fff, #c9c9c9);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.50);
+}
+
+/* Dark 2011 desktop: graphite linen, brushed steel, inset black wells, lime. */
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] body {
+  background:
+    repeating-linear-gradient(0deg, transparent 0 2px, rgba(255, 255, 255, 0.018) 2px 3px),
+    linear-gradient(90deg, #222, var(--bg-app), #222);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .titlebar,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .sidebar-header,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .conversation-header,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .right-panel-header,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .member-panel-header {
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.045) 0 1px, rgba(0, 0, 0, 0.035) 1px 3px),
+    linear-gradient(#686868, #4c4c4c 48%, #343434 52%, #414141);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .sidebar,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .nav-rail,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .right-panel,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .member-panel {
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 3px),
+    linear-gradient(90deg, #303030, var(--bg-panel) 35%, #343434);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .conversation-shell {
+  background: linear-gradient(135deg, #242424, #303030 48%, #252525);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .search-field,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .composer-input-wrap,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .conversation-search,
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .spotlight-input input {
+  color: #f3f3f3;
+  text-shadow: 0 1px #000;
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="dark"] .message-row.from-me .message-meta .read {
+  color: #172000;
+}
+
+/* iOS 4–6 Messages: blue glass navigation, pearl canvas, gel blue bubbles. */
+html[data-theme-style="skeuomorphic"][data-appearance="light"] body {
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.22) 0 1px, rgba(86, 104, 128, 0.08) 1px 3px),
+    var(--bg-app);
+  text-shadow: 0 1px rgba(255, 255, 255, 0.72);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .titlebar,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .sidebar-header,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .conversation-header,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .right-panel-header,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .member-panel-header {
+  border-color: #4c6077;
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.09) 0 1px, transparent 1px 3px),
+    linear-gradient(#aebed1, #7790ad 48%, #526d8b 52%, #6e88a5);
+  color: #fff;
+  text-shadow: 0 -1px #32465e;
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .titlebar-brand,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .conversation-heading span,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .right-panel-header .icon-button {
+  color: rgba(255, 255, 255, 0.86);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .conversation-shell {
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.30) 0 1px, rgba(80, 98, 123, 0.055) 1px 3px),
+    #cfd6e3;
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .conversation-shell::before {
+  background-image:
+    repeating-linear-gradient(90deg, transparent 0 3px, rgba(82, 102, 128, 0.04) 3px 4px),
+    repeating-linear-gradient(0deg, transparent 0 2px, rgba(255, 255, 255, 0.18) 2px 3px);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .message-bubble {
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.92),
+    0 1px 2px rgba(42, 53, 68, 0.42);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .message-row.from-me .message-bubble {
+  background: linear-gradient(#b8d7f5, #81b6e8 48%, #619bda 52%, #7cafe1);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .message-row.from-me .message-bubble::after {
+  background: #6da4dd;
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .composer-wrap {
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px 3px),
+    linear-gradient(#8d949d, #686f78 16%, #848b94);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .composer-input-wrap {
+  border-color: #525963;
+  background: #fff;
+  box-shadow: inset 0 2px 5px rgba(45, 52, 61, 0.48), 0 1px rgba(255, 255, 255, 0.54);
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .send-button {
+  border-color: #214e83;
+  background: linear-gradient(#a9d1f7, #4f91d4 48%, #2d6caf 52%, #4a85c4);
+  color: #fff;
+  text-shadow: 0 -1px #254d78;
+}
+
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .chat-row.selected,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .search-result-row.selected,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .spotlight-row.active,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .switcher-row.active,
+html[data-theme-style="skeuomorphic"][data-appearance="light"] .settings-nav-item.active {
+  border-color: #315d91;
+  background: linear-gradient(#91b9e2, #568ac2 49%, #3d73ad 51%, #5b8fc7);
+  color: #fff;
+  text-shadow: 0 -1px #315578;
+}
+
+@media (max-width: 760px) {
+  html[data-theme-style="skeuomorphic"] .sidebar {
+    border: 1px solid color-mix(in srgb, var(--border-strong) 60%, #000);
+  }
+
+  html[data-theme-style="skeuomorphic"] .message-bubble {
+    max-width: min(560px, 86%);
   }
 }

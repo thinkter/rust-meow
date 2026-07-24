@@ -36,6 +36,7 @@ import { exportTheme, THEME_TOKENS, type Theme, type ThemeToken } from "../lib/t
 import { Avatar } from "./Avatar";
 import { ParticipantList } from "./ParticipantList";
 import { EmptyState, IconButton, Spinner } from "./Primitives";
+import { ThemeIcon, type ThemeIconName } from "./ThemeIcon";
 
 export function ChatInfoPanel(props: { model: AppModel }) {
   const { state, actions, preferences } = props.model;
@@ -174,13 +175,18 @@ function SettingRow(props: { title: string; description: string; children: JSX.E
 
 type SettingsSection = "appearance" | "chats" | "notifications" | "storage" | "desktop" | "about";
 
-const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: (props: { size?: number }) => JSX.Element }> = [
-  { id: "appearance", label: "Appearance", icon: Palette },
-  { id: "chats", label: "Chats", icon: MessagesSquare },
-  { id: "notifications", label: "Notifications", icon: BellRing },
-  { id: "storage", label: "Storage", icon: HardDrive },
-  { id: "desktop", label: "Desktop apps", icon: Globe },
-  { id: "about", label: "About & privacy", icon: ShieldCheck },
+const SETTINGS_SECTIONS: ReadonlyArray<{
+  id: SettingsSection;
+  label: string;
+  icon: (props: { size?: number; class?: string }) => JSX.Element;
+  iconName: ThemeIconName;
+}> = [
+  { id: "appearance", label: "Appearance", icon: Palette, iconName: "palette" },
+  { id: "chats", label: "Chats", icon: MessagesSquare, iconName: "messages" },
+  { id: "notifications", label: "Notifications", icon: BellRing, iconName: "bell" },
+  { id: "storage", label: "Storage", icon: HardDrive, iconName: "storage" },
+  { id: "desktop", label: "Desktop apps", icon: Globe, iconName: "globe" },
+  { id: "about", label: "About & privacy", icon: ShieldCheck, iconName: "shield" },
 ];
 
 /** Human-readable labels for every themeable token, in `THEME_TOKENS` order. */
@@ -315,6 +321,10 @@ export function SettingsPanel(props: { model: AppModel }) {
     prefActions.saveCustomTheme({ ...theme, name });
   }
 
+  function updateVisualStyle(theme: Theme, visualStyle: Theme["visualStyle"]) {
+    prefActions.saveCustomTheme({ ...theme, visualStyle });
+  }
+
   function importPastedTheme() {
     const imported = prefActions.importTheme(importText());
     if (!imported) {
@@ -341,7 +351,9 @@ export function SettingsPanel(props: { model: AppModel }) {
   return (
     <aside class="right-panel settings-panel" aria-label="Settings">
       <header class="right-panel-header">
-        <IconButton label="Close settings" onClick={() => actions.toggleSettings(false)}><X size={20} /></IconButton>
+        <IconButton label="Close settings" onClick={() => actions.toggleSettings(false)}>
+          <ThemeIcon icon={X} name="close" size={20} />
+        </IconButton>
         <h2>Settings</h2>
       </header>
       <div class="right-panel-scroll">
@@ -354,7 +366,7 @@ export function SettingsPanel(props: { model: AppModel }) {
                 aria-current={activeSection() === section.id ? "page" : undefined}
                 onClick={() => selectSection(section.id)}
               >
-                <section.icon size={17} />
+                <ThemeIcon icon={section.icon} name={section.iconName} size={17} />
                 <span>{section.label}</span>
               </button>
             )}
@@ -369,21 +381,50 @@ export function SettingsPanel(props: { model: AppModel }) {
                 <For each={prefActions.availableThemes()}>
                   {(theme) => (
                     <div class={`theme-card ${theme.id === preferences.themeId ? "active" : ""}`}>
-                      <button type="button" onClick={() => prefActions.selectTheme(theme.id)}>
-                        <span class="theme-swatch" style={{ background: theme.tokens["bg-app"] }} />
-                        <span class="theme-swatch" style={{ background: theme.tokens["bubble-out-bg"] }} />
-                        <span class="theme-swatch" style={{ background: theme.tokens["bubble-in-bg"] }} />
-                        <span class="theme-swatch" style={{ background: theme.tokens.accent }} />
-                        <span>{theme.name}</span>
+                      <button class="theme-card-select" type="button" onClick={() => prefActions.selectTheme(theme.id)}>
+                        <span
+                          class={`theme-material-preview ${theme.visualStyle}`}
+                          style={{
+                            "--preview-bg": theme.tokens["bg-app"],
+                            "--preview-panel": theme.tokens["bg-panel"],
+                            "--preview-border": theme.tokens.border,
+                            "--preview-in": theme.tokens["bubble-in-bg"],
+                            "--preview-out": theme.tokens["bubble-out-bg"],
+                            "--preview-accent": theme.tokens.accent,
+                          }}
+                          aria-hidden="true"
+                        >
+                          <span class="theme-preview-bar" />
+                          <span class="theme-preview-sidebar">
+                            <i /><i class="active" /><i />
+                          </span>
+                          <span class="theme-preview-chat">
+                            <i class="incoming" /><i class="outgoing" /><i class="incoming short" />
+                          </span>
+                        </span>
+                        <span class="theme-card-name">
+                          <span>{theme.name}</span>
+                          <small>{theme.visualStyle === "skeuomorphic" ? "Skeuomorphic" : theme.appearance}</small>
+                        </span>
                       </button>
                       <div style={{ display: "flex", gap: "2px" }}>
-                        <IconButton label={`Duplicate ${theme.name}`} onClick={() => duplicate(theme, false)}><Copy size={15} /></IconButton>
+                        <IconButton label={`Duplicate ${theme.name}`} onClick={() => duplicate(theme, false)}>
+                          <ThemeIcon icon={Copy} name="copy" size={15} />
+                        </IconButton>
                         <Show when={!theme.builtin}>
-                          <IconButton label={`Edit ${theme.name}`} onClick={() => setEditingThemeId(theme.id)}><Pencil size={15} /></IconButton>
-                          <IconButton label={`Delete ${theme.name}`} onClick={() => deleteTheme(theme)}><Trash2 size={15} /></IconButton>
+                          <IconButton label={`Edit ${theme.name}`} onClick={() => setEditingThemeId(theme.id)}>
+                            <ThemeIcon icon={Pencil} name="edit" size={15} />
+                          </IconButton>
+                          <IconButton label={`Delete ${theme.name}`} onClick={() => deleteTheme(theme)}>
+                            <ThemeIcon icon={Trash2} name="trash" size={15} />
+                          </IconButton>
                         </Show>
-                        <IconButton label={`Copy ${theme.name} as JSON`} onClick={() => void copyThemeJson(theme)}><ClipboardCopy size={15} /></IconButton>
-                        <IconButton label={`Download ${theme.name}`} onClick={() => downloadThemeJson(theme)}><Download size={15} /></IconButton>
+                        <IconButton label={`Copy ${theme.name} as JSON`} onClick={() => void copyThemeJson(theme)}>
+                          <ThemeIcon icon={ClipboardCopy} name="copy" size={15} />
+                        </IconButton>
+                        <IconButton label={`Download ${theme.name}`} onClick={() => downloadThemeJson(theme)}>
+                          <ThemeIcon icon={Download} name="download" size={15} />
+                        </IconButton>
                       </div>
                     </div>
                   )}
@@ -413,6 +454,28 @@ export function SettingsPanel(props: { model: AppModel }) {
                         value={theme().name}
                         onChange={(event) => renameEditingTheme(theme(), event.currentTarget.value)}
                       />
+                    </div>
+                    <div class="setting-row">
+                      <span class="setting-copy">
+                        <strong>Component style</strong>
+                        <span>Modern stays flat; skeuomorphic adds bundled tactile materials.</span>
+                      </span>
+                      <div class="segmented-control">
+                        <button
+                          type="button"
+                          class={theme().visualStyle === "modern" ? "active" : ""}
+                          onClick={() => updateVisualStyle(theme(), "modern")}
+                        >
+                          Modern
+                        </button>
+                        <button
+                          type="button"
+                          class={theme().visualStyle === "skeuomorphic" ? "active" : ""}
+                          onClick={() => updateVisualStyle(theme(), "skeuomorphic")}
+                        >
+                          Skeuomorphic
+                        </button>
+                      </div>
                     </div>
                     <For each={THEME_TOKENS}>
                       {(token) => (

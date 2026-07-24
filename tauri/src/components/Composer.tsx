@@ -19,6 +19,7 @@ import { messageText } from "../lib/format";
 import { IconButton } from "./Primitives";
 import { EMOJI_ENTRIES, EmojiPicker } from "./EmojiPicker";
 import { StickerTray } from "./StickerTray";
+import { ThemeIcon } from "./ThemeIcon";
 
 type PopoverKind = "emoji" | "sticker" | "attachment" | "poll" | null;
 
@@ -160,7 +161,7 @@ export function Composer(props: { model: AppModel; chatId: string }) {
           disabled={!connected()}
           onClick={() => togglePopover("emoji")}
         >
-          <Smile size={22} />
+          <ThemeIcon icon={Smile} name="smile" size={22} />
         </IconButton>
         <IconButton
           label="Stickers"
@@ -168,7 +169,7 @@ export function Composer(props: { model: AppModel; chatId: string }) {
           disabled={!connected()}
           onClick={() => togglePopover("sticker")}
         >
-          <Sticker size={22} />
+          <ThemeIcon icon={Sticker} name="sticker" size={22} />
         </IconButton>
         <IconButton
           label="Attach"
@@ -176,10 +177,10 @@ export function Composer(props: { model: AppModel; chatId: string }) {
           disabled={!connected()}
           onClick={() => togglePopover("attachment")}
         >
-          <Paperclip size={22} />
+          <ThemeIcon icon={Paperclip} name="attach" size={22} />
         </IconButton>
         <IconButton label="Create poll" active={openPopover() === "poll"} disabled={!connected()} onClick={() => togglePopover("poll")}>
-          <ListChecks size={22} />
+          <ThemeIcon icon={ListChecks} name="poll" size={22} />
         </IconButton>
 
         <div class="composer-input-wrap">
@@ -291,7 +292,7 @@ export function Composer(props: { model: AppModel; chatId: string }) {
           class="send-button"
           disabled={!connected() || state.sending || !draft().text.trim()}
         >
-          <Send size={20} />
+          <ThemeIcon icon={Send} name="send" size={20} />
         </IconButton>
 
         <Show when={openPopover() === null && mentionRange() && mentionMatches().length > 0}>

@@ -19,6 +19,7 @@ import { ChatKind } from "../lib/types";
 import { chatSubtitle, formatChatTime } from "../lib/format";
 import { Avatar } from "./Avatar";
 import { EmptyState, IconButton, Spinner } from "./Primitives";
+import { ThemeIcon } from "./ThemeIcon";
 
 interface SidebarProps {
   model: AppModel;
@@ -59,13 +60,13 @@ export function Sidebar(props: SidebarProps) {
       <header class="sidebar-header">
         <h1 class="sidebar-title">Chats</h1>
         <IconButton label="New chat" onClick={() => focusSearch()}>
-          <MessageSquarePlus size={20} />
+          <ThemeIcon icon={MessageSquarePlus} name="new-chat" size={20} />
         </IconButton>
       </header>
 
       <div class="sidebar-search-wrap">
         <label class="search-field">
-          <Search size={17} />
+          <ThemeIcon icon={Search} name="search" size={17} />
           <input
             ref={props.searchInputRef}
             type="search"
@@ -88,7 +89,7 @@ export function Sidebar(props: SidebarProps) {
           />
           <Show when={state.searchQuery}>
             <IconButton label="Clear search" class="clear-search" onClick={actions.clearSearch}>
-              <X size={16} />
+              <ThemeIcon icon={X} name="close" size={16} />
             </IconButton>
           </Show>
         </label>
@@ -109,7 +110,9 @@ export function Sidebar(props: SidebarProps) {
           fallback={
             <Show when={!state.loadingChats} fallback={<EmptyState><Spinner label="Loading chats…" /></EmptyState>}>
               <EmptyState title={emptyLabel(state.chatFilter)}>
-                {state.chatFilter === "archived" ? <Archive size={22} /> : <CheckCheck size={22} />}
+                {state.chatFilter === "archived"
+                  ? <ThemeIcon icon={Archive} name="archive" size={22} />
+                  : <ThemeIcon icon={CheckCheck} name="check-double" size={22} />}
               </EmptyState>
             </Show>
           }
@@ -273,10 +276,10 @@ function SearchResults(props: { model: AppModel; ref?: (element: HTMLDivElement)
           <EmptyState><Spinner label="Searching…" /></EmptyState>
         </Match>
         <Match when={state.searchError}>
-          <EmptyState title={state.searchError}><X size={22} /></EmptyState>
+          <EmptyState title={state.searchError}><ThemeIcon icon={X} name="close" size={22} /></EmptyState>
         </Match>
         <Match when={state.searchResults && rows().length === 0}>
-          <EmptyState title="No contacts, groups, or messages found"><Search size={22} /></EmptyState>
+          <EmptyState title="No contacts, groups, or messages found"><ThemeIcon icon={Search} name="search" size={22} /></EmptyState>
         </Match>
       </Switch>
       <Show when={!state.searchLoading && rows().length > 0}>

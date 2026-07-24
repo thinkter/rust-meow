@@ -34,6 +34,7 @@ import {
 } from "../lib/types";
 import { Avatar } from "./Avatar";
 import { EmptyState, Spinner } from "./Primitives";
+import { ThemeIcon } from "./ThemeIcon";
 
 type SpotlightRow =
   | { type: "chat"; match: SpotlightChatMatch }
@@ -183,7 +184,7 @@ export function SpotlightSearch(props: {
           onPointerDown={(event) => event.stopPropagation()}
         >
           <label class="spotlight-input">
-            <Search size={22} />
+            <ThemeIcon icon={Search} name="search" size={22} />
             <input
               ref={input}
               type="search"
@@ -202,13 +203,13 @@ export function SpotlightSearch(props: {
           <div ref={resultsElement} class="spotlight-results" role="listbox" aria-label="Search results">
             <Switch>
               <Match when={error()}>
-                <EmptyState title={error()}><X size={22} /></EmptyState>
+                <EmptyState title={error()}><ThemeIcon icon={X} name="close" size={22} /></EmptyState>
               </Match>
               <Match when={!loading() && selectableRows().length === 0}>
                 <EmptyState
                   title={query().trim() ? "No people, groups, or messages found" : "No chats loaded yet"}
                 >
-                  <Search size={24} />
+                  <ThemeIcon icon={Search} name="search" size={24} />
                 </EmptyState>
               </Match>
             </Switch>
@@ -349,7 +350,7 @@ function SpotlightResult(props: {
         <time>{formatChatTime(timestamp())}</time>
       </Show>
       <Show when={props.row.type === "message"}>
-        <MessageSquareText class="spotlight-message-icon" size={15} />
+        <ThemeIcon icon={MessageSquareText} name="messages" class="spotlight-message-icon" size={15} />
       </Show>
     </button>
   );
