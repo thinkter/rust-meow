@@ -118,6 +118,26 @@ func TestMediaJobAdmissionIsBounded(t *testing.T) {
 	}
 }
 
+func TestSuccessWrapsPollAndPinResponses(t *testing.T) {
+	tests := []struct {
+		name   string
+		result any
+	}{
+		{"create poll", &bridgev1.RpcResponse_CreatePoll{CreatePoll: &bridgev1.CreatePollResponse{}}},
+		{"vote poll", &bridgev1.RpcResponse_VotePoll{VotePoll: &bridgev1.VotePollResponse{}}},
+		{"set message pin", &bridgev1.RpcResponse_SetMessagePin{SetMessagePin: &bridgev1.SetMessagePinResponse{}}},
+		{"list pinned messages", &bridgev1.RpcResponse_ListPinnedMessages{ListPinnedMessages: &bridgev1.ListPinnedMessagesResponse{}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := success(test.result)
+			if response.GetError() != nil {
+				t.Fatalf("valid response was rejected: %s", response.GetError().GetMessage())
+			}
+		})
+	}
+}
+
 func TestLogoutWaitsForActiveMediaJob(t *testing.T) {
 	ctx := context.Background()
 	s := &Server{ctx: ctx, mediaSlots: make(chan struct{}, 2)}

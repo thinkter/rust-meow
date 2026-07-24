@@ -828,6 +828,14 @@ func success(result any) *bridgev1.RpcResponse {
 		response.Result = value
 	case *bridgev1.RpcResponse_SendStickerFromLibrary:
 		response.Result = value
+	case *bridgev1.RpcResponse_CreatePoll:
+		response.Result = value
+	case *bridgev1.RpcResponse_VotePoll:
+		response.Result = value
+	case *bridgev1.RpcResponse_SetMessagePin:
+		response.Result = value
+	case *bridgev1.RpcResponse_ListPinnedMessages:
+		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageImage:
 		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageAttachment:
