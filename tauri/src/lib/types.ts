@@ -160,7 +160,8 @@ export interface UnsupportedContent {
   fallbackText: string;
 }
 
-export interface PollOption { name: string; voteCount: number; selectedByMe: boolean; }
+export interface PollVoter { userId: string; displayName: string; avatarPath: string; fromMe: boolean; }
+export interface PollOption { name: string; voteCount: number; selectedByMe: boolean; voters: PollVoter[]; }
 export interface PollContent { question: string; options: PollOption[]; selectableOptionsCount: number; totalVoters: number; }
 
 /** Serde's externally-tagged representation of the Prost oneof. */
@@ -200,6 +201,9 @@ export interface Message {
   senderAvatarPath: string;
   reactions: Reaction[];
   replyToMessageId: string;
+  replyToChatId: string;
+  forwardingScore: number;
+  mentionTexts: string[];
   content: MessageContent | null;
 }
 
@@ -268,6 +272,8 @@ export interface ListMessagesAroundResponse {
 export interface SendTextResponse {
   message: Message | null;
 }
+export type ForwardMessageResponse = SendTextResponse;
+export type EditMessageResponse = SendTextResponse;
 export type CreatePollResponse = SendTextResponse;
 export type VotePollResponse = SendTextResponse;
 export type SetMessagePinResponse = EmptyResponse;

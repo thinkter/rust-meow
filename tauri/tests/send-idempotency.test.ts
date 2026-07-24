@@ -11,6 +11,7 @@ const payloads: SendPayload[] = [
   ["sticker", "/tmp/sticker.webp", "reply-1"],
   ["attachment", "/tmp/notes.pdf", 1, "caption", "reply-1", false],
   ["poll", "Lunch?", ["Pizza", "Sushi"], 1],
+  ["forward", "source-chat", "message-1", "target-chat"],
 ];
 
 test("every send kind reuses its ID for a failed logical retry", async () => {
@@ -83,6 +84,14 @@ test("changing any logical payload selects a fresh ID after failure", async () =
         ["attachment", "/tmp/notes.pdf", 1, "edited caption", "reply-1", false],
         ["attachment", "/tmp/notes.pdf", 1, "caption", "reply-2", false],
         ["attachment", "/tmp/notes.pdf", 1, "caption", "reply-1", true],
+      ],
+    },
+    {
+      base: payloads[5],
+      variants: [
+        ["forward", "other-source", "message-1", "target-chat"],
+        ["forward", "source-chat", "message-2", "target-chat"],
+        ["forward", "source-chat", "message-1", "other-target"],
       ],
     },
   ];

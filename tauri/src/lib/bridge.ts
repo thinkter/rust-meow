@@ -2,9 +2,11 @@ import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 import {
   browserAssetUrl,
+  browserFileName,
   createBrowserMockBridge,
   openBrowserUrl,
   pickBrowserFile,
+  stageBrowserFile,
 } from "./browser-mock";
 import { SendIdempotency } from "./send-idempotency";
 
@@ -40,6 +42,8 @@ import type {
   VotePollResponse,
   SetMessagePinResponse,
   ListPinnedMessagesResponse,
+  ForwardMessageResponse,
+  EditMessageResponse,
 } from "./types";
 
 export type BackendEventHandler = (
@@ -54,13 +58,23 @@ export type BackendSubscription =
   | Channel<FrontendEvent>
   | BrowserBackendSubscription;
 
-export interface FilePickerOptions {
-  multiple?: false;
+interface BaseFilePickerOptions {
   /** Directory selection backs the configurable save location in settings. */
   directory?: boolean;
   title?: string;
   filters?: Array<{ name: string; extensions: string[] }>;
 }
+
+export interface SingleFilePickerOptions extends BaseFilePickerOptions {
+  multiple?: false;
+}
+
+export interface MultiFilePickerOptions extends BaseFilePickerOptions {
+  multiple: true;
+  directory?: false;
+}
+
+export type FilePickerOptions = SingleFilePickerOptions | MultiFilePickerOptions;
 
 export interface DesktopApplication {
   id: string;
@@ -190,11 +204,63 @@ export function assetUrl(path: string | null | undefined): string | undefined {
 }
 
 /** Use Tauri's picker in the app and a normal file input during browser dev. */
-export async function openFile(options: FilePickerOptions): Promise<string | null> {
+export function openFile(options: MultiFilePickerOptions): Promise<string[] | null>;
+export function openFile(options: SingleFilePickerOptions): Promise<string | null>;
+export async function openFile(options: FilePickerOptions): Promise<string | string[] | null> {
   if (browserMockEnabled) return pickBrowserFile(options);
   const { open } = await import("@tauri-apps/plugin-dialog");
   const result = await open(options);
+  if (options.multiple) return Array.isArray(result) ? result : typeof result === "string" ? [result] : null;
   return typeof result === "string" ? result : null;
+}
+
+/** A safe display label for a selected local path without exposing its parent directories. */
+export function localFileName(path: string): string {
+  const mockName = browserFileName(path);
+  if (mockName) return mockName;
+  return path.split(/[\\/]/).filter(Boolean).at(-1) || "Selected file";
+}
+
+/** Read the OS clipboard image and persist it just long enough to send. */
+export async function stageClipboardImage(): Promise<string> {
+  if (!browserMockEnabled) return invokeCommand<string>("stage_clipboard_image");
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const imageType = item.types.find((type) => type.startsWith("image/"));
+      if (!imageType) continue;
+      const blob = await item.getType(imageType);
+      return stageBrowserFile(new File([blob], "clipboard-image", { type: imageType }));
+    }
+  } catch (error) {
+    throw new BridgeError({
+      code: "clipboard_unavailable",
+      message: error instanceof Error ? error.message : "Could not read the clipboard",
+      retryable: false,
+    }, error);
+  }
+  throw new BridgeError({
+    code: "clipboard_no_image",
+    message: "The clipboard does not contain an image",
+    retryable: false,
+  });
+}
+
+/** Read plain text when Ctrl/Cmd+V does not find an image. */
+export async function readClipboardText(): Promise<string> {
+  if (browserMockEnabled) return navigator.clipboard.readText();
+  const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
+  return readText();
+}
+
+/** Remove a file created by stageClipboardImage after the backend has consumed it. */
+export async function discardStagedImage(path: string): Promise<void> {
+  if (browserMockEnabled) {
+    // Browser mock messages render directly from this blob URL, so it must
+    // remain alive for the duration of the dev session.
+    return;
+  }
+  await invokeCommand<void>("discard_staged_image", { path });
 }
 
 /** Discover installed Linux browsers and file managers for Settings. */
@@ -257,17 +323,30 @@ export interface BridgeApi {
     text: string,
     replyToMessageId?: string,
     mentionedJids?: string[],
+    replyToChatId?: string,
   ): Promise<SendTextResponse>;
+  forwardMessage(
+    sourceChatId: string,
+    messageId: string,
+    targetChatId: string,
+  ): Promise<ForwardMessageResponse>;
+  editMessage(
+    chatId: string,
+    messageId: string,
+    text: string,
+  ): Promise<EditMessageResponse>;
   sendImage(
     chatId: string,
     imagePath: string,
     caption?: string,
     replyToMessageId?: string,
+    replyToChatId?: string,
   ): Promise<SendImageResponse>;
   sendSticker(
     chatId: string,
     imagePath: string,
     replyToMessageId?: string,
+    replyToChatId?: string,
   ): Promise<SendStickerResponse>;
   sendAttachment(
     chatId: string,
@@ -276,6 +355,7 @@ export interface BridgeApi {
     caption?: string,
     replyToMessageId?: string,
     voiceNote?: boolean,
+    replyToChatId?: string,
   ): Promise<SendAttachmentResponse>;
   getMessageImage(
     chatId: string,
@@ -363,10 +443,10 @@ const nativeBridge: BridgeApi = {
       chatId,
       messageId,
     }),
-  sendText: (chatId, text, replyToMessageId = "", mentionedJids = []) =>
+  sendText: (chatId, text, replyToMessageId = "", mentionedJids = [], replyToChatId = "") =>
     sendIdempotency.run(
       chatId,
-      ["text", text, replyToMessageId, [...mentionedJids]],
+      ["text", text, replyToMessageId, replyToChatId, [...mentionedJids]],
       (clientMessageId) =>
         invokeCommand<SendTextResponse>("send_text", {
           clientMessageId,
@@ -374,12 +454,27 @@ const nativeBridge: BridgeApi = {
           text,
           replyToMessageId,
           mentionedJids,
+          replyToChatId,
         }),
     ),
-  sendImage: (chatId, imagePath, caption = "", replyToMessageId = "") =>
+  forwardMessage: (sourceChatId, messageId, targetChatId) =>
+    sendIdempotency.run(
+      targetChatId,
+      ["forward", sourceChatId, messageId, targetChatId],
+      (clientMessageId) =>
+        invokeCommand<ForwardMessageResponse>("forward_message", {
+          clientMessageId,
+          sourceChatId,
+          messageId,
+          targetChatId,
+        }),
+    ),
+  editMessage: (chatId, messageId, text) =>
+    invokeCommand<EditMessageResponse>("edit_message", { chatId, messageId, text }),
+  sendImage: (chatId, imagePath, caption = "", replyToMessageId = "", replyToChatId = "") =>
     sendIdempotency.run(
       chatId,
-      ["image", imagePath, caption, replyToMessageId],
+      ["image", imagePath, caption, replyToMessageId, replyToChatId],
       (clientMessageId) =>
         invokeCommand<SendImageResponse>("send_image", {
           clientMessageId,
@@ -387,18 +482,20 @@ const nativeBridge: BridgeApi = {
           imagePath,
           caption,
           replyToMessageId,
+          replyToChatId,
         }),
     ),
-  sendSticker: (chatId, imagePath, replyToMessageId = "") =>
+  sendSticker: (chatId, imagePath, replyToMessageId = "", replyToChatId = "") =>
     sendIdempotency.run(
       chatId,
-      ["sticker", imagePath, replyToMessageId],
+      ["sticker", imagePath, replyToMessageId, replyToChatId],
       (clientMessageId) =>
         invokeCommand<SendStickerResponse>("send_sticker", {
           clientMessageId,
           chatId,
           imagePath,
           replyToMessageId,
+          replyToChatId,
         }),
     ),
   sendAttachment: (
@@ -408,10 +505,11 @@ const nativeBridge: BridgeApi = {
     caption = "",
     replyToMessageId = "",
     voiceNote = false,
+    replyToChatId = "",
   ) =>
     sendIdempotency.run(
       chatId,
-      ["attachment", filePath, kind, caption, replyToMessageId, voiceNote],
+      ["attachment", filePath, kind, caption, replyToMessageId, replyToChatId, voiceNote],
       (clientMessageId) =>
         invokeCommand<SendAttachmentResponse>("send_attachment", {
           clientMessageId,
@@ -421,6 +519,7 @@ const nativeBridge: BridgeApi = {
           caption,
           replyToMessageId,
           voiceNote,
+          replyToChatId,
         }),
     ),
   getMessageImage: (chatId, messageId) =>

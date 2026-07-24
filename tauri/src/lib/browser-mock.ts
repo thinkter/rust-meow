@@ -8,10 +8,11 @@ import {
 } from "./types";
 import type {
   BackendEventHandler, BackendSubscription, BridgeApi, FilePickerOptions,
+  MultiFilePickerOptions, SingleFilePickerOptions,
 } from "./bridge";
 
 const OWN_USER_ID = "919900001111@s.whatsapp.net";
-const PROTOCOL_VERSION = 15;
+const PROTOCOL_VERSION = 16;
 const STARTED_AT = Date.now();
 const MINUTE = 60_000;
 const DAY = 86_400_000;
@@ -35,8 +36,26 @@ declare global {
 
 const browserFiles = new Map<string, BrowserFileMetadata>();
 
+/** Retain a clipboard/drop File behind a blob URL so browser-dev sends mirror native sends. */
+export function stageBrowserFile(file: File): string {
+  const path = URL.createObjectURL(file);
+  browserFiles.set(path, {
+    fileName: file.name,
+    mimeType: file.type || "application/octet-stream",
+    fileSize: file.size,
+  });
+  return path;
+}
+
+export function browserFileName(path: string): string {
+  return browserFiles.get(path)?.fileName ?? "";
+}
+
 /** Open a normal browser file input and retain enough metadata for mock sends. */
-export function pickBrowserFile(options: FilePickerOptions): Promise<string | null> {
+export function pickBrowserFile(options: MultiFilePickerOptions): Promise<string[] | null>;
+export function pickBrowserFile(options: SingleFilePickerOptions): Promise<string | null>;
+export function pickBrowserFile(options: FilePickerOptions): Promise<string | string[] | null>;
+export function pickBrowserFile(options: FilePickerOptions): Promise<string | string[] | null> {
   // A browser cannot hand back a real directory path, and the mock bridge never
   // writes to disk, so answer directory picks with a recognisable placeholder
   // instead of opening a file input the user cannot satisfy.
@@ -54,25 +73,21 @@ export function pickBrowserFile(options: FilePickerOptions): Promise<string | nu
     document.body.append(input);
 
     let settled = false;
-    const finish = (path: string | null) => {
+    input.multiple = options.multiple === true;
+    const finish = (path: string | string[] | null) => {
       if (settled) return;
       settled = true;
       input.remove();
       resolve(path);
     };
     input.addEventListener("change", () => {
-      const file = input.files?.[0];
-      if (!file) {
+      const files = [...(input.files ?? [])];
+      if (files.length === 0) {
         finish(null);
         return;
       }
-      const path = URL.createObjectURL(file);
-      browserFiles.set(path, {
-        fileName: file.name,
-        mimeType: file.type || "application/octet-stream",
-        fileSize: file.size,
-      });
-      finish(path);
+      const paths = files.map(stageBrowserFile);
+      finish(options.multiple ? paths : paths[0] ?? null);
     }, { once: true });
     input.addEventListener("cancel", () => finish(null), { once: true });
     input.click();
@@ -277,11 +292,17 @@ class BrowserMockBridge implements BridgeApi {
     const existing = this.sortedChats().find((chat) => contactJid(chat) === contact);
     if (existing) return { chat: copy(existing) };
     const phone = contact.split("@")[0] ?? contact;
+    const knownSender = [...this.messages.values()]
+      .flat()
+      .find((message) => message.senderId === contact && message.senderName);
+    const title =
+      knownSender?.senderName ||
+      (contact === "919811223344@s.whatsapp.net" ? "Dr. Meera Shah" : `+${phone}`);
     const chat = makeChat({
       id: `chat-${phone}`,
-      title: contact === "919811223344@s.whatsapp.net" ? "Dr. Meera Shah" : `+${phone}`,
+      title,
       phoneNumber: `+${phone}`,
-      contactName: contact === "919811223344@s.whatsapp.net" ? "Dr. Meera Shah" : "",
+      contactName: title.startsWith("+") ? "" : title,
       pushName: contact === "919811223344@s.whatsapp.net" ? "Meera" : "",
       lastMessageTimestampMs: 0,
       lastMessagePreview: "No messages yet",
@@ -313,19 +334,55 @@ class BrowserMockBridge implements BridgeApi {
     chatId: string,
     text: string,
     replyToMessageId = "",
-    _mentionedJids: string[] = [],
+    mentionedJids: string[] = [],
+    replyToChatId = "",
   ) {
     const trimmed = text.trim();
     if (!trimmed) throw commandFailure("invalid_argument", "A message cannot be empty");
-    return messageResponse(this.outgoing(chatId, { text: textContent(trimmed) }, replyToMessageId));
+    const mentionTexts: string[] = [];
+    let rendered = trimmed;
+    const participants = this.info.get(chatId)?.participants ?? [];
+    for (const jid of mentionedJids) {
+      const participant = participants.find((candidate) => candidate.participantId === jid);
+      const label = participant?.displayName || participant?.phoneNumber;
+      const user = jid.split("@")[0]?.split(":")[0];
+      if (!label || !user) continue;
+      rendered = rendered.replaceAll(`@${user}`, `@${label}`);
+      mentionTexts.push(label);
+    }
+    const message = this.outgoing(chatId, { text: textContent(rendered) }, replyToMessageId, replyToChatId);
+    message.mentionTexts = mentionTexts;
+    return messageResponse(message);
   }
 
-  async sendImage(chatId: string, imagePath: string, caption = "", replyToMessageId = "") {
-    return messageResponse(this.outgoingImage(chatId, imagePath, caption, replyToMessageId, false));
+  async forwardMessage(sourceChatId: string, messageId: string, targetChatId: string) {
+    const source = this.requireMessage(sourceChatId, messageId);
+    if (!source.content || source.revoked) {
+      throw commandFailure("invalid_argument", "This message cannot be forwarded");
+    }
+    const message = this.outgoing(targetChatId, copy(source.content), "");
+    message.forwardingScore = Math.max(1, source.forwardingScore + 1);
+    return messageResponse(message);
   }
 
-  async sendSticker(chatId: string, imagePath: string, replyToMessageId = "") {
-    return messageResponse(this.outgoingImage(chatId, imagePath, "", replyToMessageId, true));
+  async editMessage(chatId: string, messageId: string, text: string) {
+    const message = this.requireMessage(chatId, messageId);
+    if (!message.fromMe || !message.content || !("text" in message.content) || message.revoked) {
+      throw commandFailure("edit_not_allowed", "This message can no longer be edited");
+    }
+    message.content = { text: textContent(text.trim()) };
+    message.edited = true;
+    this.touchChat(chatId, message, false);
+    void this.emit({ type: "messageUpserted", payload: { message: copy(message) } });
+    return messageResponse(message);
+  }
+
+  async sendImage(chatId: string, imagePath: string, caption = "", replyToMessageId = "", replyToChatId = "") {
+    return messageResponse(this.outgoingImage(chatId, imagePath, caption, replyToMessageId, false, replyToChatId));
+  }
+
+  async sendSticker(chatId: string, imagePath: string, replyToMessageId = "", replyToChatId = "") {
+    return messageResponse(this.outgoingImage(chatId, imagePath, "", replyToMessageId, true, replyToChatId));
   }
 
   async sendAttachment(
@@ -335,6 +392,7 @@ class BrowserMockBridge implements BridgeApi {
     caption = "",
     replyToMessageId = "",
     voiceNote = false,
+    replyToChatId = "",
   ) {
     const metadata = browserFiles.get(filePath);
     const defaults = attachmentDefaults(kind);
@@ -352,7 +410,7 @@ class BrowserMockBridge implements BridgeApi {
       voiceNote,
       downloadable: false,
     };
-    return messageResponse(this.outgoing(chatId, { attachment }, replyToMessageId));
+    return messageResponse(this.outgoing(chatId, { attachment }, replyToMessageId, replyToChatId));
   }
 
   async getMessageImage(chatId: string, messageId: string) {
@@ -454,7 +512,7 @@ class BrowserMockBridge implements BridgeApi {
   }
 
   async createPoll(chatId: string, question: string, options: string[], selectableOptionsCount: number) {
-    const message = this.outgoing(chatId, { poll: { question, options: options.map((name) => ({ name, voteCount: 0, selectedByMe: false })), selectableOptionsCount, totalVoters: 0 } }, "");
+    const message = this.outgoing(chatId, { poll: { question, options: options.map((name) => ({ name, voteCount: 0, selectedByMe: false, voters: [] })), selectableOptionsCount, totalVoters: 0 } }, "");
     return messageResponse(message);
   }
 
@@ -464,7 +522,15 @@ class BrowserMockBridge implements BridgeApi {
     const poll = message.content.poll;
     const previous = new Set(poll.options.filter((option) => option.selectedByMe).map((option) => option.name));
     const next = new Set(selectedOptions);
-    for (const option of poll.options) { if (previous.has(option.name) && !next.has(option.name)) option.voteCount--; if (!previous.has(option.name) && next.has(option.name)) option.voteCount++; option.selectedByMe = next.has(option.name); }
+    for (const option of poll.options) {
+      if (previous.has(option.name) && !next.has(option.name)) option.voteCount--;
+      if (!previous.has(option.name) && next.has(option.name)) option.voteCount++;
+      option.selectedByMe = next.has(option.name);
+      option.voters = option.voters.filter((voter) => !voter.fromMe);
+      if (option.selectedByMe) {
+        option.voters.push({ userId: "me@s.whatsapp.net", displayName: "You", avatarPath: "", fromMe: true });
+      }
+    }
     if (previous.size === 0 && next.size > 0) poll.totalVoters++; else if (previous.size > 0 && next.size === 0) poll.totalVoters--;
     void this.emit({ type: "messageUpserted", payload: { message: copy(message) } });
     return messageResponse(message);
@@ -494,9 +560,9 @@ class BrowserMockBridge implements BridgeApi {
     return new Promise<never>(() => undefined);
   }
 
-  private outgoing(chatId: string, content: MessageContent, replyToMessageId: string): Message {
+  private outgoing(chatId: string, content: MessageContent, replyToMessageId: string, replyToChatId = ""): Message {
     this.assertCanSend(chatId);
-    if (replyToMessageId) this.requireMessage(chatId, replyToMessageId);
+    if (replyToMessageId) this.requireMessage(replyToChatId || chatId, replyToMessageId);
     const timestampMs = Date.now();
     const message = makeMessage({
       id: `mock-out-${timestampMs}-${++this.messageSequence}`,
@@ -507,6 +573,7 @@ class BrowserMockBridge implements BridgeApi {
       senderName: "You",
       content,
       replyToMessageId,
+      replyToChatId: replyToMessageId ? replyToChatId || chatId : "",
       status: MessageStatus.Pending,
     });
     this.messageList(chatId).push(message);
@@ -521,6 +588,7 @@ class BrowserMockBridge implements BridgeApi {
     caption: string,
     replyToMessageId: string,
     sticker: boolean,
+    replyToChatId = "",
   ): Message {
     const metadata = browserFiles.get(imagePath);
     const fallbackPath = sticker ? mockSticker("✨") : mockPhoto("New photo");
@@ -537,7 +605,7 @@ class BrowserMockBridge implements BridgeApi {
         animated: false,
         thumbnailPath: imagePath || fallbackPath,
       },
-    }, replyToMessageId);
+    }, replyToMessageId, replyToChatId);
   }
 
   private scheduleReceipts(message: Message): void {
@@ -862,7 +930,7 @@ function makeMessage(input: {
   senderId: string; senderName: string;
   content: MessageContent | null;
   status: MessageStatus;
-  senderPhoneNumber?: string; replyToMessageId?: string;
+  senderPhoneNumber?: string; replyToMessageId?: string; replyToChatId?: string;
 }): Message {
   return {
     id: input.id, chatId: input.chatId,
@@ -871,6 +939,9 @@ function makeMessage(input: {
     edited: false, revoked: false, expiresAtMs: 0,
     senderPhoneNumber: input.senderPhoneNumber ?? "", senderAvatarPath: "",
     reactions: [], replyToMessageId: input.replyToMessageId ?? "",
+    replyToChatId: input.replyToChatId ?? "",
+    forwardingScore: 0,
+    mentionTexts: [],
     content: input.content,
   };
 }
