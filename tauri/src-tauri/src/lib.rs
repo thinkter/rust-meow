@@ -215,60 +215,52 @@ struct CommandError {
 }
 
 impl CommandError {
-    fn transport(message: impl Into<String>) -> Self {
+    fn new(code: &str, message: impl Into<String>, retryable: bool) -> Self {
         Self {
-            code: "transport".into(),
+            code: code.into(),
             message: message.into(),
-            retryable: true,
+            retryable,
         }
+    }
+
+    fn transport(message: impl Into<String>) -> Self {
+        Self::new("transport", message, true)
     }
 
     fn epoch_changed(epoch: u64) -> Self {
-        Self {
-            code: "backend_epoch_changed".into(),
-            message: format!("backend epoch {epoch} ended before replying"),
-            retryable: true,
-        }
+        Self::new(
+            "backend_epoch_changed",
+            format!("backend epoch {epoch} ended before replying"),
+            true,
+        )
     }
 
     fn reconnecting() -> Self {
-        Self {
-            code: "backend_reconnecting".into(),
-            message: "the WhatsApp backend is reconnecting".into(),
-            retryable: true,
-        }
+        Self::new(
+            "backend_reconnecting",
+            "the WhatsApp backend is reconnecting",
+            true,
+        )
     }
 
     fn shutting_down() -> Self {
-        Self {
-            code: "app_shutting_down".into(),
-            message: "the application is shutting down".into(),
-            retryable: false,
-        }
+        Self::new(
+            "app_shutting_down",
+            "the application is shutting down",
+            false,
+        )
     }
 
     fn protocol(message: impl Into<String>) -> Self {
-        Self {
-            code: "protocol".into(),
-            message: message.into(),
-            retryable: false,
-        }
+        Self::new("protocol", message, false)
     }
 
     fn invalid_argument(message: impl Into<String>) -> Self {
-        Self {
-            code: "invalid_argument".into(),
-            message: message.into(),
-            retryable: false,
-        }
+        Self::new("invalid_argument", message, false)
     }
 
     fn open_failed(message: impl Into<String>) -> Self {
-        Self {
-            code: "open_failed".into(),
-            message: message.into(),
-            retryable: false,
-        }
+        Self::new("open_failed", message, false)
     }
 }
 
@@ -614,6 +606,25 @@ macro_rules! expect_response {
     };
 }
 
+macro_rules! rpc_commands {
+    ($(
+        $name:ident($($argument:ident: $argument_type:ty),* $(,)?) -> $response:ty {
+            $request:expr, $timeout:expr => $variant:ident
+        }
+    )*) => {
+        $(
+            #[tauri::command]
+            async fn $name(
+                state: tauri::State<'_, BridgeService>,
+                $($argument: $argument_type),*
+            ) -> Result<$response, CommandError> {
+                let result = state.request($request, $timeout).await?;
+                expect_response!(result, $variant)
+            }
+        )*
+    };
+}
+
 fn validate_client_message_id(client_message_id: String) -> Result<String, CommandError> {
     let parsed = uuid::Uuid::parse_str(&client_message_id).map_err(|_| {
         CommandError::invalid_argument("client_message_id must be a canonical UUID v4")
@@ -862,214 +873,103 @@ fn take_notification_activations(
     store.take()
 }
 
-#[tauri::command]
-async fn hello(
-    state: tauri::State<'_, BridgeService>,
-) -> Result<proto::HelloResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::Hello(proto::HelloRequest {
+rpc_commands! {
+    hello() -> proto::HelloResponse {
+        rpc_request::Request::Hello(proto::HelloRequest {
                 desktop_version: env!("CARGO_PKG_VERSION").into(),
                 minimum_protocol_version: bridge::PROTOCOL_VERSION,
                 maximum_protocol_version: bridge::PROTOCOL_VERSION,
-            }),
-            CONTROL_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, Hello)
-}
-
-#[tauri::command]
-async fn get_auth_state(
-    state: tauri::State<'_, BridgeService>,
-) -> Result<proto::AuthStateResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::GetAuthState(proto::GetAuthStateRequest {}),
-            CONTROL_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, AuthState)
-}
-
-#[tauri::command]
-async fn start_pairing(
-    state: tauri::State<'_, BridgeService>,
-) -> Result<proto::StartPairingResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::StartPairing(proto::StartPairingRequest {}),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, StartPairing)
-}
-
-#[tauri::command]
-async fn list_chats(
-    state: tauri::State<'_, BridgeService>,
-    cursor: String,
-    limit: u32,
-) -> Result<proto::ListChatsResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::ListChats(proto::ListChatsRequest { cursor, limit }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, ListChats)
-}
-
-#[tauri::command]
-async fn list_messages(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    before_timestamp_ms: i64,
-    before_message_id: String,
-    limit: u32,
-) -> Result<proto::ListMessagesResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::ListMessages(proto::ListMessagesRequest {
+            }), CONTROL_TIMEOUT => Hello
+    }
+    get_auth_state() -> proto::AuthStateResponse {
+        rpc_request::Request::GetAuthState(proto::GetAuthStateRequest {}),
+        CONTROL_TIMEOUT => AuthState
+    }
+    start_pairing() -> proto::StartPairingResponse {
+        rpc_request::Request::StartPairing(proto::StartPairingRequest {}),
+        WRITE_TIMEOUT => StartPairing
+    }
+    list_chats(cursor: String, limit: u32) -> proto::ListChatsResponse {
+        rpc_request::Request::ListChats(proto::ListChatsRequest { cursor, limit }),
+        READ_TIMEOUT => ListChats
+    }
+    list_messages(
+        chat_id: String,
+        before_timestamp_ms: i64,
+        before_message_id: String,
+        limit: u32,
+    ) -> proto::ListMessagesResponse {
+        rpc_request::Request::ListMessages(proto::ListMessagesRequest {
                 chat_id,
                 before_timestamp_ms,
                 before_message_id,
                 limit,
-            }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, ListMessages)
-}
-
-#[tauri::command]
-async fn open_message_window(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-) -> Result<proto::OpenMessageWindowResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::OpenMessageWindow(proto::OpenMessageWindowRequest { chat_id }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, OpenMessageWindow)
-}
-
-#[tauri::command]
-async fn list_messages_after(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    after_timestamp_ms: i64,
-    after_message_id: String,
-    limit: u32,
-) -> Result<proto::ListMessagesAfterResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::ListMessagesAfter(proto::ListMessagesAfterRequest {
+            }), READ_TIMEOUT => ListMessages
+    }
+    open_message_window(chat_id: String) -> proto::OpenMessageWindowResponse {
+        rpc_request::Request::OpenMessageWindow(proto::OpenMessageWindowRequest { chat_id }),
+        READ_TIMEOUT => OpenMessageWindow
+    }
+    list_messages_after(
+        chat_id: String,
+        after_timestamp_ms: i64,
+        after_message_id: String,
+        limit: u32,
+    ) -> proto::ListMessagesAfterResponse {
+        rpc_request::Request::ListMessagesAfter(proto::ListMessagesAfterRequest {
                 chat_id,
                 after_timestamp_ms,
                 after_message_id,
                 limit,
-            }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, ListMessagesAfter)
-}
-
-#[tauri::command]
-async fn search_local(
-    state: tauri::State<'_, BridgeService>,
-    query: String,
-) -> Result<proto::SearchLocalResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::SearchLocal(proto::SearchLocalRequest { query }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, SearchLocal)
-}
-
-#[tauri::command]
-async fn open_contact(
-    state: tauri::State<'_, BridgeService>,
-    contact_jid: String,
-) -> Result<proto::OpenContactResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::OpenContact(proto::OpenContactRequest { contact_jid }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, OpenContact)
-}
-
-#[tauri::command]
-async fn list_messages_around(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    message_id: String,
-) -> Result<proto::ListMessagesAroundResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::ListMessagesAround(proto::ListMessagesAroundRequest {
+            }), READ_TIMEOUT => ListMessagesAfter
+    }
+    search_local(query: String) -> proto::SearchLocalResponse {
+        rpc_request::Request::SearchLocal(proto::SearchLocalRequest { query }),
+        READ_TIMEOUT => SearchLocal
+    }
+    open_contact(contact_jid: String) -> proto::OpenContactResponse {
+        rpc_request::Request::OpenContact(proto::OpenContactRequest { contact_jid }),
+        READ_TIMEOUT => OpenContact
+    }
+    list_messages_around(
+        chat_id: String,
+        message_id: String,
+    ) -> proto::ListMessagesAroundResponse {
+        rpc_request::Request::ListMessagesAround(proto::ListMessagesAroundRequest {
                 chat_id,
                 message_id,
-            }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, ListMessagesAround)
-}
-
-#[tauri::command]
-async fn send_text(
-    state: tauri::State<'_, BridgeService>,
-    client_message_id: String,
-    chat_id: String,
-    text: String,
-    reply_to_message_id: String,
-    mentioned_jids: Vec<String>,
-) -> Result<proto::SendTextResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::SendText(proto::SendTextRequest {
+            }), READ_TIMEOUT => ListMessagesAround
+    }
+    send_text(
+        client_message_id: String,
+        chat_id: String,
+        text: String,
+        reply_to_message_id: String,
+        mentioned_jids: Vec<String>,
+    ) -> proto::SendTextResponse {
+        rpc_request::Request::SendText(proto::SendTextRequest {
                 client_message_id: validate_client_message_id(client_message_id)?,
                 chat_id,
                 text,
                 reply_to_message_id,
                 mentioned_jids,
-            }),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, SendText)
-}
-
-#[tauri::command]
-async fn send_image(
-    state: tauri::State<'_, BridgeService>,
-    client_message_id: String,
-    chat_id: String,
-    image_path: String,
-    caption: String,
-    reply_to_message_id: String,
-) -> Result<proto::SendImageResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::SendImage(proto::SendImageRequest {
+            }), WRITE_TIMEOUT => SendText
+    }
+    send_image(
+        client_message_id: String,
+        chat_id: String,
+        image_path: String,
+        caption: String,
+        reply_to_message_id: String,
+    ) -> proto::SendImageResponse {
+        rpc_request::Request::SendImage(proto::SendImageRequest {
                 client_message_id: validate_client_message_id(client_message_id)?,
                 chat_id,
                 image_path,
                 caption,
                 reply_to_message_id,
-            }),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, SendImage)
+            }), WRITE_TIMEOUT => SendImage
+    }
 }
 
 #[tauri::command]
@@ -1102,40 +1002,25 @@ async fn send_sticker(
     expect_response!(result, SendSticker)
 }
 
-#[tauri::command]
-async fn get_message_image(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    message_id: String,
-) -> Result<proto::GetMessageImageResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::GetMessageImage(proto::GetMessageImageRequest {
-                chat_id,
-                message_id,
-            }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, GetMessageImage)
-}
-
-#[tauri::command]
-async fn get_message_attachment(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    message_id: String,
-) -> Result<proto::GetMessageAttachmentResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::GetMessageAttachment(proto::GetMessageAttachmentRequest {
-                chat_id,
-                message_id,
-            }),
-            ATTACHMENT_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, GetMessageAttachment)
+rpc_commands! {
+    get_message_image(
+        chat_id: String,
+        message_id: String,
+    ) -> proto::GetMessageImageResponse {
+        rpc_request::Request::GetMessageImage(proto::GetMessageImageRequest {
+            chat_id,
+            message_id,
+        }), READ_TIMEOUT => GetMessageImage
+    }
+    get_message_attachment(
+        chat_id: String,
+        message_id: String,
+    ) -> proto::GetMessageAttachmentResponse {
+        rpc_request::Request::GetMessageAttachment(proto::GetMessageAttachmentRequest {
+            chat_id,
+            message_id,
+        }), ATTACHMENT_TIMEOUT => GetMessageAttachment
+    }
 }
 
 #[tauri::command]
@@ -1171,212 +1056,94 @@ async fn send_attachment(
     expect_response!(result, SendAttachment)
 }
 
-#[tauri::command]
-async fn mark_read(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    through_message_id: String,
-) -> Result<proto::MarkReadResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::MarkRead(proto::MarkReadRequest {
+rpc_commands! {
+    mark_read(chat_id: String, through_message_id: String) -> proto::MarkReadResponse {
+        rpc_request::Request::MarkRead(proto::MarkReadRequest {
                 chat_id,
                 through_message_id,
-            }),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, MarkRead)
-}
-
-#[tauri::command]
-async fn get_chat_avatar(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-) -> Result<proto::GetChatAvatarResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::GetChatAvatar(proto::GetChatAvatarRequest { chat_id }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, GetChatAvatar)
-}
-
-#[tauri::command]
-async fn send_reaction(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    message_id: String,
-    emoji: String,
-) -> Result<proto::SendReactionResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::SendReaction(proto::SendReactionRequest {
+            }), WRITE_TIMEOUT => MarkRead
+    }
+    get_chat_avatar(chat_id: String) -> proto::GetChatAvatarResponse {
+        rpc_request::Request::GetChatAvatar(proto::GetChatAvatarRequest { chat_id }),
+        READ_TIMEOUT => GetChatAvatar
+    }
+    send_reaction(
+        chat_id: String,
+        message_id: String,
+        emoji: String,
+    ) -> proto::SendReactionResponse {
+        rpc_request::Request::SendReaction(proto::SendReactionRequest {
                 chat_id,
                 message_id,
                 emoji,
                 client_reaction_id: uuid::Uuid::new_v4().to_string(),
-            }),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, SendReaction)
-}
-
-#[tauri::command]
-async fn get_chat_info(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-) -> Result<proto::GetChatInfoResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::GetChatInfo(proto::GetChatInfoRequest { chat_id }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, GetChatInfo)
-}
-
-#[tauri::command]
-async fn get_participant_avatar(
-    state: tauri::State<'_, BridgeService>,
-    participant_id: String,
-) -> Result<proto::GetParticipantAvatarResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::GetParticipantAvatar(proto::GetParticipantAvatarRequest {
+            }), WRITE_TIMEOUT => SendReaction
+    }
+    get_chat_info(chat_id: String) -> proto::GetChatInfoResponse {
+        rpc_request::Request::GetChatInfo(proto::GetChatInfoRequest { chat_id }),
+        READ_TIMEOUT => GetChatInfo
+    }
+    get_participant_avatar(participant_id: String) -> proto::GetParticipantAvatarResponse {
+        rpc_request::Request::GetParticipantAvatar(proto::GetParticipantAvatarRequest {
                 participant_id,
-            }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, GetParticipantAvatar)
-}
-
-#[tauri::command]
-async fn repair_recent_reactions(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-) -> Result<proto::RepairRecentReactionsResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::RepairRecentReactions(proto::RepairRecentReactionsRequest {
+            }), READ_TIMEOUT => GetParticipantAvatar
+    }
+    repair_recent_reactions(chat_id: String) -> proto::RepairRecentReactionsResponse {
+        rpc_request::Request::RepairRecentReactions(proto::RepairRecentReactionsRequest {
                 chat_id,
-            }),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, RepairRecentReactions)
-}
-
-#[tauri::command]
-async fn set_typing(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    composing: bool,
-) -> Result<proto::SetTypingResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::SetTyping(proto::SetTypingRequest {
+            }), WRITE_TIMEOUT => RepairRecentReactions
+    }
+    set_typing(chat_id: String, composing: bool) -> proto::SetTypingResponse {
+        rpc_request::Request::SetTyping(proto::SetTypingRequest {
                 chat_id,
                 typing: composing,
-            }),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, SetTyping)
-}
-
-#[tauri::command]
-async fn create_poll(
-    state: tauri::State<'_, BridgeService>,
-    client_message_id: String,
-    chat_id: String,
-    question: String,
-    options: Vec<String>,
-    selectable_options_count: u32,
-) -> Result<proto::CreatePollResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::CreatePoll(proto::CreatePollRequest {
+            }), WRITE_TIMEOUT => SetTyping
+    }
+    create_poll(
+        client_message_id: String,
+        chat_id: String,
+        question: String,
+        options: Vec<String>,
+        selectable_options_count: u32,
+    ) -> proto::CreatePollResponse {
+        rpc_request::Request::CreatePoll(proto::CreatePollRequest {
                 client_message_id: validate_client_message_id(client_message_id)?,
                 chat_id,
                 question,
                 options,
                 selectable_options_count,
-            }),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, CreatePoll)
-}
-
-#[tauri::command]
-async fn vote_poll(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    poll_message_id: String,
-    selected_options: Vec<String>,
-) -> Result<proto::VotePollResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::VotePoll(proto::VotePollRequest {
+            }), WRITE_TIMEOUT => CreatePoll
+    }
+    vote_poll(
+        chat_id: String,
+        poll_message_id: String,
+        selected_options: Vec<String>,
+    ) -> proto::VotePollResponse {
+        rpc_request::Request::VotePoll(proto::VotePollRequest {
                 chat_id,
                 poll_message_id,
                 selected_options,
-            }),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, VotePoll)
-}
-
-#[tauri::command]
-async fn set_message_pin(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-    message_id: String,
-    pinned: bool,
-) -> Result<proto::SetMessagePinResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::SetMessagePin(proto::SetMessagePinRequest {
+            }), WRITE_TIMEOUT => VotePoll
+    }
+    set_message_pin(
+        chat_id: String,
+        message_id: String,
+        pinned: bool,
+    ) -> proto::SetMessagePinResponse {
+        rpc_request::Request::SetMessagePin(proto::SetMessagePinRequest {
                 chat_id,
                 message_id,
                 pinned,
-            }),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, SetMessagePin)
-}
-
-#[tauri::command]
-async fn list_pinned_messages(
-    state: tauri::State<'_, BridgeService>,
-    chat_id: String,
-) -> Result<proto::ListPinnedMessagesResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::ListPinnedMessages(proto::ListPinnedMessagesRequest { chat_id }),
-            READ_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, ListPinnedMessages)
-}
-
-#[tauri::command]
-async fn logout(
-    state: tauri::State<'_, BridgeService>,
-) -> Result<proto::LogoutResponse, CommandError> {
-    let result = state
-        .request(
-            rpc_request::Request::Logout(proto::LogoutRequest {}),
-            WRITE_TIMEOUT,
-        )
-        .await?;
-    expect_response!(result, Logout)
+            }), WRITE_TIMEOUT => SetMessagePin
+    }
+    list_pinned_messages(chat_id: String) -> proto::ListPinnedMessagesResponse {
+        rpc_request::Request::ListPinnedMessages(proto::ListPinnedMessagesRequest { chat_id }),
+        READ_TIMEOUT => ListPinnedMessages
+    }
+    logout() -> proto::LogoutResponse {
+        rpc_request::Request::Logout(proto::LogoutRequest {}),
+        WRITE_TIMEOUT => Logout
+    }
 }
 
 #[tauri::command]
