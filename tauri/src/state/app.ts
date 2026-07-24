@@ -692,8 +692,10 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   }
 
   async function loadPinnedMessages(chatId: string, throwOnError = false) {
-    try { const response = await bridge.listPinnedMessages(chatId); setState("pinnedMessages", chatId, response.pins); }
-    catch (error) {
+    try {
+      const response = await bridge.listPinnedMessages(chatId);
+      setState("pinnedMessages", chatId, response.pins);
+    } catch (error) {
       if (throwOnError) throw error;
       toast(normalizeBridgeError(error).message);
     }
@@ -973,26 +975,52 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
 
   async function createPoll(question: string, options: string[], selectableOptionsCount: number, chatId = state.selectedChatId) {
     if (!chatId) return;
-    try { const response = await bridge.createPoll(chatId, question, options, selectableOptionsCount); if (response.message) upsertMessage(response.message, true); }
-    catch (error) { toast(normalizeBridgeError(error).message); }
+    try {
+      const response = await bridge.createPoll(chatId, question, options, selectableOptionsCount);
+      if (response.message) upsertMessage(response.message, true);
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+    }
   }
 
   async function votePoll(message: Message, selectedOptions: string[], chatId = message.chatId) {
     if (!message.content || !("poll" in message.content)) return;
-    const key = mediaKey(chatId, message.id); const generation = (pollVoteGenerations.get(key) ?? 0) + 1; pollVoteGenerations.set(key, generation);
+    const key = mediaKey(chatId, message.id);
+    const generation = (pollVoteGenerations.get(key) ?? 0) + 1;
+    pollVoteGenerations.set(key, generation);
     const stateKey = `${chatId}:${message.id}`;
-    const previous = clonePollContent(message.content.poll); const optimistic = optimisticPollVote(previous, selectedOptions);
+    const previous = clonePollContent(message.content.poll);
+    const optimistic = optimisticPollVote(previous, selectedOptions);
     setState("conversations", chatId, "messages", (candidate) => candidate.id === message.id, "content", { poll: optimistic });
     setState("pendingPollVotes", stateKey, true);
-    try { const response = await bridge.votePoll(chatId, message.id, selectedOptions); if (pollVoteGenerations.get(key) === generation && response.message) { setState("pendingPollVotes", stateKey, undefined!); upsertMessage(response.message, true); } }
-    catch (error) { if (pollVoteGenerations.get(key) === generation) { setState("conversations", chatId, "messages", (candidate) => candidate.id === message.id, "content", { poll: previous }); toast(normalizeBridgeError(error).message); } }
-    finally { if (pollVoteGenerations.get(key) === generation) setState("pendingPollVotes", stateKey, undefined!); }
+    const isCurrent = () => pollVoteGenerations.get(key) === generation;
+    try {
+      const response = await bridge.votePoll(chatId, message.id, selectedOptions);
+      if (isCurrent() && response.message) {
+        setState("pendingPollVotes", stateKey, undefined!);
+        upsertMessage(response.message, true);
+      }
+    } catch (error) {
+      if (isCurrent()) {
+        setState("conversations", chatId, "messages", (candidate) => candidate.id === message.id, "content", { poll: previous });
+        toast(normalizeBridgeError(error).message);
+      }
+    } finally {
+      if (isCurrent()) setState("pendingPollVotes", stateKey, undefined!);
+    }
   }
 
   async function setMessagePin(messageId: string, pinned: boolean, chatId = state.selectedChatId) {
-    if (!chatId) return; const key = mediaKey(chatId, messageId); const generation = (pinGenerations.get(key) ?? 0) + 1; pinGenerations.set(key, generation);
-    try { await bridge.setMessagePin(chatId, messageId, pinned); if (pinGenerations.get(key) === generation) await loadPinnedMessages(chatId); }
-    catch (error) { if (pinGenerations.get(key) === generation) toast(normalizeBridgeError(error).message); }
+    if (!chatId) return;
+    const key = mediaKey(chatId, messageId);
+    const generation = (pinGenerations.get(key) ?? 0) + 1;
+    pinGenerations.set(key, generation);
+    try {
+      await bridge.setMessagePin(chatId, messageId, pinned);
+      if (pinGenerations.get(key) === generation) await loadPinnedMessages(chatId);
+    } catch (error) {
+      if (pinGenerations.get(key) === generation) toast(normalizeBridgeError(error).message);
+    }
   }
 
   async function sendImage(path: string, chatId = state.selectedChatId) {
