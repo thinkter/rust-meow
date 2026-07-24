@@ -12,6 +12,7 @@ mod sticker;
 
 use std::{
     collections::HashMap,
+    io::Cursor,
     path::{Path, PathBuf},
     process::{Child, Command},
     sync::{
@@ -24,6 +25,7 @@ use std::{
 use proto::{rpc_request, rpc_response};
 use serde::Serialize;
 use tauri::{Emitter as _, Manager as _, ipc::Channel};
+use tauri_plugin_clipboard_manager::ClipboardExt as _;
 use tauri_plugin_opener::OpenerExt as _;
 use tokio::sync::{Mutex, oneshot};
 
@@ -34,6 +36,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 // bounded at ten minutes. Keep the shell alive long enough to receive the
 // backend's authoritative result instead of orphaning an in-flight media RPC.
 const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(22 * 60);
+const MAX_PASTED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PASTED_IMAGE_PIXELS: u64 = 16_000_000;
+const MAX_PASTED_IMAGE_EDGE: u32 = 8_192;
 
 const MAX_PENDING_REQUESTS: usize = 512;
 const MAX_RESTART_ATTEMPTS: u32 = 5;
@@ -1207,6 +1212,171 @@ fn unique_destination(directory: &Path, file_name: &str) -> PathBuf {
     directory.join(file_name)
 }
 
+fn pasted_image_extension(
+    bytes: &[u8],
+    declared_mime_type: &str,
+) -> Result<&'static str, CommandError> {
+    let format = image::guess_format(bytes).map_err(|_| {
+        CommandError::invalid_argument("clipboard image data is not a supported image")
+    })?;
+    let (extension, expected_mime_type) = match format {
+        image::ImageFormat::Jpeg => ("jpg", "image/jpeg"),
+        image::ImageFormat::Png => ("png", "image/png"),
+        image::ImageFormat::Gif => ("gif", "image/gif"),
+        image::ImageFormat::WebP => ("webp", "image/webp"),
+        _ => {
+            return Err(CommandError::invalid_argument(
+                "clipboard images must be JPEG, PNG, GIF, or WebP",
+            ));
+        }
+    };
+    if !declared_mime_type.is_empty() && declared_mime_type != expected_mime_type {
+        return Err(CommandError::invalid_argument(
+            "clipboard image type does not match its contents",
+        ));
+    }
+    let (width, height) = image::ImageReader::with_format(Cursor::new(bytes), format)
+        .into_dimensions()
+        .map_err(|_| CommandError::invalid_argument("clipboard image dimensions are invalid"))?;
+    if width == 0
+        || height == 0
+        || width > MAX_PASTED_IMAGE_EDGE
+        || height > MAX_PASTED_IMAGE_EDGE
+        || u64::from(width) * u64::from(height) > MAX_PASTED_IMAGE_PIXELS
+    {
+        return Err(CommandError::invalid_argument(
+            "clipboard image dimensions are too large",
+        ));
+    }
+    Ok(extension)
+}
+
+fn stage_pasted_image_blocking(
+    data_dir: &Path,
+    bytes: Vec<u8>,
+    declared_mime_type: String,
+) -> Result<String, CommandError> {
+    if bytes.is_empty() || bytes.len() > MAX_PASTED_IMAGE_BYTES {
+        return Err(CommandError::invalid_argument(
+            "clipboard image must be between 1 byte and 32 MiB",
+        ));
+    }
+    let extension = pasted_image_extension(&bytes, &declared_mime_type)?;
+    let directory = data_dir.join("pasted-images");
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        CommandError::open_failed(format!("create pasted image cache: {error}"))
+    })?;
+    let path = directory.join(format!("{}.{}", uuid::Uuid::new_v4(), extension));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| CommandError::open_failed(format!("create pasted image: {error}")))?;
+    if let Err(error) = std::io::Write::write_all(&mut file, &bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(CommandError::open_failed(format!(
+            "write pasted image: {error}"
+        )));
+    }
+    drop(file);
+    match path.to_str() {
+        Some(path) => Ok(path.to_owned()),
+        None => {
+            let _ = std::fs::remove_file(&path);
+            Err(CommandError::open_failed(
+                "pasted image path is not valid UTF-8",
+            ))
+        }
+    }
+}
+
+#[tauri::command]
+async fn stage_clipboard_image(app: tauri::AppHandle) -> Result<String, CommandError> {
+    // Clipboard image reads can block (and on Linux may deadlock the GTK main
+    // thread), so keep both the native read and PNG normalization on a worker.
+    tauri::async_runtime::spawn_blocking(move || {
+        let clipboard_image = app.clipboard().read_image().map_err(|error| {
+            CommandError::new(
+                "clipboard_no_image",
+                format!("The clipboard does not contain an image: {error}"),
+                false,
+            )
+        })?;
+        let width = clipboard_image.width();
+        let height = clipboard_image.height();
+        if width == 0
+            || height == 0
+            || width > MAX_PASTED_IMAGE_EDGE
+            || height > MAX_PASTED_IMAGE_EDGE
+            || u64::from(width) * u64::from(height) > MAX_PASTED_IMAGE_PIXELS
+        {
+            return Err(CommandError::invalid_argument(
+                "clipboard image dimensions are too large",
+            ));
+        }
+        let rgba = clipboard_image.rgba().to_vec();
+        let buffer = image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
+            CommandError::invalid_argument("clipboard image pixels are malformed")
+        })?;
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(buffer)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .map_err(|error| {
+                CommandError::open_failed(format!("encode clipboard image: {error}"))
+            })?;
+        stage_pasted_image_blocking(
+            &paths::data_dir(),
+            encoded.into_inner(),
+            "image/png".to_owned(),
+        )
+    })
+    .await
+    .map_err(|error| CommandError::transport(format!("clipboard image worker failed: {error}")))?
+}
+
+fn discard_staged_image_blocking(data_dir: &Path, path: &Path) -> Result<(), CommandError> {
+    let root = std::fs::canonicalize(data_dir.join("pasted-images")).map_err(|error| {
+        CommandError::invalid_argument(format!("pasted image cache is unavailable: {error}"))
+    })?;
+    let target = std::fs::canonicalize(path).map_err(|error| {
+        CommandError::invalid_argument(format!("pasted image is unavailable: {error}"))
+    })?;
+    if !target.starts_with(root) || !target.is_file() {
+        return Err(CommandError::invalid_argument(
+            "path is outside the pasted image cache",
+        ));
+    }
+    std::fs::remove_file(target)
+        .map_err(|error| CommandError::open_failed(format!("remove pasted image: {error}")))
+}
+
+#[tauri::command]
+async fn discard_staged_image(path: String) -> Result<(), CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        discard_staged_image_blocking(&paths::data_dir(), Path::new(&path))
+    })
+    .await
+    .map_err(|error| CommandError::transport(format!("clipboard cleanup worker failed: {error}")))?
+}
+
+fn clear_staged_images(data_dir: &Path) {
+    let directory = data_dir.join("pasted-images");
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Copy one cached media file into a user-chosen directory.
 ///
 /// Both ends are validated: the source must resolve inside the backend-managed
@@ -1379,6 +1549,7 @@ rpc_commands! {
         text: String,
         reply_to_message_id: String,
         mentioned_jids: Vec<String>,
+        reply_to_chat_id: String,
     ) -> proto::SendTextResponse {
         rpc_request::Request::SendText(proto::SendTextRequest {
                 client_message_id: validate_client_message_id(client_message_id)?,
@@ -1386,6 +1557,7 @@ rpc_commands! {
                 text,
                 reply_to_message_id,
                 mentioned_jids,
+                reply_to_chat_id,
             }), WRITE_TIMEOUT => SendText
     }
     send_image(
@@ -1394,6 +1566,7 @@ rpc_commands! {
         image_path: String,
         caption: String,
         reply_to_message_id: String,
+        reply_to_chat_id: String,
     ) -> proto::SendImageResponse {
         rpc_request::Request::SendImage(proto::SendImageRequest {
                 client_message_id: validate_client_message_id(client_message_id)?,
@@ -1401,6 +1574,7 @@ rpc_commands! {
                 image_path,
                 caption,
                 reply_to_message_id,
+                reply_to_chat_id,
             }), WRITE_TIMEOUT => SendImage
     }
 }
@@ -1412,6 +1586,7 @@ async fn send_sticker(
     chat_id: String,
     image_path: String,
     reply_to_message_id: String,
+    reply_to_chat_id: String,
 ) -> Result<proto::SendStickerResponse, CommandError> {
     let client_message_id = validate_client_message_id(client_message_id)?;
     let prepared = tauri::async_runtime::spawn_blocking(move || {
@@ -1428,6 +1603,7 @@ async fn send_sticker(
                 chat_id,
                 webp_data: prepared.webp_data,
                 reply_to_message_id,
+                reply_to_chat_id,
             }),
             WRITE_TIMEOUT,
         )
@@ -1469,6 +1645,7 @@ async fn send_attachment(
     caption: String,
     reply_to_message_id: String,
     voice_note: bool,
+    reply_to_chat_id: String,
 ) -> Result<proto::SendAttachmentResponse, CommandError> {
     let client_message_id = validate_client_message_id(client_message_id)?;
     let kind = validate_attachment_kind(kind, &caption, voice_note)?;
@@ -1482,6 +1659,7 @@ async fn send_attachment(
                 caption,
                 reply_to_message_id,
                 voice_note,
+                reply_to_chat_id,
             }),
             ATTACHMENT_TIMEOUT,
         )
@@ -1573,6 +1751,30 @@ rpc_commands! {
         rpc_request::Request::ListPinnedMessages(proto::ListPinnedMessagesRequest { chat_id }),
         READ_TIMEOUT => ListPinnedMessages
     }
+    forward_message(
+        client_message_id: String,
+        source_chat_id: String,
+        message_id: String,
+        target_chat_id: String,
+    ) -> proto::ForwardMessageResponse {
+        rpc_request::Request::ForwardMessage(proto::ForwardMessageRequest {
+                client_message_id: validate_client_message_id(client_message_id)?,
+                source_chat_id,
+                message_id,
+                target_chat_id,
+            }), WRITE_TIMEOUT => ForwardMessage
+    }
+    edit_message(
+        chat_id: String,
+        message_id: String,
+        text: String,
+    ) -> proto::EditMessageResponse {
+        rpc_request::Request::EditMessage(proto::EditMessageRequest {
+                chat_id,
+                message_id,
+                text,
+            }), WRITE_TIMEOUT => EditMessage
+    }
     logout() -> proto::LogoutResponse {
         rpc_request::Request::Logout(proto::LogoutRequest {}),
         WRITE_TIMEOUT => Logout
@@ -1625,6 +1827,7 @@ pub fn run() {
     let isolated_performance_process = performance_config.is_some()
         || std::env::var("RUST_MEOW_PERF_ISOLATED").as_deref() == Ok("1");
     let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(native_notifications::NotificationActivationStore::from_args(&args))
         .manage(native_notifications::NativeNotificationService::default());
     if !isolated_performance_process {
@@ -1647,6 +1850,9 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Files here are needed only between a paste and its completed
+            // send. Anything present at process start is residue from a crash.
+            clear_staged_images(&paths::data_dir());
             configure_asset_protocol_scope(&app.asset_protocol_scope(), &paths::data_dir())?;
             let fake = std::env::args().any(|argument| argument == "--fake-backend");
             app.manage(BridgeServiceInner::start(fake)?);
@@ -1659,6 +1865,8 @@ pub fn run() {
             open_media_path,
             reveal_media_path,
             save_media_as,
+            stage_clipboard_image,
+            discard_staged_image,
             show_message_notification,
             take_notification_activations,
             restart_app_command,
@@ -1689,6 +1897,8 @@ pub fn run() {
             vote_poll,
             set_message_pin,
             list_pinned_messages,
+            forward_message,
+            edit_message,
             logout,
             complete_performance_capture,
             mark_performance_idle_ready,
@@ -2028,6 +2238,55 @@ mod tests {
         assert_eq!(sanitize_download_name("...", None), "rust-meow-file");
         assert!(!sanitize_download_name(&"x".repeat(500), None).is_empty());
         assert!(sanitize_download_name(&"x".repeat(500), None).len() <= 200);
+    }
+
+    #[test]
+    fn pasted_images_are_validated_staged_privately_and_discarded() {
+        let root = tempfile::tempdir().unwrap();
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = encoded.into_inner();
+
+        let path = PathBuf::from(
+            stage_pasted_image_blocking(root.path(), bytes.clone(), "image/png".to_string())
+                .unwrap(),
+        );
+        assert!(path.starts_with(root.path().join("pasted-images")));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        discard_staged_image_blocking(root.path(), &path).unwrap();
+        assert!(!path.exists());
+        assert!(
+            stage_pasted_image_blocking(root.path(), Vec::new(), "image/png".to_string()).is_err()
+        );
+        assert!(stage_pasted_image_blocking(root.path(), bytes, "image/jpeg".to_string()).is_err());
+    }
+
+    #[test]
+    fn pasted_image_cleanup_rejects_paths_outside_its_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let staged = root.path().join("pasted-images");
+        std::fs::create_dir_all(&staged).unwrap();
+        let outside = root.path().join("keep.png");
+        std::fs::write(&outside, b"not staged").unwrap();
+        assert!(discard_staged_image_blocking(root.path(), &outside).is_err());
+        assert!(outside.exists());
+
+        let residue = staged.join("crashed-send.png");
+        std::fs::write(&residue, b"stale").unwrap();
+        clear_staged_images(root.path());
+        assert!(!residue.exists());
+        assert!(outside.exists());
     }
 
     #[test]
