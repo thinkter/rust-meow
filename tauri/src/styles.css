@@ -1,11 +1,10 @@
 /* ==========================================================================
    Rust Meow desktop — Vercel/Geist-inspired stylesheet.
 
-   Every colour is a `var(--token)` defined by `lib/theme.ts` and written onto
-   <html> at runtime by `state/preferences.ts`. This file never hardcodes a
-   colour except the brand mark gradient and the QR backdrop (both called out
-   below with a reason). Sizes multiply `var(--scale)` throughout so the
-   "Interface size" setting scales the whole UI uniformly.
+   Every theme colour is a `var(--token)` defined by `lib/theme.ts` and written
+   onto <html> at runtime by `state/preferences.ts`. Sizes multiply
+   `var(--scale)` throughout so the "Interface size" setting scales the whole
+   UI uniformly.
    ========================================================================== */
 
 /* ── Tokens / reset ── */
@@ -485,13 +484,8 @@ a:focus-visible,
   height: calc(34px * var(--scale));
   margin-bottom: calc(6px * var(--scale));
   place-items: center;
-  border-radius: var(--radius-md);
-  /* Brand mark is the one place a fixed colour is allowed — it must read the
-     same across every user theme, not shift with --accent. */
-  background: linear-gradient(140deg, #6e6efb, #4650e6);
-  color: #ffffff;
+  color: var(--accent);
   font-weight: 700;
-  box-shadow: var(--shadow-sm);
 }
 
 .workspace {

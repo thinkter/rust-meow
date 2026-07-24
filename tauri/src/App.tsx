@@ -79,7 +79,9 @@ export default function App() {
         >
           <TitleBar model={model} />
           <nav class="nav-rail" aria-label="Primary navigation">
-            <div class="brand-mark" aria-label="Rust Meow"><span style={{ "font-weight": 900 }}>M</span></div>
+            <div class="brand-mark" aria-label="Rust Meow">
+              <MessageCircle size={22} />
+            </div>
             <IconButton
               label="Chats"
               active={state.chatFilter !== "archived"}
