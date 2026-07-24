@@ -3,21 +3,11 @@ import {
   ChatKind,
   ConnectionState,
   MessageStatus,
-  type AttachmentContent,
-  type Chat,
-  type ChatInfo,
-  type ChatParticipant,
-  type FrontendEventPayload,
-  type Message,
-  type MessageContent,
-  type Reaction,
-  type PinnedMessage,
+  type AttachmentContent, type Chat, type ChatInfo, type ChatParticipant,
+  type FrontendEventPayload, type Message, type MessageContent, type Reaction, type PinnedMessage,
 } from "./types";
 import type {
-  BackendEventHandler,
-  BackendSubscription,
-  BridgeApi,
-  FilePickerOptions,
+  BackendEventHandler, BackendSubscription, BridgeApi, FilePickerOptions,
 } from "./bridge";
 
 const OWN_USER_ID = "919900001111@s.whatsapp.net";
@@ -26,11 +16,7 @@ const STARTED_AT = Date.now();
 const MINUTE = 60_000;
 const DAY = 86_400_000;
 
-interface BrowserFileMetadata {
-  fileName: string;
-  mimeType: string;
-  fileSize: number;
-}
+interface BrowserFileMetadata { fileName: string; mimeType: string; fileSize: number }
 
 export interface BrowserMockControl {
   listChatIds(): Array<{ id: string; title: string }>;
@@ -331,46 +317,15 @@ class BrowserMockBridge implements BridgeApi {
   ) {
     const trimmed = text.trim();
     if (!trimmed) throw commandFailure("invalid_argument", "A message cannot be empty");
-    const message = this.outgoing(chatId, { text: textContent(trimmed) }, replyToMessageId);
-    return { message: copy(message) };
+    return messageResponse(this.outgoing(chatId, { text: textContent(trimmed) }, replyToMessageId));
   }
 
   async sendImage(chatId: string, imagePath: string, caption = "", replyToMessageId = "") {
-    const metadata = browserFiles.get(imagePath);
-    const message = this.outgoing(chatId, {
-      image: {
-        caption,
-        mimeType: metadata?.mimeType || "image/jpeg",
-        localPath: imagePath || mockPhoto("New photo"),
-        width: 1280,
-        height: 960,
-        fileSize: metadata?.fileSize || 286_000,
-        downloadable: false,
-        sticker: false,
-        animated: false,
-        thumbnailPath: imagePath || mockPhoto("New photo"),
-      },
-    }, replyToMessageId);
-    return { message: copy(message) };
+    return messageResponse(this.outgoingImage(chatId, imagePath, caption, replyToMessageId, false));
   }
 
   async sendSticker(chatId: string, imagePath: string, replyToMessageId = "") {
-    const metadata = browserFiles.get(imagePath);
-    const message = this.outgoing(chatId, {
-      image: {
-        caption: "",
-        mimeType: metadata?.mimeType || "image/webp",
-        localPath: imagePath || mockSticker("✨"),
-        width: 512,
-        height: 512,
-        fileSize: metadata?.fileSize || 42_000,
-        downloadable: false,
-        sticker: true,
-        animated: false,
-        thumbnailPath: imagePath || mockSticker("✨"),
-      },
-    }, replyToMessageId);
-    return { message: copy(message) };
+    return messageResponse(this.outgoingImage(chatId, imagePath, "", replyToMessageId, true));
   }
 
   async sendAttachment(
@@ -382,13 +337,13 @@ class BrowserMockBridge implements BridgeApi {
     voiceNote = false,
   ) {
     const metadata = browserFiles.get(filePath);
-    const attachmentKind = attachmentKindName(kind);
+    const defaults = attachmentDefaults(kind);
     const attachment: AttachmentContent = {
-      kind: attachmentKind,
+      kind: defaults.name,
       caption,
-      mimeType: metadata?.mimeType || defaultMimeType(kind),
-      fileName: metadata?.fileName || defaultFileName(kind),
-      localPath: filePath || downloadedAttachment(kind),
+      mimeType: metadata?.mimeType || defaults.mimeType,
+      fileName: metadata?.fileName || defaults.fileName,
+      localPath: filePath || defaults.downloadPath,
       fileSize: metadata?.fileSize || 84_200,
       width: kind === AttachmentKind.Video ? 1280 : 0,
       height: kind === AttachmentKind.Video ? 720 : 0,
@@ -397,8 +352,7 @@ class BrowserMockBridge implements BridgeApi {
       voiceNote,
       downloadable: false,
     };
-    const message = this.outgoing(chatId, { attachment }, replyToMessageId);
-    return { message: copy(message) };
+    return messageResponse(this.outgoing(chatId, { attachment }, replyToMessageId));
   }
 
   async getMessageImage(chatId: string, messageId: string) {
@@ -417,9 +371,8 @@ class BrowserMockBridge implements BridgeApi {
     if (!(message.content && "attachment" in message.content)) {
       throw commandFailure("not_media", "That message has no downloadable attachment");
     }
-    message.content.attachment.localPath ||= downloadedAttachment(
-      attachmentKindValue(message.content.attachment.kind),
-    );
+    message.content.attachment.localPath ||=
+      attachmentDefaults(attachmentKindValue(message.content.attachment.kind)).downloadPath;
     return { chatId, messageId, localPath: message.content.attachment.localPath };
   }
 
@@ -502,7 +455,7 @@ class BrowserMockBridge implements BridgeApi {
 
   async createPoll(chatId: string, question: string, options: string[], selectableOptionsCount: number) {
     const message = this.outgoing(chatId, { poll: { question, options: options.map((name) => ({ name, voteCount: 0, selectedByMe: false })), selectableOptionsCount, totalVoters: 0 } }, "");
-    return { message: copy(message) };
+    return messageResponse(message);
   }
 
   async votePoll(chatId: string, pollMessageId: string, selectedOptions: string[]) {
@@ -514,7 +467,7 @@ class BrowserMockBridge implements BridgeApi {
     for (const option of poll.options) { if (previous.has(option.name) && !next.has(option.name)) option.voteCount--; if (!previous.has(option.name) && next.has(option.name)) option.voteCount++; option.selectedByMe = next.has(option.name); }
     if (previous.size === 0 && next.size > 0) poll.totalVoters++; else if (previous.size > 0 && next.size === 0) poll.totalVoters--;
     void this.emit({ type: "messageUpserted", payload: { message: copy(message) } });
-    return { message: copy(message) };
+    return messageResponse(message);
   }
 
   async setMessagePin(chatId: string, messageId: string, pinned: boolean) {
@@ -560,6 +513,31 @@ class BrowserMockBridge implements BridgeApi {
     this.touchChat(chatId, message, false);
     this.scheduleReceipts(message);
     return message;
+  }
+
+  private outgoingImage(
+    chatId: string,
+    imagePath: string,
+    caption: string,
+    replyToMessageId: string,
+    sticker: boolean,
+  ): Message {
+    const metadata = browserFiles.get(imagePath);
+    const fallbackPath = sticker ? mockSticker("✨") : mockPhoto("New photo");
+    return this.outgoing(chatId, {
+      image: {
+        caption,
+        mimeType: metadata?.mimeType || (sticker ? "image/webp" : "image/jpeg"),
+        localPath: imagePath || fallbackPath,
+        width: sticker ? 512 : 1280,
+        height: sticker ? 512 : 960,
+        fileSize: metadata?.fileSize || (sticker ? 42_000 : 286_000),
+        downloadable: false,
+        sticker,
+        animated: false,
+        thumbnailPath: imagePath || fallbackPath,
+      },
+    }, replyToMessageId);
   }
 
   private scheduleReceipts(message: Message): void {
@@ -742,54 +720,37 @@ function buildFixture(): {
     makeChat({ id: "chat-alice", title: "Alice Fernandes", phoneNumber: "+91 98220 33445", contactName: "Alice Fernandes", pushName: "Alice", lastMessagePreview: "See you Friday!", lastMessageTimestampMs: STARTED_AT - 18 * DAY }),
   ];
 
-  const messages = new Map<string, Message[]>();
-  messages.set("chat-family", familyMessages());
-  messages.set("chat-priya", priyaMessages());
-  messages.set("chat-design", designMessages());
-  messages.set("chat-ravi", simpleConversation("chat-ravi", "Ravi Kulkarni", "919988776655@s.whatsapp.net", [
-    "Hey, are you free this evening?",
-    "After seven should work.",
-    "Can you send the address?",
-  ]));
-  messages.set("chat-grocer", simpleConversation("chat-grocer", "Green Basket", "918041200991@s.whatsapp.net", [
-    "Thanks for ordering from Green Basket Organics.",
-    "Your order is packed and ready.",
-    "Your order is out for delivery",
-  ]));
-  messages.set("chat-flat", simpleConversation("chat-flat", "Neha", "919700220033@s.whatsapp.net", [
-    "The water cans are here.",
-    "I paid the electricity bill",
-  ]));
-  messages.set("chat-maya", mayaMessages());
-  messages.set("chat-product", simpleConversation("chat-product", "Nikhil", "919844445555@s.whatsapp.net", [
-    "QA is green for the release candidate.",
-    "Docs are updated with the migration steps.",
-  ]));
-  messages.set("chat-office", simpleConversation("chat-office", "Kabir", "919811110909@s.whatsapp.net", [
-    "Found this group while cleaning up chats 😄",
-    "Lunch sometime next week?",
-  ]));
-  messages.set("chat-college", simpleConversation("chat-college", "Ananya", "919966667777@s.whatsapp.net", [
-    "Reunion venue poll closes tonight.",
-    "I vote for the campus lawn.",
-    "Who still has the 2019 group photo?",
-  ]));
-  messages.set("chat-spam", [makeMessage({
-    id: "spam-1",
-    chatId: "chat-spam",
-    timestampMs: STARTED_AT - 12 * DAY,
-    fromMe: false,
-    senderId: "919111100000@s.whatsapp.net",
-    senderName: "Unknown sender",
-    senderPhoneNumber: "+91 91111 00000",
-    content: { unsupported: { typeName: "blocked_contact", fallbackText: "This contact is blocked in the browser mock" } },
-    status: MessageStatus.Read,
-  })]);
-  messages.set("chat-alice", simpleConversation("chat-alice", "Alice Fernandes", "919822033445@s.whatsapp.net", [
-    "Your talk was excellent!",
-    "Thank you — that means a lot.",
-    "See you Friday!",
-  ]));
+  const messages = new Map<string, Message[]>([
+    ["chat-family", familyMessages()],
+    ["chat-priya", priyaMessages()],
+    ["chat-design", designMessages()],
+    simpleHistory("chat-ravi", "Ravi Kulkarni", "919988776655@s.whatsapp.net",
+      "Hey, are you free this evening?", "After seven should work.", "Can you send the address?"),
+    simpleHistory("chat-grocer", "Green Basket", "918041200991@s.whatsapp.net",
+      "Thanks for ordering from Green Basket Organics.", "Your order is packed and ready.", "Your order is out for delivery"),
+    simpleHistory("chat-flat", "Neha", "919700220033@s.whatsapp.net",
+      "The water cans are here.", "I paid the electricity bill"),
+    ["chat-maya", mayaMessages()],
+    simpleHistory("chat-product", "Nikhil", "919844445555@s.whatsapp.net",
+      "QA is green for the release candidate.", "Docs are updated with the migration steps."),
+    simpleHistory("chat-office", "Kabir", "919811110909@s.whatsapp.net",
+      "Found this group while cleaning up chats 😄", "Lunch sometime next week?"),
+    simpleHistory("chat-college", "Ananya", "919966667777@s.whatsapp.net",
+      "Reunion venue poll closes tonight.", "I vote for the campus lawn.", "Who still has the 2019 group photo?"),
+    ["chat-spam", [makeMessage({
+      id: "spam-1",
+      chatId: "chat-spam",
+      timestampMs: STARTED_AT - 12 * DAY,
+      fromMe: false,
+      senderId: "919111100000@s.whatsapp.net",
+      senderName: "Unknown sender",
+      senderPhoneNumber: "+91 91111 00000",
+      content: { unsupported: { typeName: "blocked_contact", fallbackText: "This contact is blocked in the browser mock" } },
+      status: MessageStatus.Read,
+    })]],
+    simpleHistory("chat-alice", "Alice Fernandes", "919822033445@s.whatsapp.net",
+      "Your talk was excellent!", "Thank you — that means a lot.", "See you Friday!"),
+  ]);
 
   const info = new Map<string, ChatInfo>();
   for (const chat of chats) {
@@ -875,52 +836,41 @@ function simpleConversation(chatId: string, senderName: string, senderId: string
   }));
 }
 
+function simpleHistory(
+  chatId: string,
+  senderName: string,
+  senderId: string,
+  ...texts: string[]
+): [string, Message[]] {
+  return [chatId, simpleConversation(chatId, senderName, senderId, texts)];
+}
+
 function makeChat(input: Partial<Chat> & Pick<Chat, "id" | "title">): Chat {
   return {
-    id: input.id,
-    kind: input.kind ?? ChatKind.Direct,
-    title: input.title,
-    avatarPath: input.avatarPath ?? "",
-    lastMessagePreview: input.lastMessagePreview ?? "",
+    id: input.id, title: input.title, kind: input.kind ?? ChatKind.Direct,
+    avatarPath: input.avatarPath ?? "", lastMessagePreview: input.lastMessagePreview ?? "",
     lastMessageTimestampMs: input.lastMessageTimestampMs ?? STARTED_AT,
-    unreadCount: input.unreadCount ?? 0,
-    muted: input.muted ?? false,
-    pinned: input.pinned ?? false,
-    archived: input.archived ?? false,
-    phoneNumber: input.phoneNumber ?? "",
-    contactName: input.contactName ?? "",
-    pushName: input.pushName ?? "",
-    businessName: input.businessName ?? "",
+    unreadCount: input.unreadCount ?? 0, muted: input.muted ?? false,
+    pinned: input.pinned ?? false, archived: input.archived ?? false,
+    phoneNumber: input.phoneNumber ?? "", contactName: input.contactName ?? "",
+    pushName: input.pushName ?? "", businessName: input.businessName ?? "",
   };
 }
 
 function makeMessage(input: {
-  id: string;
-  chatId: string;
-  timestampMs: number;
-  fromMe: boolean;
-  senderId: string;
-  senderName: string;
+  id: string; chatId: string; timestampMs: number; fromMe: boolean;
+  senderId: string; senderName: string;
   content: MessageContent | null;
   status: MessageStatus;
-  senderPhoneNumber?: string;
-  replyToMessageId?: string;
+  senderPhoneNumber?: string; replyToMessageId?: string;
 }): Message {
   return {
-    id: input.id,
-    chatId: input.chatId,
-    senderId: input.senderId,
-    senderName: input.senderName,
-    fromMe: input.fromMe,
-    timestampMs: input.timestampMs,
-    status: input.status,
-    edited: false,
-    revoked: false,
-    expiresAtMs: 0,
-    senderPhoneNumber: input.senderPhoneNumber ?? "",
-    senderAvatarPath: "",
-    reactions: [],
-    replyToMessageId: input.replyToMessageId ?? "",
+    id: input.id, chatId: input.chatId,
+    senderId: input.senderId, senderName: input.senderName,
+    fromMe: input.fromMe, timestampMs: input.timestampMs, status: input.status,
+    edited: false, revoked: false, expiresAtMs: 0,
+    senderPhoneNumber: input.senderPhoneNumber ?? "", senderAvatarPath: "",
+    reactions: [], replyToMessageId: input.replyToMessageId ?? "",
     content: input.content,
   };
 }
@@ -944,15 +894,9 @@ function textContent(text: string) {
 
 function imageContent(caption: string, localPath: string) {
   return {
-    caption,
-    mimeType: "image/jpeg",
-    localPath,
-    width: 1280,
-    height: 853,
-    fileSize: 342_000,
-    downloadable: !localPath,
-    sticker: false,
-    animated: false,
+    caption, mimeType: "image/jpeg", localPath,
+    width: 1280, height: 853, fileSize: 342_000,
+    downloadable: !localPath, sticker: false, animated: false,
     thumbnailPath: "",
   };
 }
@@ -961,12 +905,8 @@ function stickerContent(label: string) {
   const path = mockSticker(label);
   return {
     ...imageContent("", path),
-    mimeType: "image/webp",
-    width: 512,
-    height: 512,
-    fileSize: 31_000,
-    downloadable: false,
-    sticker: true,
+    mimeType: "image/webp", width: 512, height: 512, fileSize: 31_000,
+    downloadable: false, sticker: true,
     thumbnailPath: path,
   };
 }
@@ -979,18 +919,10 @@ function attachmentContent(
   fileSize: number,
 ): AttachmentContent {
   return {
-    kind,
-    caption,
-    mimeType,
-    fileName,
-    localPath: "",
-    fileSize,
-    width: kind === "video" ? 1280 : 0,
-    height: kind === "video" ? 720 : 0,
+    kind, caption, mimeType, fileName, localPath: "", fileSize,
+    width: kind === "video" ? 1280 : 0, height: kind === "video" ? 720 : 0,
     durationSeconds: kind === "video" ? 12 : 0,
-    animated: false,
-    voiceNote: false,
-    downloadable: true,
+    animated: false, voiceNote: false, downloadable: true,
   };
 }
 
@@ -1003,15 +935,9 @@ function reaction(
   fromMe = false,
 ): Reaction {
   return {
-    chatId,
-    messageId,
-    senderId,
-    emoji,
-    timestampMs: STARTED_AT - 70 * MINUTE,
-    fromMe,
-    senderName,
-    senderPhoneNumber: "",
-    senderAvatarPath: "",
+    chatId, messageId, senderId, emoji,
+    timestampMs: STARTED_AT - 70 * MINUTE, fromMe, senderName,
+    senderPhoneNumber: "", senderAvatarPath: "",
   };
 }
 
@@ -1030,41 +956,26 @@ function groupInfo(chat: Chat): ChatInfo {
         participant("919844445555@s.whatsapp.net", "Nikhil", "+91 98444 45555"),
       ];
   return {
-    chat,
-    address: `${chat.id}@g.us`,
-    about: "",
-    verifiedName: "",
+    chat, address: `${chat.id}@g.us`, about: "", verifiedName: "",
     description: chat.id === "chat-family"
       ? "Weekend plans, recipes, and the occasional terrible joke."
       : `${chat.title} coordination and updates.`,
     createdAtMs: STARTED_AT - 540 * DAY,
     createdBy: participants.find((item) => item.isSuperAdmin)?.displayName ?? "Maya",
-    participantCount: participants.length,
-    participants,
-    announceOnly: chat.id === "chat-product",
-    locked: chat.id === "chat-product",
+    participantCount: participants.length, participants,
+    announceOnly: chat.id === "chat-product", locked: chat.id === "chat-product",
     disappearingTimerSeconds: chat.id === "chat-design" ? 604_800 : 0,
-    isCommunity: chat.id === "chat-product",
-    joinApprovalRequired: chat.id === "chat-college",
+    isCommunity: chat.id === "chat-product", joinApprovalRequired: chat.id === "chat-college",
   };
 }
 
 function directInfo(chat: Chat, about: string): ChatInfo {
   return {
-    chat,
-    address: contactJid(chat),
-    about,
-    verifiedName: chat.businessName,
-    description: "",
-    createdAtMs: 0,
-    createdBy: "",
-    participantCount: 0,
-    participants: [],
-    announceOnly: false,
-    locked: false,
+    chat, address: contactJid(chat), about, verifiedName: chat.businessName,
+    description: "", createdAtMs: 0, createdBy: "",
+    participantCount: 0, participants: [], announceOnly: false, locked: false,
     disappearingTimerSeconds: chat.id === "chat-priya" ? 86_400 : 0,
-    isCommunity: false,
-    joinApprovalRequired: false,
+    isCommunity: false, joinApprovalRequired: false,
   };
 }
 
@@ -1158,6 +1069,10 @@ function copy<T>(value: T): T {
   return structuredClone(value);
 }
 
+function messageResponse(message: Message) {
+  return { message: copy(message) };
+}
+
 function colorFor(seed: string): string {
   const palette = ["#4f46e5", "#0f766e", "#be123c", "#a16207", "#7e22ce", "#0369a1"];
   let hash = 0;
@@ -1192,36 +1107,41 @@ function escapeXml(value: string): string {
   })[character]!);
 }
 
+const ATTACHMENT_DEFAULTS = {
+  document: {
+    name: "document",
+    kind: AttachmentKind.Document,
+    mimeType: "application/octet-stream",
+    fileName: "document.txt",
+    downloadPath: `data:text/plain;charset=utf-8,${encodeURIComponent("Rust Meow browser mock attachment\n\nThis file was generated locally for UI dogfooding.")}`,
+  },
+  video: {
+    name: "video",
+    kind: AttachmentKind.Video,
+    mimeType: "video/mp4",
+    fileName: "video.mp4",
+    downloadPath: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+  },
+  audio: {
+    name: "audio",
+    kind: AttachmentKind.Audio,
+    mimeType: "audio/ogg",
+    fileName: "audio.ogg",
+    downloadPath: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=",
+  },
+} as const;
+
+function attachmentDefaults(kind: AttachmentKind) {
+  return kind === AttachmentKind.Video
+    ? ATTACHMENT_DEFAULTS.video
+    : kind === AttachmentKind.Audio ? ATTACHMENT_DEFAULTS.audio : ATTACHMENT_DEFAULTS.document;
+}
+
 function attachmentKindName(kind: AttachmentKind): string {
-  if (kind === AttachmentKind.Video) return "video";
-  if (kind === AttachmentKind.Audio) return "audio";
-  return "document";
+  return attachmentDefaults(kind).name;
 }
 
 function attachmentKindValue(kind: string): AttachmentKind {
-  if (kind === "video") return AttachmentKind.Video;
-  if (kind === "audio") return AttachmentKind.Audio;
-  return AttachmentKind.Document;
-}
-
-function defaultMimeType(kind: AttachmentKind): string {
-  if (kind === AttachmentKind.Video) return "video/mp4";
-  if (kind === AttachmentKind.Audio) return "audio/ogg";
-  return "application/octet-stream";
-}
-
-function defaultFileName(kind: AttachmentKind): string {
-  if (kind === AttachmentKind.Video) return "video.mp4";
-  if (kind === AttachmentKind.Audio) return "audio.ogg";
-  return "document.txt";
-}
-
-function downloadedAttachment(kind: AttachmentKind): string {
-  if (kind === AttachmentKind.Video) {
-    return "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
-  }
-  if (kind === AttachmentKind.Audio) {
-    return "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
-  }
-  return `data:text/plain;charset=utf-8,${encodeURIComponent("Rust Meow browser mock attachment\n\nThis file was generated locally for UI dogfooding.")}`;
+  return kind === "video" ? AttachmentKind.Video
+    : kind === "audio" ? AttachmentKind.Audio : AttachmentKind.Document;
 }
