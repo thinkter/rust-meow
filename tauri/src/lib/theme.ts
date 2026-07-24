@@ -1,10 +1,10 @@
 /**
  * The theming contract.
  *
- * A theme is nothing but a flat map of design tokens to CSS colour/length
- * values. Applying one writes `--<token>` custom properties onto the document
- * element, so every rule in `styles.css` reads from the same source and a user
- * theme needs no code — only JSON.
+ * Most themes are a flat map of design tokens. `visualStyle` is the deliberately
+ * small structural escape hatch: it lets a theme opt into the shared
+ * skeuomorphic component treatment without allowing imported JSON to inject
+ * arbitrary CSS.
  */
 
 export const THEME_TOKENS = [
@@ -42,12 +42,15 @@ export const THEME_TOKENS = [
 
 export type ThemeToken = (typeof THEME_TOKENS)[number];
 export type ThemeTokens = Record<ThemeToken, string>;
+export type ThemeVisualStyle = "modern" | "skeuomorphic";
 
 export interface Theme {
   id: string;
   name: string;
   /** Drives `color-scheme`, native scrollbars, and form control rendering. */
   appearance: "dark" | "light";
+  /** Selects a trusted, bundled structural treatment. */
+  visualStyle: ThemeVisualStyle;
   /** Built-in themes cannot be edited or deleted, only duplicated. */
   builtin?: boolean;
   tokens: ThemeTokens;
@@ -164,12 +167,80 @@ const emerald: ThemeTokens = {
   "quote-bar": "#00b884",
 };
 
+const throwbackGraphite: ThemeTokens = {
+  "bg-app": "#292929",
+  "bg-panel": "#3b3b3b",
+  "bg-elevated": "#474747",
+  "bg-hover": "#555555",
+  "bg-active": "#626262",
+  "bg-input": "#151515",
+  "bg-overlay": "rgba(8, 8, 8, 0.78)",
+  border: "#202020",
+  "border-strong": "#777777",
+  "border-focus": "#a2d422",
+  fg: "#f2f2f2",
+  "fg-muted": "#c7c7c7",
+  "fg-subtle": "#969696",
+  "fg-inverted": "#151515",
+  accent: "#a2d422",
+  "accent-hover": "#b6e53c",
+  "accent-fg": "#172000",
+  "accent-soft": "rgba(162, 212, 34, 0.20)",
+  "bubble-in-bg": "#505050",
+  "bubble-in-fg": "#f4f4f4",
+  "bubble-out-bg": "#7da914",
+  "bubble-out-fg": "#101600",
+  "quote-bar": "#a2d422",
+  success: "#a2d422",
+  warning: "#efb43c",
+  danger: "#e85d54",
+  info: "#82b9e6",
+  "shadow-sm": "0 1px 2px rgba(0, 0, 0, 0.62)",
+  "shadow-md": "0 5px 16px rgba(0, 0, 0, 0.64)",
+  "shadow-lg": "0 18px 50px rgba(0, 0, 0, 0.72)",
+};
+
+const classicMessages: ThemeTokens = {
+  "bg-app": "#ccd3df",
+  "bg-panel": "#e8edf4",
+  "bg-elevated": "#f6f7f9",
+  "bg-hover": "#d8e0ec",
+  "bg-active": "#b8c9df",
+  "bg-input": "#ffffff",
+  "bg-overlay": "rgba(45, 54, 68, 0.58)",
+  border: "#9aa6b7",
+  "border-strong": "#687789",
+  "border-focus": "#315e96",
+  fg: "#17202b",
+  "fg-muted": "#4d5867",
+  "fg-subtle": "#707b8a",
+  "fg-inverted": "#ffffff",
+  accent: "#2d67a3",
+  "accent-hover": "#3e7ebf",
+  "accent-fg": "#ffffff",
+  "accent-soft": "rgba(55, 105, 164, 0.20)",
+  "bubble-in-bg": "#f4f4f1",
+  "bubble-in-fg": "#202020",
+  "bubble-out-bg": "#7fb1e6",
+  "bubble-out-fg": "#10243b",
+  "quote-bar": "#356da8",
+  success: "#4f8a22",
+  warning: "#a56600",
+  danger: "#b73131",
+  info: "#2d67a3",
+  "shadow-sm": "0 1px 2px rgba(35, 48, 65, 0.28)",
+  "shadow-md": "0 5px 16px rgba(35, 48, 65, 0.30)",
+  "shadow-lg": "0 18px 48px rgba(35, 48, 65, 0.38)",
+};
+
 export const BUILTIN_THEMES: readonly Theme[] = [
-  { id: "vercel-dark", name: "Vercel Dark", appearance: "dark", builtin: true, tokens: vercelDark },
-  { id: "vercel-light", name: "Vercel Light", appearance: "light", builtin: true, tokens: vercelLight },
-  { id: "vercel-mono", name: "Vercel Mono", appearance: "dark", builtin: true, tokens: vercelMono },
-  { id: "midnight", name: "Midnight", appearance: "dark", builtin: true, tokens: midnight },
-  { id: "emerald", name: "Emerald", appearance: "dark", builtin: true, tokens: emerald },
+  { id: "throwback-graphite", name: "Throwback Graphite", appearance: "dark", visualStyle: "skeuomorphic", builtin: true, tokens: throwbackGraphite },
+  { id: "classic-messages", name: "Classic Messages", appearance: "light", visualStyle: "skeuomorphic", builtin: true, tokens: classicMessages },
+  { id: "vercel-dark", name: "Vercel Dark", appearance: "dark", visualStyle: "modern", builtin: true, tokens: vercelDark },
+  { id: "vercel-light", name: "Vercel Light", appearance: "light", visualStyle: "modern", builtin: true, tokens: vercelLight },
+  { id: "vercel-mono", name: "Vercel Mono", appearance: "dark", visualStyle: "modern", builtin: true, tokens: vercelMono },
+  { id: "midnight", name: "Midnight", appearance: "dark", visualStyle: "modern", builtin: true, tokens: midnight },
+  { id: "emerald", name: "Emerald", appearance: "dark", visualStyle: "modern", builtin: true, tokens: emerald },
 ];
 
 export const DEFAULT_THEME_ID = "vercel-dark";
@@ -184,6 +255,7 @@ export function applyTheme(theme: Theme, root: HTMLElement = document.documentEl
     root.style.setProperty(`--${token}`, theme.tokens[token]);
   }
   root.dataset.appearance = theme.appearance;
+  root.dataset.themeStyle = theme.visualStyle;
   root.style.colorScheme = theme.appearance;
 }
 
@@ -212,6 +284,7 @@ export function normalizeTheme(value: unknown, base: Theme = defaultTheme()): Th
     id: id.slice(0, 80),
     name,
     appearance: candidate.appearance === "light" ? "light" : "dark",
+    visualStyle: candidate.visualStyle === "skeuomorphic" ? "skeuomorphic" : "modern",
     tokens,
   };
 }
@@ -244,13 +317,20 @@ export function cloneTheme(theme: Theme, name: string): Theme {
     id: `custom-${hash(`${name}${JSON.stringify(theme.tokens)}${name.length}`)}`,
     name: name.slice(0, 60),
     appearance: theme.appearance,
+    visualStyle: theme.visualStyle,
     tokens: { ...theme.tokens },
   };
 }
 
 export function exportTheme(theme: Theme): string {
   return JSON.stringify(
-    { id: theme.id, name: theme.name, appearance: theme.appearance, tokens: theme.tokens },
+    {
+      id: theme.id,
+      name: theme.name,
+      appearance: theme.appearance,
+      visualStyle: theme.visualStyle,
+      tokens: theme.tokens,
+    },
     null,
     2,
   );
