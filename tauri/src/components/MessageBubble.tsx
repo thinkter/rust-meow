@@ -20,6 +20,7 @@ import {
   RefreshCcw,
   SmilePlus,
   TriangleAlert,
+  UserRoundArrowLeft,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import {
@@ -222,12 +223,12 @@ export function MessageBubble(props: MessageBubbleProps) {
         </IconButton>
         <Show when={groupChat() && !props.message.fromMe && !props.message.revoked && props.message.senderId}>
           <IconButton label="Reply privately" onClick={() => void actions.replyPrivately(props.message, props.chatId)}>
-            <ThemeIcon icon={MessageSquareReply} name="reply" size={15} />
+            <ThemeIcon icon={UserRoundArrowLeft} name="reply-private" size={15} />
           </IconButton>
         </Show>
         <Show when={props.message.content && !props.message.revoked}>
           <IconButton label="Forward" onClick={() => actions.startForward(props.message.id, props.chatId)}>
-            <ThemeIcon icon={Forward} name="reply" size={15} />
+            <ThemeIcon icon={Forward} name="forward" size={15} />
           </IconButton>
         </Show>
         <Show when={

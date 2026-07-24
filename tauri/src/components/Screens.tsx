@@ -243,7 +243,7 @@ export function ForwardDialog(props: { model: AppModel }) {
       <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="forward-title">
         <div class="dialog-card forward-dialog">
           <div class="forward-dialog-heading">
-            <ThemeIcon icon={Forward} name="reply" size={21} />
+            <ThemeIcon icon={Forward} name="forward" size={21} />
             <h2 id="forward-title">Forward message</h2>
           </div>
           <label class="forward-search">

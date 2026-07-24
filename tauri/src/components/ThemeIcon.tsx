@@ -12,6 +12,7 @@ export type ThemeIconName =
   | "copy"
   | "download"
   | "edit"
+  | "forward"
   | "globe"
   | "maximize"
   | "messages"
@@ -21,6 +22,7 @@ export type ThemeIconName =
   | "pin"
   | "poll"
   | "reply"
+  | "reply-private"
   | "search"
   | "send"
   | "settings"
@@ -185,6 +187,16 @@ function Glyph(props: { name: ThemeIconName }): JSX.Element {
       </Match>
       <Match when={props.name === "reply"}>
         <path d="M10 4 1.5 11.5 10 19v-4.3c6.1 0 9.3 1.7 12.5 5.3-.9-7.2-4.6-11.3-12.5-11.3z" />
+      </Match>
+      <Match when={props.name === "reply-private"}>
+        <circle cx="15.8" cy="7.2" r="4.2" />
+        <path d="M9.3 19.8c.5-4.2 2.7-6.5 6.5-6.5 3.7 0 5.9 2.3 6.4 6.5z" />
+        <path d="M8.7 9.2 4.8 12h4v2H4.9l3.8 2.8L7.4 19 0 13l7.4-6z" />
+        <path class="icon-highlight" d="M13.3 5.8a3.1 3.1 0 0 1 4.8-1.1 3.5 3.5 0 0 0-5.2 2z" />
+      </Match>
+      <Match when={props.name === "forward"}>
+        <path d="m14 4 8.5 7.5L14 19v-4.3C7.9 14.7 4.7 16.4 1.5 20 2.4 12.8 6.1 8.7 14 8.7z" />
+        <path class="icon-highlight" d="m15.8 7 4.8 4.3-1.1.2-3.7-2.7z" />
       </Match>
       <Match when={props.name === "edit"}>
         <path d="m3 16 13-13a2.8 2.8 0 0 1 4 4L7 20l-5 1z" />
