@@ -2924,6 +2924,7 @@ impl RustMeow {
                 text: wire_text,
                 reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
                 mentioned_jids,
+                reply_to_chat_id: String::new(),
             }),
             PendingRequest::SendText {
                 chat_id: self.store.selected_chat_id.clone().unwrap_or_default(),
@@ -3033,6 +3034,7 @@ impl RustMeow {
                 image_path: path.to_string_lossy().into_owned(),
                 caption,
                 reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
+                reply_to_chat_id: String::new(),
             }),
             PendingRequest::SendImage {
                 chat_id: self.store.selected_chat_id.clone().unwrap_or_default(),
@@ -3059,6 +3061,7 @@ impl RustMeow {
                 chat_id: chat_id.clone(),
                 webp_data: prepared.webp_data,
                 reply_to_message_id: reply_to_message_id.clone().unwrap_or_default(),
+                reply_to_chat_id: String::new(),
             }),
             PendingRequest::SendSticker,
         );

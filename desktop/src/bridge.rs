@@ -15,7 +15,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -574,6 +574,45 @@ fn fake_loop(
                             link_preview: None,
                         })),
                         reply_to_message_id: request.reply_to_message_id,
+                        reply_to_chat_id: request.reply_to_chat_id,
+                        ..Default::default()
+                    }),
+                })
+            }
+            Some(rpc_request::Request::ForwardMessage(request)) => {
+                rpc_response::Result::ForwardMessage(proto::ForwardMessageResponse {
+                    message: Some(proto::Message {
+                        id: request.client_message_id,
+                        chat_id: request.target_chat_id,
+                        sender_id: "me@s.whatsapp.net".into(),
+                        sender_name: "You".into(),
+                        from_me: true,
+                        timestamp_ms: 1_900_000_000_000,
+                        status: proto::MessageStatus::Sent as i32,
+                        forwarding_score: 1,
+                        content: Some(proto::message::Content::Text(proto::TextContent {
+                            text: format!("Forwarded message {}", request.message_id),
+                            link_preview: None,
+                        })),
+                        ..Default::default()
+                    }),
+                })
+            }
+            Some(rpc_request::Request::EditMessage(request)) => {
+                rpc_response::Result::EditMessage(proto::EditMessageResponse {
+                    message: Some(proto::Message {
+                        id: request.message_id,
+                        chat_id: request.chat_id,
+                        sender_id: "me@s.whatsapp.net".into(),
+                        sender_name: "You".into(),
+                        from_me: true,
+                        timestamp_ms: 1_900_000_000_000,
+                        status: proto::MessageStatus::Sent as i32,
+                        edited: true,
+                        content: Some(proto::message::Content::Text(proto::TextContent {
+                            text: request.text,
+                            link_preview: None,
+                        })),
                         ..Default::default()
                     }),
                 })
@@ -597,6 +636,7 @@ fn fake_loop(
                             ..Default::default()
                         })),
                         reply_to_message_id: request.reply_to_message_id,
+                        reply_to_chat_id: request.reply_to_chat_id,
                         ..Default::default()
                     }),
                 })
@@ -619,6 +659,7 @@ fn fake_loop(
                             ..Default::default()
                         })),
                         reply_to_message_id: request.reply_to_message_id,
+                        reply_to_chat_id: request.reply_to_chat_id,
                         ..Default::default()
                     }),
                 })
@@ -677,6 +718,7 @@ fn fake_loop(
                                 ..Default::default()
                             })),
                             reply_to_message_id: request.reply_to_message_id,
+                            reply_to_chat_id: request.reply_to_chat_id,
                             ..Default::default()
                         }),
                     },
@@ -717,6 +759,7 @@ fn fake_loop(
                             name,
                             vote_count: 0,
                             selected_by_me: false,
+                            voters: Vec::new(),
                         })
                         .collect(),
                     selectable_options_count: request.selectable_options_count,
@@ -738,6 +781,12 @@ fn fake_loop(
                             name,
                             vote_count: 1,
                             selected_by_me: true,
+                            voters: vec![proto::PollVoter {
+                                user_id: "me@s.whatsapp.net".into(),
+                                display_name: "You".into(),
+                                from_me: true,
+                                ..Default::default()
+                            }],
                         })
                         .collect(),
                     selectable_options_count: 1,
@@ -872,6 +921,7 @@ fn fake_send_attachment(request: proto::SendAttachmentRequest) -> rpc_response::
                 },
             )),
             reply_to_message_id: request.reply_to_message_id,
+            reply_to_chat_id: request.reply_to_chat_id,
             ..Default::default()
         }),
     })
@@ -1135,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn fake_attachment_responses_match_v15_contract() {
+    fn fake_attachment_responses_match_v16_contract() {
         let request = |kind, caption: &str, voice_note| proto::SendAttachmentRequest {
             client_message_id: "request-id".into(),
             chat_id: "chat-id".into(),
@@ -1143,6 +1193,7 @@ mod tests {
             kind: kind as i32,
             caption: caption.into(),
             reply_to_message_id: "reply-id".into(),
+            reply_to_chat_id: "source-chat-id".into(),
             voice_note,
         };
         let rpc_response::Result::SendAttachment(response) =
@@ -1159,6 +1210,7 @@ mod tests {
         assert!(attachment.voice_note);
         assert!(attachment.local_path.is_empty());
         assert_eq!(message.reply_to_message_id, "reply-id");
+        assert_eq!(message.reply_to_chat_id, "source-chat-id");
 
         assert!(matches!(
             fake_send_attachment(request(proto::AttachmentKind::Unspecified, "", false)),
