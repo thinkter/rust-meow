@@ -1608,6 +1608,12 @@ html[data-appearance="light"] .message-sender {
   white-space: nowrap;
 }
 
+.link-preview-meta .link-preview-url {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .message-meta {
   display: flex;
   min-height: calc(15px * var(--scale));
@@ -2359,6 +2365,31 @@ html[data-appearance="light"] .message-sender {
   margin-top: 3px;
   color: var(--fg-subtle);
   font-size: 12px;
+}
+
+.setting-select {
+  width: min(calc(230px * var(--scale)), 48%);
+  min-width: calc(150px * var(--scale));
+  height: calc(34px * var(--scale));
+  padding: 0 calc(30px * var(--scale)) 0 calc(10px * var(--scale));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--fg);
+  font: inherit;
+  text-overflow: ellipsis;
+}
+
+.setting-select:focus-visible {
+  border-color: var(--border-focus);
+  outline: 2px solid color-mix(in srgb, var(--border-focus) 30%, transparent);
+  outline-offset: 1px;
+}
+
+.setting-select:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .segmented-control {

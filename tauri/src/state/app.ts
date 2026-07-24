@@ -1,6 +1,6 @@
 import { batch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
-import { bridge, normalizeBridgeError, openFile } from "../lib/bridge";
+import { bridge, normalizeBridgeError, openFile, openUrl, revealMediaPath } from "../lib/bridge";
 import { BoundedSet, boundWindowAround } from "../lib/performance";
 import { ParticipantAvatarQueue } from "../lib/participant-avatar-queue";
 import { clearMergedPollVotes } from "../lib/chat-merge";
@@ -1415,6 +1415,26 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     }
   }
 
+  async function revealMedia(sourcePath: string) {
+    if (!sourcePath) {
+      toast("That file has not been downloaded yet");
+      return;
+    }
+    try {
+      await revealMediaPath(sourcePath, preferences.linuxFileManagerApp);
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+    }
+  }
+
+  async function openExternalLink(url: string) {
+    try {
+      await openUrl(url, preferences.linuxBrowserApp);
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+    }
+  }
+
   async function setNotificationsEnabled(enabled: boolean) {
     if (!enabled) {
       prefActions.update("notificationsEnabled", false);
@@ -2043,6 +2063,8 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       loadStickers,
       sendStickerFromPack,
       saveMediaAs,
+      revealMedia,
+      openExternalLink,
       setNotificationsEnabled,
       showChatInfo,
       ensureMentionDirectory,

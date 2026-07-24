@@ -9,6 +9,7 @@ import {
   FileText,
   FileVideo,
   FolderDown,
+  FolderOpen,
   ListChecks,
   MapPin,
   MessageSquareReply,
@@ -19,16 +20,16 @@ import {
   TriangleAlert,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
-import type {
-  AttachmentContent,
-  ImageContent,
-  LinkPreview,
-  Message,
-  Reaction,
-  TextContent,
-  PollContent,
+import {
+  MessageStatus,
+  type AttachmentContent,
+  type ImageContent,
+  type LinkPreview,
+  type Message,
+  type PollContent,
+  type Reaction,
+  type TextContent,
 } from "../lib/types";
-import { MessageStatus } from "../lib/types";
 import {
   formatBytes,
   formatDuration,
@@ -37,16 +38,13 @@ import {
   messageText,
   safeHttpUrl,
 } from "../lib/format";
-import { assetUrl, openUrl } from "../lib/bridge";
+import { assetUrl } from "../lib/bridge";
 import { parsePollFallback } from "../lib/unsupported";
 import { EmojiPicker } from "./EmojiPicker";
 import { IconButton, Spinner } from "./Primitives";
 
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 const RECENT_REACTION_KEY = "rust-meow-recent-emoji";
-/** Past this many characters a bare URL gets truncated in the middle — G13. */
-const URL_TRUNCATE_LENGTH = 64;
-
 interface MessageBubbleProps {
   message: Message;
   model: AppModel;
@@ -123,9 +121,7 @@ export function MessageBubble(props: MessageBubbleProps) {
       <Show when={!props.message.fromMe && props.message.senderName && !props.suppressSender}>
         <div class="message-sender">
           <span>{props.message.senderName}</span>
-          <Show when={props.message.senderPhoneNumber}>
-            <span>· {props.message.senderPhoneNumber}</span>
-          </Show>
+          <Show when={props.message.senderPhoneNumber}><span>· {props.message.senderPhoneNumber}</span></Show>
         </div>
       </Show>
 
@@ -196,9 +192,14 @@ export function MessageBubble(props: MessageBubbleProps) {
         </Show>
         <Show when={savableMedia()}>
           {(media) => (
-            <IconButton label="Save to folder" onClick={() => void actions.saveMediaAs(media().path, media().name)}>
-              <FolderDown size={15} />
-            </IconButton>
+            <>
+              <IconButton label="Show in file manager" onClick={() => void actions.revealMedia(media().path)}>
+                <FolderOpen size={15} />
+              </IconButton>
+              <IconButton label="Save to folder" onClick={() => void actions.saveMediaAs(media().path, media().name)}>
+                <FolderDown size={15} />
+              </IconButton>
+            </>
           )}
         </Show>
       </div>
@@ -254,11 +255,12 @@ function MessageContent(props: { message: Message; model: AppModel; chatId: stri
         {(value) => (
           <>
             <Show when={"text" in value()}>
-              <TextMessage content={(value() as { text: TextContent }).text} />
+              <TextMessage
+                content={(value() as { text: TextContent }).text}
+                onOpenLink={props.model.actions.openExternalLink}
+              />
             </Show>
-            <Show when={"image" in value()}>
-              <ImageMessage message={props.message} model={props.model} chatId={props.chatId} />
-            </Show>
+            <Show when={"image" in value()}><ImageMessage message={props.message} model={props.model} chatId={props.chatId} /></Show>
             <Show when={"attachment" in value()}>
               <AttachmentMessage
                 message={props.message}
@@ -287,7 +289,11 @@ function MessageContent(props: { message: Message; model: AppModel; chatId: stri
                   safeHttpUrl(location.url) ||
                   `https://www.openstreetmap.org/?mlat=${encodeURIComponent(location.latitude)}&mlon=${encodeURIComponent(location.longitude)}`;
                 return (
-                  <button type="button" class="location-card" onClick={() => void openUrl(target)}>
+                  <button
+                    type="button"
+                    class="location-card"
+                    onClick={() => void props.model.actions.openExternalLink(target)}
+                  >
                     <span class="location-icon"><MapPin size={22} /></span>
                     <span class="location-meta">
                       <strong>{location.name || (location.live ? "Live location" : "Location")}</strong>
@@ -297,12 +303,8 @@ function MessageContent(props: { message: Message; model: AppModel; chatId: stri
                 );
               })()}
             </Show>
-            <Show when={"poll" in value()}>
-              <PollMessage message={props.message} poll={(value() as { poll: PollContent }).poll} model={props.model} chatId={props.chatId} />
-            </Show>
-            <Show when={"unsupported" in value()}>
-              <UnsupportedMessage content={(value() as { unsupported: { fallbackText: string; typeName: string } }).unsupported} />
-            </Show>
+            <Show when={"poll" in value()}><PollMessage message={props.message} poll={(value() as { poll: PollContent }).poll} model={props.model} chatId={props.chatId} /></Show>
+            <Show when={"unsupported" in value()}><UnsupportedMessage content={(value() as { unsupported: { fallbackText: string; typeName: string } }).unsupported} /></Show>
           </>
         )}
       </Show>
@@ -363,18 +365,22 @@ function UnsupportedMessage(props: { content: { fallbackText: string; typeName: 
   );
 }
 
-function TextMessage(props: { content: TextContent }) {
+function TextMessage(props: { content: TextContent; onOpenLink: (url: string) => Promise<void> }) {
   return (
     <>
       <Show when={props.content.linkPreview}>
-        {(preview) => <LinkPreviewCard preview={preview()} />}
+        {(preview) => (
+          <LinkPreviewCard preview={preview()} onOpenLink={props.onOpenLink} />
+        )}
       </Show>
-      <p class="message-text"><LinkifiedText text={props.content.text} /></p>
+      <p class="message-text">
+        <LinkifiedText text={props.content.text} onOpenLink={props.onOpenLink} />
+      </p>
     </>
   );
 }
 
-function LinkifiedText(props: { text: string }) {
+function LinkifiedText(props: { text: string; onOpenLink: (url: string) => Promise<void> }) {
   const tokens = () => props.text.split(/(https?:\/\/[^\s]+)/gi);
   return (
     <For each={tokens()}>
@@ -384,8 +390,15 @@ function LinkifiedText(props: { text: string }) {
         const suffix = url ? token.slice(visibleUrl.length) : "";
         return url ? (
           <>
-            <a href={url} title={visibleUrl} onClick={(event) => { event.preventDefault(); void openUrl(url); }}>
-              {truncateMiddle(visibleUrl, URL_TRUNCATE_LENGTH)}
+            <a
+              href={url}
+              title={visibleUrl}
+              onClick={(event) => {
+                event.preventDefault();
+                void props.onOpenLink(url);
+              }}
+            >
+              {visibleUrl}
             </a>
             {suffix}
           </>
@@ -395,7 +408,10 @@ function LinkifiedText(props: { text: string }) {
   );
 }
 
-function LinkPreviewCard(props: { preview: LinkPreview }) {
+function LinkPreviewCard(props: {
+  preview: LinkPreview;
+  onOpenLink: (url: string) => Promise<void>;
+}) {
   const target = () => safeHttpUrl(props.preview.url);
   const thumbnail = () => jpegDataUrl(props.preview.jpegThumbnail);
   return (
@@ -403,13 +419,16 @@ function LinkPreviewCard(props: { preview: LinkPreview }) {
       type="button"
       class="link-preview"
       disabled={!target()}
-      onClick={() => { const url = target(); if (url) void openUrl(url); }}
+      onClick={() => {
+        const url = target();
+        if (url) void props.onOpenLink(url);
+      }}
     >
       <Show when={thumbnail()}>{(source) => <img src={source()} alt="" />}</Show>
       <span class="link-preview-meta">
         <strong>{props.preview.title || props.preview.url}</strong>
         <span>{props.preview.description}</span>
-        <span>{linkHost(props.preview.url)}</span>
+        <span class="link-preview-url" title={props.preview.url}>{props.preview.url}</span>
       </span>
     </button>
   );
@@ -583,30 +602,12 @@ function jpegDataUrl(bytes: number[]): string | undefined {
   return `data:image/jpeg;base64,${btoa(binary)}`;
 }
 
-function linkHost(value: string): string {
-  try {
-    return new URL(value).host;
-  } catch {
-    return value;
-  }
-}
-
 function attachmentLabel(attachment: AttachmentContent): string {
   if (attachment.voiceNote) return "Voice message";
   if (attachment.kind === "video" && attachment.animated) return "GIF";
   if (attachment.kind === "video") return "Video";
   if (attachment.kind === "audio") return "Audio";
   return "Document";
-}
-
-/** Keeps the start (scheme/host, usually the meaningful part) and a short
- * tail, so a truncated link is still recognisable — G13. `href`/the click
- * target always carry the untruncated URL; only the label is shortened. */
-function truncateMiddle(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const tailLength = 6;
-  const headLength = Math.max(1, max - tailLength - 1);
-  return `${text.slice(0, headLength)}…${text.slice(text.length - tailLength)}`;
 }
 
 function imageAspectStyle(width: number, height: number, sticker: boolean, uiScale: number) {

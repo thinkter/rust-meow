@@ -25,6 +25,10 @@ export interface Preferences {
   sidebarCollapsed: boolean;
   /** Absolute directory used by "Save to…"; empty means ask every time. */
   downloadDir: string;
+  /** Linux desktop-file id used for HTTP(S) links; empty uses xdg-open. */
+  linuxBrowserApp: string;
+  /** Linux desktop-file id used to reveal downloads; empty uses the system default. */
+  linuxFileManagerApp: string;
   showTabBar: boolean;
   splitView: boolean;
   /** Send a plain Enter instead of inserting a newline. */
@@ -45,6 +49,8 @@ const defaults: Preferences = {
   memberPanelOpen: true,
   sidebarCollapsed: false,
   downloadDir: "",
+  linuxBrowserApp: "",
+  linuxFileManagerApp: "",
   showTabBar: true,
   splitView: false,
   enterToSend: true,
@@ -90,6 +96,12 @@ function sanitize(stored: Partial<Preferences>): Preferences {
     memberPanelOpen: stored.memberPanelOpen ?? defaults.memberPanelOpen,
     sidebarCollapsed: stored.sidebarCollapsed ?? defaults.sidebarCollapsed,
     downloadDir: typeof stored.downloadDir === "string" ? stored.downloadDir : defaults.downloadDir,
+    linuxBrowserApp:
+      typeof stored.linuxBrowserApp === "string" ? stored.linuxBrowserApp : defaults.linuxBrowserApp,
+    linuxFileManagerApp:
+      typeof stored.linuxFileManagerApp === "string"
+        ? stored.linuxFileManagerApp
+        : defaults.linuxFileManagerApp,
     showTabBar: stored.showTabBar ?? defaults.showTabBar,
     splitView: stored.splitView ?? defaults.splitView,
     enterToSend: stored.enterToSend ?? defaults.enterToSend,

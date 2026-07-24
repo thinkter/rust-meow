@@ -13,6 +13,7 @@ mod sticker;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    process::{Child, Command},
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -212,6 +213,37 @@ struct CommandError {
     code: String,
     message: String,
     retryable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopApplication {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopApplications {
+    supported: bool,
+    browsers: Vec<DesktopApplication>,
+    file_managers: Vec<DesktopApplication>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+struct LinuxDesktopApplication {
+    option: DesktopApplication,
+    browser: bool,
+    file_manager: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct IsolatedXdgConfig {
+    root: PathBuf,
+    config_home: PathBuf,
+    data_home: PathBuf,
 }
 
 impl CommandError {
@@ -694,6 +726,380 @@ fn configure_asset_protocol_scope(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn linux_application_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+        directories.push(PathBuf::from(data_home).join("applications"));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        directories.push(PathBuf::from(home).join(".local/share/applications"));
+    }
+    let data_dirs =
+        std::env::var_os("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    directories.extend(std::env::split_paths(&data_dirs).map(|path| path.join("applications")));
+    directories
+}
+
+#[cfg(target_os = "linux")]
+fn collect_desktop_files(root: &Path, relative: &Path, files: &mut Vec<(String, PathBuf)>) {
+    let directory = root.join(relative);
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_desktop_files(root, &relative.join(entry.file_name()), files);
+            continue;
+        }
+        if !file_type.is_file()
+            || path.extension().and_then(|value| value.to_str()) != Some("desktop")
+        {
+            continue;
+        }
+        let id = relative
+            .join(entry.file_name())
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "-");
+        files.push((id, path));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_desktop_application(id: String, contents: &str) -> Option<LinuxDesktopApplication> {
+    let mut in_desktop_entry = false;
+    let mut name = "";
+    let mut kind = "";
+    let mut exec = "";
+    let mut mime_types = "";
+    let mut categories = "";
+    let mut hidden = false;
+
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line == "[Desktop Entry]" {
+            in_desktop_entry = true;
+            continue;
+        }
+        if line.starts_with('[') {
+            if in_desktop_entry {
+                break;
+            }
+            continue;
+        }
+        if !in_desktop_entry || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "Name" => name = value.trim(),
+            "Type" => kind = value.trim(),
+            "Exec" => exec = value.trim(),
+            "MimeType" => mime_types = value,
+            "Categories" => categories = value,
+            "Hidden" => hidden = value.eq_ignore_ascii_case("true"),
+            _ => {}
+        }
+    }
+
+    if hidden || kind != "Application" || name.is_empty() || exec.is_empty() {
+        return None;
+    }
+    let handles = |haystack: &str, needle: &str| {
+        haystack
+            .split(';')
+            .any(|value| value.trim().eq_ignore_ascii_case(needle))
+    };
+    let browser = handles(mime_types, "x-scheme-handler/http")
+        || handles(mime_types, "x-scheme-handler/https")
+        || handles(categories, "WebBrowser");
+    let file_manager = handles(mime_types, "inode/directory") || handles(categories, "FileManager");
+    if !browser && !file_manager {
+        return None;
+    }
+
+    Some(LinuxDesktopApplication {
+        option: DesktopApplication {
+            id,
+            name: name.to_owned(),
+        },
+        browser,
+        file_manager,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_desktop_applications() -> Vec<LinuxDesktopApplication> {
+    let mut applications = HashMap::<String, LinuxDesktopApplication>::new();
+    for directory in linux_application_directories() {
+        let mut files = Vec::new();
+        collect_desktop_files(&directory, Path::new(""), &mut files);
+        for (id, desktop_file) in files {
+            if applications.contains_key(&id) {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&desktop_file) else {
+                continue;
+            };
+            if let Some(application) = parse_linux_desktop_application(id.clone(), &contents) {
+                applications.insert(id, application);
+            }
+        }
+    }
+    let mut applications = applications.into_values().collect::<Vec<_>>();
+    applications.sort_by(|left, right| {
+        left.option
+            .name
+            .to_lowercase()
+            .cmp(&right.option.name.to_lowercase())
+            .then_with(|| left.option.id.cmp(&right.option.id))
+    });
+    applications
+}
+
+#[cfg(target_os = "linux")]
+fn selected_linux_application(
+    application_id: &str,
+    browser: bool,
+) -> Result<LinuxDesktopApplication, CommandError> {
+    linux_desktop_applications()
+        .into_iter()
+        .find(|application| {
+            application.option.id == application_id
+                && if browser {
+                    application.browser
+                } else {
+                    application.file_manager
+                }
+        })
+        .ok_or_else(|| {
+            CommandError::invalid_argument(format!(
+                "the selected {} is no longer installed",
+                if browser { "browser" } else { "file manager" }
+            ))
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn niri_window_ids(desktop_id: &str) -> Vec<String> {
+    let id = desktop_id
+        .strip_suffix(".desktop")
+        .unwrap_or(desktop_id)
+        .to_lowercase();
+    let mut ids = vec![id.clone()];
+    if let Some(short_id) = id.rsplit('.').next()
+        && short_id != id
+    {
+        ids.push(short_id.to_owned());
+    }
+    ids
+}
+
+#[cfg(target_os = "linux")]
+fn focus_niri_application(desktop_id: &str) {
+    if !std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .split(':')
+        .any(|desktop| desktop.eq_ignore_ascii_case("niri"))
+    {
+        return;
+    }
+    let expected_ids = niri_window_ids(desktop_id);
+    let Ok(output) = Command::new("niri").args(["msg", "-j", "windows"]).output() else {
+        return;
+    };
+    let Ok(windows) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) else {
+        return;
+    };
+    let selected = windows
+        .into_iter()
+        .filter_map(|window| {
+            let id = window.get("id")?.as_u64()?;
+            let app_id = window.get("app_id")?.as_str()?.to_lowercase();
+            expected_ids
+                .iter()
+                .any(|expected| expected == &app_id)
+                .then_some(id)
+        })
+        .max();
+    if let Some(id) = selected {
+        let _ = Command::new("niri")
+            .args(["msg", "action", "focus-window", "--id", &id.to_string()])
+            .status();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reap_child(mut child: Child, cleanup: Option<PathBuf>, desktop_id: Option<String>) {
+    let _ = std::thread::Builder::new()
+        .name("rust-meow-desktop-launcher".into())
+        .spawn(move || {
+            if let Some(desktop_id) = desktop_id {
+                std::thread::sleep(Duration::from_millis(500));
+                focus_niri_application(&desktop_id);
+            }
+            let _ = child.wait();
+            if let Some(cleanup) = cleanup {
+                let _ = std::fs::remove_dir_all(cleanup);
+            }
+        });
+}
+
+#[cfg(target_os = "linux")]
+fn isolated_xdg_config(
+    application_id: &str,
+    browser: bool,
+) -> Result<IsolatedXdgConfig, CommandError> {
+    if !application_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(CommandError::invalid_argument(
+            "the selected desktop application has an invalid id",
+        ));
+    }
+    let root = std::env::temp_dir().join(format!("rust-meow-xdg-{}", uuid::Uuid::new_v4()));
+    let config_home = root.join("config");
+    let data_home = root.join("data");
+    let applications = data_home.join("applications");
+    std::fs::create_dir_all(&applications)
+        .map_err(|error| CommandError::open_failed(format!("create XDG config: {error}")))?;
+    const WRAPPER_ID: &str = "rust-meow-selected.desktop";
+    let associations = if browser {
+        format!(
+            "[Default Applications]\nx-scheme-handler/http={WRAPPER_ID};\nx-scheme-handler/https={WRAPPER_ID};\n"
+        )
+    } else {
+        format!("[Default Applications]\ninode/directory={WRAPPER_ID};\n")
+    };
+    let mime_types = if browser {
+        "x-scheme-handler/http;x-scheme-handler/https;"
+    } else {
+        "inode/directory;"
+    };
+    let argument = if browser { "%u" } else { "%f" };
+    let wrapper = format!(
+        "[Desktop Entry]\nType=Application\nName=Rust Meow selected handler\nNoDisplay=true\nExec=env --unset=XDG_CONFIG_HOME --unset=XDG_DATA_HOME gtk-launch {application_id} {argument}\nMimeType={mime_types}\n"
+    );
+    std::fs::create_dir(&config_home)
+        .and_then(|()| {
+            std::fs::write(config_home.join("mimeapps.list"), associations)?;
+            std::fs::write(applications.join(WRAPPER_ID), wrapper)
+        })
+        .map_err(|error| {
+            let _ = std::fs::remove_dir_all(&root);
+            CommandError::open_failed(format!("write XDG config: {error}"))
+        })?;
+    Ok(IsolatedXdgConfig {
+        root,
+        config_home,
+        data_home,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn launch_linux_application(
+    application_id: &str,
+    argument: &str,
+    browser: bool,
+) -> Result<(), CommandError> {
+    let application = if application_id.is_empty() {
+        None
+    } else {
+        Some(selected_linux_application(application_id, browser)?)
+    };
+    let xdg_config = application
+        .as_ref()
+        .map(|_| isolated_xdg_config(application_id, browser))
+        .transpose()?;
+    let mut command = Command::new("xdg-open");
+    command.arg(argument);
+    if let Some(config) = &xdg_config {
+        command
+            .env("XDG_CONFIG_HOME", &config.config_home)
+            .env("XDG_DATA_HOME", &config.data_home);
+    }
+    let child = command.spawn().map_err(|error| {
+        if let Some(config) = &xdg_config {
+            let _ = std::fs::remove_dir_all(&config.root);
+        }
+        CommandError::open_failed(format!(
+            "launch {} with xdg-open: {error}",
+            if browser { "browser" } else { "file manager" }
+        ))
+    })?;
+    reap_child(
+        child,
+        xdg_config.map(|config| config.root),
+        application.map(|application| application.option.id),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn list_desktop_applications() -> DesktopApplications {
+    #[cfg(target_os = "linux")]
+    {
+        let applications = linux_desktop_applications();
+        DesktopApplications {
+            supported: true,
+            browsers: applications
+                .iter()
+                .filter(|application| application.browser)
+                .map(|application| application.option.clone())
+                .collect(),
+            file_managers: applications
+                .iter()
+                .filter(|application| application.file_manager)
+                .map(|application| application.option.clone())
+                .collect(),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    DesktopApplications {
+        supported: false,
+        browsers: Vec::new(),
+        file_managers: Vec::new(),
+    }
+}
+
+fn validated_external_url(url: &str) -> Result<String, CommandError> {
+    let parsed = tauri::Url::parse(url)
+        .map_err(|error| CommandError::invalid_argument(format!("invalid URL: {error}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(CommandError::invalid_argument(
+            "only HTTP and HTTPS links can be opened",
+        ));
+    }
+    Ok(parsed.into())
+}
+
+#[tauri::command]
+fn open_external_url(
+    app: tauri::AppHandle,
+    url: String,
+    application_id: String,
+) -> Result<(), CommandError> {
+    let url = validated_external_url(&url)?;
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        launch_linux_application(&application_id, &url, true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = application_id;
+        app.opener()
+            .open_url(url, None::<String>)
+            .map_err(|error| CommandError::open_failed(format!("open link: {error}")))
+    }
+}
+
 #[tauri::command]
 async fn subscribe_backend(
     state: tauri::State<'_, BridgeService>,
@@ -713,6 +1119,33 @@ fn open_media_path(app: tauri::AppHandle, path: String) -> Result<(), CommandErr
     app.opener()
         .open_path(target, None::<String>)
         .map_err(|error| CommandError::open_failed(format!("open media file: {error}")))
+}
+
+#[tauri::command]
+fn reveal_media_path(
+    app: tauri::AppHandle,
+    path: String,
+    application_id: String,
+) -> Result<(), CommandError> {
+    let target = canonical_media_file(&paths::data_dir(), Path::new(&path))?;
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        let directory = target.parent().ok_or_else(|| {
+            CommandError::invalid_argument("media file has no containing directory")
+        })?;
+        let directory = directory
+            .to_str()
+            .ok_or_else(|| CommandError::invalid_argument("media directory must be valid UTF-8"))?;
+        launch_linux_application(&application_id, directory, false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = application_id;
+        app.opener()
+            .reveal_item_in_dir(target)
+            .map_err(|error| CommandError::open_failed(format!("reveal media file: {error}")))
+    }
 }
 
 /// Reduce a caller-supplied name to a single safe path component.
@@ -1221,7 +1654,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             subscribe_backend,
+            list_desktop_applications,
+            open_external_url,
             open_media_path,
+            reveal_media_path,
             save_media_as,
             show_message_notification,
             take_notification_activations,
@@ -1431,6 +1867,92 @@ mod tests {
         assert_eq!(warning["sequence"], 0);
         assert_eq!(warning["type"], "problem");
         assert_eq!(warning["payload"]["code"], "event_sequence_gap");
+    }
+
+    #[test]
+    fn external_url_validation_accepts_only_web_links() {
+        assert_eq!(
+            validated_external_url("https://example.com/a/long/path?query=kept").unwrap(),
+            "https://example.com/a/long/path?query=kept"
+        );
+        assert!(validated_external_url("http://localhost:1420").is_ok());
+        for invalid in [
+            "file:///etc/passwd",
+            "mailto:someone@example.com",
+            "javascript:alert(1)",
+            "not a url",
+        ] {
+            let error = validated_external_url(invalid).unwrap_err();
+            assert_eq!(error.code, "invalid_argument");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn desktop_application_parser_classifies_linux_handlers() {
+        let browser = parse_linux_desktop_application(
+            "example-browser.desktop".into(),
+            "[Desktop Entry]\nType=Application\nName=Example Browser\nExec=example %u\nCategories=Network;WebBrowser;\n",
+        )
+        .unwrap();
+        assert!(browser.browser);
+        assert!(!browser.file_manager);
+        assert_eq!(browser.option.name, "Example Browser");
+
+        let file_manager = parse_linux_desktop_application(
+            "example-files.desktop".into(),
+            "[Desktop Entry]\nType=Application\nName=Example Files\nExec=example-files %U\nMimeType=inode/directory;\n",
+        )
+        .unwrap();
+        assert!(!file_manager.browser);
+        assert!(file_manager.file_manager);
+
+        assert!(
+            parse_linux_desktop_application(
+                "hidden.desktop".into(),
+                "[Desktop Entry]\nType=Application\nName=Hidden\nExec=hidden\nHidden=true\nCategories=WebBrowser;\n",
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn isolated_xdg_config_overrides_only_the_requested_handler() {
+        let browser = isolated_xdg_config("firefox.desktop", true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(browser.config_home.join("mimeapps.list")).unwrap(),
+            "[Default Applications]\nx-scheme-handler/http=rust-meow-selected.desktop;\nx-scheme-handler/https=rust-meow-selected.desktop;\n"
+        );
+        let browser_wrapper = std::fs::read_to_string(
+            browser
+                .data_home
+                .join("applications/rust-meow-selected.desktop"),
+        )
+        .unwrap();
+        assert!(browser_wrapper.contains("gtk-launch firefox.desktop %u"));
+        assert!(browser_wrapper.contains("--unset=XDG_CONFIG_HOME"));
+        std::fs::remove_dir_all(browser.root).unwrap();
+
+        let file_manager = isolated_xdg_config("thunar.desktop", false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(file_manager.config_home.join("mimeapps.list")).unwrap(),
+            "[Default Applications]\ninode/directory=rust-meow-selected.desktop;\n"
+        );
+        let file_manager_wrapper = std::fs::read_to_string(
+            file_manager
+                .data_home
+                .join("applications/rust-meow-selected.desktop"),
+        )
+        .unwrap();
+        assert!(file_manager_wrapper.contains("gtk-launch thunar.desktop %f"));
+        std::fs::remove_dir_all(file_manager.root).unwrap();
+
+        assert!(isolated_xdg_config("../not-safe.desktop", true).is_err());
+        assert_eq!(
+            niri_window_ids("org.gnome.Nautilus.desktop"),
+            ["org.gnome.nautilus", "nautilus"]
+        );
     }
 
     #[test]

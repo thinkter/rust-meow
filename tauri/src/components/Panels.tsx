@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, onMount, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import {
   Archive,
@@ -10,6 +10,7 @@ import {
   Clock3,
   Copy,
   Download,
+  Globe,
   HardDrive,
   LockKeyhole,
   LogOut,
@@ -25,11 +26,16 @@ import {
 import type { AppModel } from "../state/app";
 import { ChatKind } from "../lib/types";
 import { formatDay } from "../lib/format";
-import { normalizeBridgeError, openFile } from "../lib/bridge";
+import {
+  listDesktopApplications,
+  normalizeBridgeError,
+  openFile,
+  type DesktopApplications,
+} from "../lib/bridge";
 import { exportTheme, THEME_TOKENS, type Theme, type ThemeToken } from "../lib/theme";
 import { Avatar } from "./Avatar";
 import { ParticipantList } from "./ParticipantList";
-import { IconButton, Spinner } from "./Primitives";
+import { EmptyState, IconButton, Spinner } from "./Primitives";
 
 export function ChatInfoPanel(props: { model: AppModel }) {
   const { state, actions, preferences } = props.model;
@@ -55,7 +61,7 @@ export function ChatInfoPanel(props: { model: AppModel }) {
         </div>
 
         <Show when={state.chatInfoLoading}>
-          <div class="empty-state" style={{ height: "180px" }}><Spinner label="Loading details" /></div>
+          <EmptyState style={{ height: "180px" }}><Spinner label="Loading details" /></EmptyState>
         </Show>
         <Show when={state.chatInfoError}>
           <div class="info-section">
@@ -159,13 +165,21 @@ function Toggle(props: { checked: boolean; onChange: (value: boolean) => void; l
   );
 }
 
-type SettingsSection = "appearance" | "chats" | "notifications" | "storage" | "about";
+function SettingRow(props: { title: string; description: string; children: JSX.Element }) {
+  return <div class="setting-row">
+    <span class="setting-copy"><strong>{props.title}</strong><span>{props.description}</span></span>
+    {props.children}
+  </div>;
+}
+
+type SettingsSection = "appearance" | "chats" | "notifications" | "storage" | "desktop" | "about";
 
 const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string; icon: (props: { size?: number }) => JSX.Element }> = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "chats", label: "Chats", icon: MessagesSquare },
   { id: "notifications", label: "Notifications", icon: BellRing },
   { id: "storage", label: "Storage", icon: HardDrive },
+  { id: "desktop", label: "Desktop apps", icon: Globe },
   { id: "about", label: "About & privacy", icon: ShieldCheck },
 ];
 
@@ -230,8 +244,34 @@ export function SettingsPanel(props: { model: AppModel }) {
   const [importStatus, setImportStatus] = createSignal<{ kind: "error" | "success"; message: string } | null>(null);
   const [exportStatus, setExportStatus] = createSignal("");
   const [storageError, setStorageError] = createSignal("");
+  const [desktopApplications, setDesktopApplications] = createSignal<DesktopApplications | null>(null);
+  const [desktopApplicationsError, setDesktopApplicationsError] = createSignal("");
+  const linuxDesktopHost = navigator.userAgent.includes("Linux");
 
   const editingTheme = () => preferences.customThemes.find((theme) => theme.id === editingThemeId());
+  const visibleSettingsSections = () =>
+    SETTINGS_SECTIONS.filter((section) => section.id !== "desktop" || linuxDesktopHost);
+  const browserSelectionMissing = () =>
+    Boolean(
+      preferences.linuxBrowserApp &&
+      !desktopApplications()?.browsers.some((application) => application.id === preferences.linuxBrowserApp),
+    );
+  const fileManagerSelectionMissing = () =>
+    Boolean(
+      preferences.linuxFileManagerApp &&
+      !desktopApplications()?.fileManagers.some(
+        (application) => application.id === preferences.linuxFileManagerApp,
+      ),
+    );
+
+  onMount(() => {
+    if (!linuxDesktopHost) return;
+    void listDesktopApplications()
+      .then(setDesktopApplications)
+      .catch((error: unknown) => {
+        setDesktopApplicationsError(normalizeBridgeError(error).message);
+      });
+  });
 
   function selectSection(section: SettingsSection) {
     setActiveSection(section);
@@ -306,7 +346,7 @@ export function SettingsPanel(props: { model: AppModel }) {
       </header>
       <div class="right-panel-scroll">
         <nav class="settings-nav" aria-label="Settings sections">
-          <For each={SETTINGS_SECTIONS}>
+          <For each={visibleSettingsSections()}>
             {(section) => (
               <button
                 type="button"
@@ -420,8 +460,7 @@ export function SettingsPanel(props: { model: AppModel }) {
 
             <section class="settings-section">
               <h3>Interface</h3>
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Interface size</strong><span>{Math.round(preferences.uiScale * 100)}%</span></span>
+              <SettingRow title="Interface size" description={`${Math.round(preferences.uiScale * 100)}%`}>
                 <div class="segmented-control">
                   <For each={SCALE_STEPS}>
                     {(scale) => (
@@ -435,9 +474,8 @@ export function SettingsPanel(props: { model: AppModel }) {
                     )}
                   </For>
                 </div>
-              </div>
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Density</strong><span>Compact tightens spacing for more messages on screen</span></span>
+              </SettingRow>
+              <SettingRow title="Density" description="Compact tightens spacing for more messages on screen">
                 <div class="segmented-control">
                   <button
                     type="button"
@@ -454,54 +492,48 @@ export function SettingsPanel(props: { model: AppModel }) {
                     Compact
                   </button>
                 </div>
-              </div>
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Battery saver</strong><span>Reduce animation and off-screen rendering work</span></span>
+              </SettingRow>
+              <SettingRow title="Battery saver" description="Reduce animation and off-screen rendering work">
                 <Toggle
                   checked={preferences.batterySaver}
                   label="Battery saver"
                   onChange={(value) => prefActions.update("batterySaver", value)}
                 />
-              </div>
+              </SettingRow>
             </section>
           </Show>
 
           <Show when={activeSection() === "chats"}>
             <section class="settings-section">
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Send with Enter</strong><span>Enter sends the message; Shift+Enter inserts a new line</span></span>
+              <SettingRow title="Send with Enter" description="Enter sends the message; Shift+Enter inserts a new line">
                 <Toggle
                   checked={preferences.enterToSend}
                   label="Send with Enter"
                   onChange={(value) => prefActions.update("enterToSend", value)}
                 />
-              </div>
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Show chat list</strong><span>Keep the chat list docked beside the workspace</span></span>
+              </SettingRow>
+              <SettingRow title="Show chat list" description="Keep the chat list docked beside the workspace">
                 <Toggle
                   checked={!preferences.sidebarCollapsed}
                   label="Show chat list"
                   onChange={(value) => prefActions.update("sidebarCollapsed", !value)}
                 />
-              </div>
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Always show member list</strong><span>Keep the member list docked open for group chats</span></span>
+              </SettingRow>
+              <SettingRow title="Always show member list" description="Keep the member list docked open for group chats">
                 <Toggle
                   checked={preferences.memberPanelOpen}
                   label="Always show member list"
                   onChange={(value) => prefActions.update("memberPanelOpen", value)}
                 />
-              </div>
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Show tab bar</strong><span>Keep open chats as tabs in the title bar</span></span>
+              </SettingRow>
+              <SettingRow title="Show tab bar" description="Keep open chats as tabs in the title bar">
                 <Toggle
                   checked={preferences.showTabBar}
                   label="Show tab bar"
                   onChange={(value) => prefActions.update("showTabBar", value)}
                 />
-              </div>
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Split view</strong><span>Show two conversation panes side by side</span></span>
+              </SettingRow>
+              <SettingRow title="Split view" description="Show two conversation panes side by side">
                 <Toggle
                   checked={preferences.splitView}
                   label="Split view"
@@ -514,7 +546,7 @@ export function SettingsPanel(props: { model: AppModel }) {
                     prefActions.update("splitView", value);
                   }}
                 />
-              </div>
+              </SettingRow>
             </section>
           </Show>
 
@@ -535,24 +567,81 @@ export function SettingsPanel(props: { model: AppModel }) {
 
           <Show when={activeSection() === "notifications"}>
             <section class="settings-section">
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Desktop notifications</strong><span>Notify for background messages from unmuted chats</span></span>
+              <SettingRow title="Desktop notifications" description="Notify for background messages from unmuted chats">
                 <Toggle
                   checked={preferences.notificationsEnabled}
                   label="Desktop notifications"
                   onChange={(value) => void actions.setNotificationsEnabled(value)}
                 />
-              </div>
-              <div class="setting-row">
-                <span class="setting-copy"><strong>Message previews</strong><span>Include message text in operating system notifications</span></span>
+              </SettingRow>
+              <SettingRow title="Message previews" description="Include message text in operating system notifications">
                 <Toggle
                   checked={preferences.notificationPreviews}
                   label="Message previews"
                   disabled={!preferences.notificationsEnabled}
                   onChange={(value) => prefActions.update("notificationPreviews", value)}
                 />
-              </div>
+              </SettingRow>
               <p>Notifications are suppressed while the conversation is visible and when a chat is muted. Opening one routes to the exact message.</p>
+            </section>
+          </Show>
+
+          <Show when={activeSection() === "desktop" && linuxDesktopHost}>
+            <section class="settings-section">
+              <h3>Linux application handlers</h3>
+              <p>
+                Choose which installed desktop applications Rust Meow launches.
+                System default uses your XDG associations.
+              </p>
+              <SettingRow title="Open links with" description="Used for HTTP and HTTPS links in messages">
+                <select
+                  class="setting-select"
+                  aria-label="Browser used to open links"
+                  value={preferences.linuxBrowserApp}
+                  disabled={!desktopApplications()}
+                  onChange={(event) => prefActions.update("linuxBrowserApp", event.currentTarget.value)}
+                >
+                  <option value="">System default (xdg-open)</option>
+                  <Show when={browserSelectionMissing()}>
+                    <option value={preferences.linuxBrowserApp}>
+                      Unavailable ({preferences.linuxBrowserApp})
+                    </option>
+                  </Show>
+                  <For each={desktopApplications()?.browsers ?? []}>
+                    {(application) => <option value={application.id}>{application.name}</option>}
+                  </For>
+                </select>
+              </SettingRow>
+              <SettingRow
+                title="Show files with"
+                description="Used by Show in file manager on downloaded media"
+              >
+                <select
+                  class="setting-select"
+                  aria-label="File manager used to reveal downloaded files"
+                  value={preferences.linuxFileManagerApp}
+                  disabled={!desktopApplications()}
+                  onChange={(event) =>
+                    prefActions.update("linuxFileManagerApp", event.currentTarget.value)
+                  }
+                >
+                  <option value="">System default (xdg-open)</option>
+                  <Show when={fileManagerSelectionMissing()}>
+                    <option value={preferences.linuxFileManagerApp}>
+                      Unavailable ({preferences.linuxFileManagerApp})
+                    </option>
+                  </Show>
+                  <For each={desktopApplications()?.fileManagers ?? []}>
+                    {(application) => <option value={application.id}>{application.name}</option>}
+                  </For>
+                </select>
+              </SettingRow>
+              <Show when={!desktopApplications() && !desktopApplicationsError()}>
+                <p>Finding installed desktop applications…</p>
+              </Show>
+              <Show when={desktopApplicationsError()}>
+                {(error) => <p>{error()}</p>}
+              </Show>
             </section>
           </Show>
 

@@ -62,6 +62,17 @@ export interface FilePickerOptions {
   filters?: Array<{ name: string; extensions: string[] }>;
 }
 
+export interface DesktopApplication {
+  id: string;
+  name: string;
+}
+
+export interface DesktopApplications {
+  supported: boolean;
+  browsers: DesktopApplication[];
+  fileManagers: DesktopApplication[];
+}
+
 const hasTauriInternals =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -186,14 +197,34 @@ export async function openFile(options: FilePickerOptions): Promise<string | nul
   return typeof result === "string" ? result : null;
 }
 
-/** Open a web URL without making components depend directly on Tauri. */
-export async function openUrl(url: string): Promise<void> {
+/** Discover installed Linux browsers and file managers for Settings. */
+export async function listDesktopApplications(): Promise<DesktopApplications> {
+  if (browserMockEnabled) {
+    return {
+      supported: navigator.userAgent.includes("Linux"),
+      browsers: [],
+      fileManagers: [],
+    };
+  }
+  return invokeCommand<DesktopApplications>("list_desktop_applications");
+}
+
+/** Open a web URL with the Linux application selected in Settings. */
+export async function openUrl(url: string, applicationId = ""): Promise<void> {
   if (browserMockEnabled) {
     openBrowserUrl(url);
     return;
   }
-  const opener = await import("@tauri-apps/plugin-opener");
-  await opener.openUrl(url);
+  await invokeCommand<void>("open_external_url", { url, applicationId });
+}
+
+/** Reveal cached media with the Linux file manager selected in Settings. */
+export async function revealMediaPath(path: string, applicationId = ""): Promise<void> {
+  if (browserMockEnabled) {
+    console.info("Show media in file manager", path);
+    return;
+  }
+  await invokeCommand<void>("reveal_media_path", { path, applicationId });
 }
 
 export interface BridgeApi {
