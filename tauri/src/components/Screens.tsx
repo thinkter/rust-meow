@@ -17,12 +17,13 @@ import { qrPresentation } from "../state/pairing";
 import { assetUrl, bridge, localFileName } from "../lib/bridge";
 import { AttachmentKind } from "../lib/types";
 import { IconButton, Spinner } from "./Primitives";
+import { ThemeIcon } from "./ThemeIcon";
 
 export function StartupScreen() {
   return (
     <main class="startup-screen">
       <div class="startup-card">
-        <div class="hero-icon"><MessageCircleMore size={58} /></div>
+        <div class="hero-icon"><ThemeIcon icon={MessageCircleMore} name="messages" size={58} /></div>
         <h2>Opening Rust Meow</h2>
         <p>Starting the private WhatsApp bridge and loading your conversations.</p>
         <div style={{ "margin-top": "24px" }}><Spinner label="Starting" /></div>
@@ -63,7 +64,7 @@ export function PairingScreen(props: { model: AppModel }) {
                 fallback={<Spinner label="Waiting for a QR code" />}
               >
                 <div role="status" class="qr-expired">
-                  <CircleAlert size={24} />
+                  <ThemeIcon icon={CircleAlert} name="warning" size={24} />
                   <strong>QR code expired</strong>
                   <span>Waiting for a fresh code…</span>
                 </div>
@@ -94,11 +95,11 @@ export function EmptyConversation() {
   return (
     <section class="conversation-empty">
       <div class="conversation-empty-card">
-        <div class="hero-icon"><MessageCircleMore size={60} /></div>
+        <div class="hero-icon"><ThemeIcon icon={MessageCircleMore} name="messages" size={60} /></div>
         <h2>Rust Meow for desktop</h2>
         <p>Select a conversation or search for a contact to start chatting.</p>
         <p style={{ "margin-top": "15px", display: "flex", "align-items": "center", gap: "7px" }}>
-          <ShieldCheck size={15} /> Your linked-device credentials never enter the webview.
+          <ThemeIcon icon={ShieldCheck} name="shield" size={15} /> Your linked-device credentials never enter the webview.
         </p>
       </div>
     </section>
@@ -109,7 +110,7 @@ export function FatalScreen(props: { model: AppModel }) {
   return (
     <main class="fatal-screen">
       <div class="fatal-card">
-        <CircleAlert size={46} color="var(--danger)" />
+        <ThemeIcon icon={CircleAlert} name="warning" size={46} />
         <h2>Rust Meow needs to restart</h2>
         <p>{props.model.state.fatalError}</p>
         <button type="button" class="primary-button" style={{ "margin-top": "20px" }} onClick={() => void bridge.restartApp()}>
@@ -157,7 +158,9 @@ export function ImageViewer(props: { model: AppModel }) {
           <div style={{ position: "fixed", top: "18px", right: "62px" }} onClick={(event) => event.stopPropagation()}>
             <IconButton label="Save to folder" onClick={() => void saveToFolder(value().path)}><Download size={20} /></IconButton>
           </div>
-          <IconButton label="Close image" class="modal-close" onClick={close}><X size={21} /></IconButton>
+          <IconButton label="Close image" class="modal-close" onClick={close}>
+            <ThemeIcon icon={X} name="close" size={21} />
+          </IconButton>
           <div class="image-viewer" onClick={(event) => event.stopPropagation()}>
             <img src={assetUrl(value().path)} alt={value().caption || (value().sticker ? "Sticker" : "Photo")} />
             <Show when={value().caption}><div class="image-viewer-caption">{value().caption}</div></Show>
@@ -240,11 +243,11 @@ export function ForwardDialog(props: { model: AppModel }) {
       <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="forward-title">
         <div class="dialog-card forward-dialog">
           <div class="forward-dialog-heading">
-            <Forward size={21} />
+            <ThemeIcon icon={Forward} name="reply" size={21} />
             <h2 id="forward-title">Forward message</h2>
           </div>
           <label class="forward-search">
-            <Search size={16} />
+            <ThemeIcon icon={Search} name="search" size={16} />
             <input
               ref={searchInput}
               type="search"
@@ -324,7 +327,7 @@ export function FileSendDialog(props: { model: AppModel }) {
         <div class="modal-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="file-send-title">
           <div class="dialog-card file-send-dialog">
             <div class="forward-dialog-heading">
-              <Files size={22} />
+              <ThemeIcon icon={Files} name="storage" size={22} />
               <h2 id="file-send-title">Send {count()} {noun()}?</h2>
             </div>
             <p>
@@ -335,7 +338,7 @@ export function FileSendDialog(props: { model: AppModel }) {
               <For each={value().paths}>
                 {(path) => (
                   <div class="file-send-row" role="listitem">
-                    <Files size={17} />
+                    <ThemeIcon icon={Files} name="storage" size={17} />
                     <span title={localFileName(path)}>{localFileName(path)}</span>
                   </div>
                 )}
@@ -379,7 +382,9 @@ export function Toasts(props: { model: AppModel }) {
           <div class={`toast ${toast.kind}`}>
             <CircleAlert size={19} />
             <span>{toast.message}</span>
-            <IconButton label="Dismiss" onClick={() => props.model.actions.dismissToast(toast.id)}><X size={16} /></IconButton>
+            <IconButton label="Dismiss" onClick={() => props.model.actions.dismissToast(toast.id)}>
+              <ThemeIcon icon={X} name="close" size={16} />
+            </IconButton>
           </div>
         )}
       </For>

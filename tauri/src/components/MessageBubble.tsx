@@ -53,6 +53,7 @@ import {
 import { EmojiPicker } from "./EmojiPicker";
 import { Avatar } from "./Avatar";
 import { IconButton, Spinner } from "./Primitives";
+import { ThemeIcon } from "./ThemeIcon";
 
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 const RECENT_REACTION_KEY = "rust-meow-recent-emoji";
@@ -214,19 +215,19 @@ export function MessageBubble(props: MessageBubbleProps) {
 
       <div class="message-actions" aria-label="Message actions">
         <IconButton label="React" active={reactionOpen()} onClick={toggleReactionPopover}>
-          <SmilePlus size={15} />
+          <ThemeIcon icon={SmilePlus} name="smile" size={15} />
         </IconButton>
         <IconButton label="Reply" onClick={() => actions.replyTo(props.message.id, props.chatId)}>
-          <MessageSquareReply size={15} />
+          <ThemeIcon icon={MessageSquareReply} name="reply" size={15} />
         </IconButton>
         <Show when={groupChat() && !props.message.fromMe && !props.message.revoked && props.message.senderId}>
           <IconButton label="Reply privately" onClick={() => void actions.replyPrivately(props.message, props.chatId)}>
-            <MessageSquareReply size={15} />
+            <ThemeIcon icon={MessageSquareReply} name="reply" size={15} />
           </IconButton>
         </Show>
         <Show when={props.message.content && !props.message.revoked}>
           <IconButton label="Forward" onClick={() => actions.startForward(props.message.id, props.chatId)}>
-            <Forward size={15} />
+            <ThemeIcon icon={Forward} name="reply" size={15} />
           </IconButton>
         </Show>
         <Show when={
@@ -237,14 +238,14 @@ export function MessageBubble(props: MessageBubbleProps) {
           Date.now() - props.message.timestampMs <= EDIT_WINDOW_MS
         }>
           <IconButton label="Edit" onClick={() => actions.editMessage(props.message.id, props.chatId)}>
-            <Pencil size={15} />
+            <ThemeIcon icon={Pencil} name="edit" size={15} />
           </IconButton>
         </Show>
         <Show when={props.message.content && !props.message.revoked}>
           <IconButton
             label={props.model.state.pinnedMessages[props.chatId]?.some((pin) => pin.messageId === props.message.id) ? "Unpin message" : "Pin message"}
             onClick={() => void actions.setMessagePin(props.message.id, !props.model.state.pinnedMessages[props.chatId]?.some((pin) => pin.messageId === props.message.id), props.chatId)}
-          ><Pin size={15} /></IconButton>
+          ><ThemeIcon icon={Pin} name="pin" size={15} /></IconButton>
         </Show>
         <Show when={savableMedia()}>
           {(media) => (
@@ -749,11 +750,11 @@ function AttachmentMessage(props: {
 function MessageStatusIcon(props: { status: number }) {
   return (
     <Switch>
-      <Match when={props.status === MessageStatus.Pending}><Clock3 size={12} /></Match>
-      <Match when={props.status === MessageStatus.Sent}><Check size={13} /></Match>
-      <Match when={props.status === MessageStatus.Delivered}><CheckCheck size={14} /></Match>
-      <Match when={props.status === MessageStatus.Read}><CheckCheck class="read" size={14} /></Match>
-      <Match when={props.status === MessageStatus.Failed}><TriangleAlert class="failed" size={13} /></Match>
+      <Match when={props.status === MessageStatus.Pending}><ThemeIcon icon={Clock3} name="clock" size={12} /></Match>
+      <Match when={props.status === MessageStatus.Sent}><ThemeIcon icon={Check} name="check" size={13} /></Match>
+      <Match when={props.status === MessageStatus.Delivered}><ThemeIcon icon={CheckCheck} name="check-double" size={14} /></Match>
+      <Match when={props.status === MessageStatus.Read}><ThemeIcon icon={CheckCheck} name="check-double" class="read" size={14} /></Match>
+      <Match when={props.status === MessageStatus.Failed}><ThemeIcon icon={TriangleAlert} name="warning" class="failed" size={13} /></Match>
     </Switch>
   );
 }
