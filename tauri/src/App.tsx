@@ -17,6 +17,8 @@ import { ChatInfoPanel, SettingsPanel } from "./components/Panels";
 import {
   EmptyConversation,
   FatalScreen,
+  FileSendDialog,
+  ForwardDialog,
   ImageViewer,
   LogoutDialog,
   PairingScreen,
@@ -74,8 +76,8 @@ export default function App() {
       <Show when={state.screen === "chats"}>
         <main
           class={`app-shell ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""}`}
-          inert={Boolean(state.logoutConfirmation || state.imageViewer)}
-          aria-hidden={state.logoutConfirmation || state.imageViewer ? "true" : undefined}
+          inert={Boolean(state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
+          aria-hidden={state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
         >
           <TitleBar model={model} />
           <nav class="nav-rail" aria-label="Primary navigation">
@@ -146,6 +148,8 @@ export default function App() {
         {state.tabAnnouncement}
       </p>
       <ImageViewer model={model} />
+      <ForwardDialog model={model} />
+      <FileSendDialog model={model} />
       <LogoutDialog model={model} />
       <Toasts model={model} />
     </>
@@ -182,6 +186,8 @@ export default function App() {
     }
     if (event.key === "Escape") {
       if (state.switcher) actions.cancelSwitcher();
+      else if (state.fileSendConfirmation) actions.cancelFileSend();
+      else if (state.forwardDialog) actions.cancelForward();
       else if (state.logoutConfirmation) actions.setLogoutConfirmation(false);
       else if (state.imageViewer) actions.closeImage();
       else if (state.chatInfoOpen) actions.hideChatInfo();

@@ -3,15 +3,19 @@ import QRCode from "qrcode";
 import {
   CircleAlert,
   Download,
+  Files,
+  Forward,
   LockKeyhole,
   MessageCircleMore,
   RefreshCw,
+  Search,
   ShieldCheck,
   X,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import { qrPresentation } from "../state/pairing";
-import { assetUrl, bridge } from "../lib/bridge";
+import { assetUrl, bridge, localFileName } from "../lib/bridge";
+import { AttachmentKind } from "../lib/types";
 import { IconButton, Spinner } from "./Primitives";
 
 export function StartupScreen() {
@@ -199,6 +203,170 @@ export function LogoutDialog(props: { model: AppModel }) {
           </div>
         </div>
       </div>
+    </Show>
+  );
+}
+
+export function ForwardDialog(props: { model: AppModel }) {
+  const { state, actions } = props.model;
+  const [query, setQuery] = createSignal("");
+  const [selected, setSelected] = createSignal<string[]>([]);
+  const [sending, setSending] = createSignal(false);
+  let searchInput: HTMLInputElement | undefined;
+
+  createEffect(() => {
+    if (!state.forwardDialog) {
+      setQuery("");
+      setSelected([]);
+      setSending(false);
+      return;
+    }
+    queueMicrotask(() => searchInput?.focus());
+  });
+
+  const chats = () => {
+    const needle = query().trim().toLocaleLowerCase();
+    return state.chats.filter((chat) =>
+      !needle || `${chat.title} ${chat.phoneNumber}`.toLocaleLowerCase().includes(needle),
+    );
+  };
+  const toggle = (chatId: string) =>
+    setSelected((current) =>
+      current.includes(chatId) ? current.filter((id) => id !== chatId) : [...current, chatId],
+    );
+
+  return (
+    <Show when={state.forwardDialog}>
+      <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="forward-title">
+        <div class="dialog-card forward-dialog">
+          <div class="forward-dialog-heading">
+            <Forward size={21} />
+            <h2 id="forward-title">Forward message</h2>
+          </div>
+          <label class="forward-search">
+            <Search size={16} />
+            <input
+              ref={searchInput}
+              type="search"
+              value={query()}
+              placeholder="Search chats"
+              onInput={(event) => setQuery(event.currentTarget.value)}
+            />
+          </label>
+          <div class="forward-chat-list" role="group" aria-label="Choose chats">
+            <For each={chats()}>
+              {(chat) => (
+                <label class="forward-chat-row">
+                  <input
+                    type="checkbox"
+                    checked={selected().includes(chat.id)}
+                    onChange={() => toggle(chat.id)}
+                  />
+                  <span>
+                    <strong>{chat.title || chat.phoneNumber}</strong>
+                    <small>{chat.lastMessagePreview}</small>
+                  </span>
+                </label>
+              )}
+            </For>
+          </div>
+          <div class="dialog-actions">
+            <button type="button" class="secondary-button" disabled={sending()} onClick={() => actions.cancelForward()}>Cancel</button>
+            <button
+              type="button"
+              class="primary-button"
+              disabled={sending() || selected().length === 0}
+              onClick={() => {
+                setSending(true);
+                void actions.forwardMessage(selected()).finally(() => setSending(false));
+              }}
+            >
+              Forward{selected().length > 0 ? ` to ${selected().length}` : ""}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Show>
+  );
+}
+
+export function FileSendDialog(props: { model: AppModel }) {
+  const { state, actions } = props.model;
+  let cancelButton: HTMLButtonElement | undefined;
+
+  createEffect(() => {
+    if (state.fileSendConfirmation) queueMicrotask(() => cancelButton?.focus());
+  });
+
+  const request = () => state.fileSendConfirmation;
+  const count = () => request()?.paths.length ?? 0;
+  const supportsCaption = () => {
+    const value = request();
+    return Boolean(
+      value &&
+      (value.mode === "image" ||
+        (value.mode === "attachment" && value.attachmentKind !== AttachmentKind.Audio)),
+    );
+  };
+  const noun = () => {
+    const value = request();
+    if (!value) return "file";
+    if (value.mode === "image") return count() === 1 ? "photo" : "photos";
+    if (value.mode === "sticker") return count() === 1 ? "sticker" : "stickers";
+    if (value.attachmentKind === AttachmentKind.Video) return count() === 1 ? "video" : "videos";
+    if (value.attachmentKind === AttachmentKind.Audio) return count() === 1 ? "audio file" : "audio files";
+    return count() === 1 ? "document" : "documents";
+  };
+
+  return (
+    <Show when={request()}>
+      {(value) => (
+        <div class="modal-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="file-send-title">
+          <div class="dialog-card file-send-dialog">
+            <div class="forward-dialog-heading">
+              <Files size={22} />
+              <h2 id="file-send-title">Send {count()} {noun()}?</h2>
+            </div>
+            <p>
+              Check your selection before it is sent to{" "}
+              {state.chats.find((chat) => chat.id === value().chatId)?.title || "this chat"}.
+            </p>
+            <div class="file-send-list" role="list" aria-label="Files to send">
+              <For each={value().paths}>
+                {(path) => (
+                  <div class="file-send-row" role="listitem">
+                    <Files size={17} />
+                    <span title={localFileName(path)}>{localFileName(path)}</span>
+                  </div>
+                )}
+              </For>
+            </div>
+            <Show
+              when={
+                (supportsCaption() && props.model.actions.activeDraft(value().chatId).text.trim()) ||
+                props.model.actions.activeDraft(value().chatId).replyToMessageId
+              }
+            >
+              <p class="file-send-note">
+                {supportsCaption() && props.model.actions.activeDraft(value().chatId).text.trim()
+                  ? "Your message will be used as the caption on the first file."
+                  : ""}
+                {props.model.actions.activeDraft(value().chatId).replyToMessageId
+                  ? `${supportsCaption() && props.model.actions.activeDraft(value().chatId).text.trim() ? " " : ""}Your reply context will apply to the first file.`
+                  : ""}
+              </p>
+            </Show>
+            <div class="dialog-actions">
+              <button ref={cancelButton} type="button" class="secondary-button" disabled={state.sending} onClick={() => actions.cancelFileSend()}>
+                Cancel
+              </button>
+              <button type="button" class="primary-button" disabled={state.sending} onClick={() => void actions.confirmFileSend()}>
+                {value().mode === "sticker" ? "Create and send" : "Send"} {count()}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Show>
   );
 }
