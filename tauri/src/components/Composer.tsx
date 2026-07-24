@@ -40,6 +40,7 @@ export function Composer(props: { model: AppModel; chatId: string }) {
   const reply = () => conversation().messages.find((message) => message.id === draft().replyToMessageId);
   const chat = () => state.chats.find((candidate) => candidate.id === props.chatId);
   const connected = () => state.connection === ConnectionState.Connected;
+  const togglePopover = (kind: Exclude<PopoverKind, null>) => setOpenPopover((open) => open === kind ? null : kind);
   // The mention directory (`state.chatInfo`) is a single global slot keyed
   // by whichever chat is currently focused (see `ensureMentionDirectory` in
   // state/app.ts, which always targets `state.selectedChatId`). A composer
@@ -111,7 +112,7 @@ export function Composer(props: { model: AppModel; chatId: string }) {
           label="Emoji"
           active={openPopover() === "emoji"}
           disabled={!connected()}
-          onClick={() => setOpenPopover((open) => (open === "emoji" ? null : "emoji"))}
+          onClick={() => togglePopover("emoji")}
         >
           <Smile size={22} />
         </IconButton>
@@ -119,7 +120,7 @@ export function Composer(props: { model: AppModel; chatId: string }) {
           label="Stickers"
           active={openPopover() === "sticker"}
           disabled={!connected()}
-          onClick={() => setOpenPopover((open) => (open === "sticker" ? null : "sticker"))}
+          onClick={() => togglePopover("sticker")}
         >
           <Sticker size={22} />
         </IconButton>
@@ -127,11 +128,11 @@ export function Composer(props: { model: AppModel; chatId: string }) {
           label="Attach"
           active={openPopover() === "attachment"}
           disabled={!connected()}
-          onClick={() => setOpenPopover((open) => (open === "attachment" ? null : "attachment"))}
+          onClick={() => togglePopover("attachment")}
         >
           <Paperclip size={22} />
         </IconButton>
-        <IconButton label="Create poll" active={openPopover() === "poll"} disabled={!connected()} onClick={() => setOpenPopover((open) => open === "poll" ? null : "poll")}>
+        <IconButton label="Create poll" active={openPopover() === "poll"} disabled={!connected()} onClick={() => togglePopover("poll")}>
           <ListChecks size={22} />
         </IconButton>
 
@@ -306,25 +307,22 @@ export function Composer(props: { model: AppModel; chatId: string }) {
   }
 
   async function chooseImage() {
-    setOpenPopover(null);
-    const path = await openFile({
-      multiple: false,
-      directory: false,
-      title: "Choose a photo",
-      filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "gif", "webp"] }],
-    });
-    if (typeof path === "string") await actions.sendImage(path, props.chatId);
+    await chooseVisual("Choose a photo", (path) => actions.sendImage(path, props.chatId));
   }
 
   async function chooseSticker() {
+    await chooseVisual("Choose an image to turn into a sticker", (path) => actions.sendSticker(path, props.chatId));
+  }
+
+  async function chooseVisual(title: string, send: (path: string) => Promise<void>) {
     setOpenPopover(null);
     const path = await openFile({
       multiple: false,
       directory: false,
-      title: "Choose an image to turn into a sticker",
+      title,
       filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "gif", "webp"] }],
     });
-    if (typeof path === "string") await actions.sendSticker(path, props.chatId);
+    if (typeof path === "string") await send(path);
   }
 
   async function chooseAttachment(kind: number) {
