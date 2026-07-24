@@ -28,6 +28,7 @@ test("message index resolves quotes and reply metadata in one pass", () => {
     message("reply-1", "root"),
     message("reply-2", "root"),
     message("nested", "reply-1"),
+    message("private-reply", "group-message", "source-group"),
   ];
   const index = indexMessages(messages);
 
@@ -36,6 +37,7 @@ test("message index resolves quotes and reply metadata in one pass", () => {
   assert.equal(index.firstReplyIdById.get("root"), "reply-1");
   assert.equal(index.replyCountById.get("reply-1"), 1);
   assert.equal(index.replyCountById.has("reply-2"), false);
+  assert.equal(index.replyCountById.has("group-message"), false);
 });
 
 test("canonical message windows stay bounded around the requested target", () => {
@@ -71,7 +73,7 @@ test("the 1,000-member roster keeps its mounted DOM budget bounded", () => {
   assert.ok(participantDomBudget(720) < participants.length / 30);
 });
 
-function message(id: string, replyToMessageId = ""): Message {
+function message(id: string, replyToMessageId = "", replyToChatId = ""): Message {
   return {
     id,
     chatId: "chat",
@@ -85,6 +87,7 @@ function message(id: string, replyToMessageId = ""): Message {
     content: null,
     reactions: [],
     replyToMessageId,
+    replyToChatId,
     edited: false,
     revoked: false,
     expiresAtMs: 0,

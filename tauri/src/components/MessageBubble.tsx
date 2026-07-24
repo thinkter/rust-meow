@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js";
 import {
   Check,
   CheckCheck,
@@ -10,9 +10,11 @@ import {
   FileVideo,
   FolderDown,
   FolderOpen,
+  Forward,
   ListChecks,
   MapPin,
   MessageSquareReply,
+  Pencil,
   Plus,
   Pin,
   RefreshCcw,
@@ -21,12 +23,14 @@ import {
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import {
+  ChatKind,
   MessageStatus,
   type AttachmentContent,
   type ImageContent,
   type LinkPreview,
   type Message,
   type PollContent,
+  type PollVoter,
   type Reaction,
   type TextContent,
 } from "../lib/types";
@@ -40,11 +44,19 @@ import {
 } from "../lib/format";
 import { assetUrl } from "../lib/bridge";
 import { parsePollFallback } from "../lib/unsupported";
+import {
+  parseWhatsAppText,
+  type WhatsAppInlineSegment,
+  type WhatsAppInlineStyle,
+  type WhatsAppTextBlock,
+} from "../lib/whatsapp-formatting";
 import { EmojiPicker } from "./EmojiPicker";
+import { Avatar } from "./Avatar";
 import { IconButton, Spinner } from "./Primitives";
 
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 const RECENT_REACTION_KEY = "rust-meow-recent-emoji";
+const EDIT_WINDOW_MS = 20 * 60_000;
 interface MessageBubbleProps {
   message: Message;
   model: AppModel;
@@ -71,6 +83,10 @@ export function MessageBubble(props: MessageBubbleProps) {
   let popoverRef: HTMLDivElement | undefined;
 
   const quoted = () => props.quotedMessage;
+  const replySourceTitle = () =>
+    props.model.state.chats.find((chat) => chat.id === props.message.replyToChatId)?.title;
+  const groupChat = () =>
+    props.model.state.chats.find((chat) => chat.id === props.chatId)?.kind === ChatKind.Group;
   const replyCount = () => props.replyCount ?? 0;
   const reactionGroups = createMemo(() => groupReactions(props.message.reactions));
   const savableMedia = createMemo(() => savableMediaInfo(props.message));
@@ -125,14 +141,33 @@ export function MessageBubble(props: MessageBubbleProps) {
         </div>
       </Show>
 
+      <Show when={props.message.forwardingScore > 0}>
+        <div class="forwarded-label">
+          <Forward size={13} />
+          <span>{props.message.forwardingScore >= 5 ? "Forwarded many times" : props.message.forwardingScore > 1 ? `Forwarded ${props.message.forwardingScore} times` : "Forwarded"}</span>
+        </div>
+      </Show>
+
       <Show when={props.message.replyToMessageId}>
         <button
           type="button"
           class="quoted-message"
-          onClick={() => props.onScrollToMessage(props.message.replyToMessageId)}
+          onClick={() => {
+            if (props.message.replyToChatId && props.message.replyToChatId !== props.chatId) {
+              void actions.selectChat(props.message.replyToChatId, props.message.replyToMessageId);
+            } else {
+              props.onScrollToMessage(props.message.replyToMessageId);
+            }
+          }}
         >
-          <strong>{quoted()?.fromMe ? "You" : quoted()?.senderName || "Original message"}</strong>
-          <span>{quoted() ? messageText(quoted()!) : "Message outside the loaded history"}</span>
+          <strong>{quoted()?.fromMe ? "You" : quoted()?.senderName || replySourceTitle() || "Original message"}</strong>
+          <span>
+            {quoted()
+              ? messageText(quoted()!)
+              : replySourceTitle()
+                ? `Quoted message in ${replySourceTitle()}`
+                : "Message outside the loaded history"}
+          </span>
         </button>
       </Show>
 
@@ -184,6 +219,27 @@ export function MessageBubble(props: MessageBubbleProps) {
         <IconButton label="Reply" onClick={() => actions.replyTo(props.message.id, props.chatId)}>
           <MessageSquareReply size={15} />
         </IconButton>
+        <Show when={groupChat() && !props.message.fromMe && !props.message.revoked && props.message.senderId}>
+          <IconButton label="Reply privately" onClick={() => void actions.replyPrivately(props.message, props.chatId)}>
+            <MessageSquareReply size={15} />
+          </IconButton>
+        </Show>
+        <Show when={props.message.content && !props.message.revoked}>
+          <IconButton label="Forward" onClick={() => actions.startForward(props.message.id, props.chatId)}>
+            <Forward size={15} />
+          </IconButton>
+        </Show>
+        <Show when={
+          props.message.fromMe &&
+          !props.message.revoked &&
+          props.message.content &&
+          "text" in props.message.content &&
+          Date.now() - props.message.timestampMs <= EDIT_WINDOW_MS
+        }>
+          <IconButton label="Edit" onClick={() => actions.editMessage(props.message.id, props.chatId)}>
+            <Pencil size={15} />
+          </IconButton>
+        </Show>
         <Show when={props.message.content && !props.message.revoked}>
           <IconButton
             label={props.model.state.pinnedMessages[props.chatId]?.some((pin) => pin.messageId === props.message.id) ? "Unpin message" : "Pin message"}
@@ -257,6 +313,7 @@ function MessageContent(props: { message: Message; model: AppModel; chatId: stri
             <Show when={"text" in value()}>
               <TextMessage
                 content={(value() as { text: TextContent }).text}
+                mentions={props.message.mentionTexts}
                 onOpenLink={props.model.actions.openExternalLink}
               />
             </Show>
@@ -313,7 +370,9 @@ function MessageContent(props: { message: Message; model: AppModel; chatId: stri
 }
 
 function PollMessage(props: { message: Message; poll: PollContent; model: AppModel; chatId: string }) {
+  const [showVotes, setShowVotes] = createSignal(false);
   const selected = () => props.poll.options.filter((option) => option.selectedByMe).map((option) => option.name);
+  const hasVotes = () => props.poll.options.some((option) => option.voteCount > 0);
   function choose(name: string) {
     if (props.poll.selectableOptionsCount === 0) return;
     const current = new Set(selected());
@@ -328,12 +387,64 @@ function PollMessage(props: { message: Message; poll: PollContent; model: AppMod
   return <section class={`poll-card ${pending() ? "pending" : ""}`} aria-label="Poll" aria-busy={pending()}>
     <header><ListChecks size={20} /><strong>{props.poll.question}</strong></header>
     <For each={props.poll.options}>{(option) =>
-      <button type="button" disabled={props.poll.selectableOptionsCount === 0 || pending()} class={`poll-option ${option.selectedByMe ? "selected" : ""}`} aria-pressed={option.selectedByMe} onClick={() => choose(option.name)}>
-        <span aria-hidden="true" /> <span class="poll-option-label">{option.name}</span><strong>{option.voteCount}</strong>
-      </button>
+      <div class="poll-option-group">
+        <button type="button" disabled={props.poll.selectableOptionsCount === 0 || pending()} class={`poll-option ${option.selectedByMe ? "selected" : ""}`} aria-pressed={option.selectedByMe} onClick={() => choose(option.name)}>
+          <span aria-hidden="true" />
+          <span class="poll-option-label">{option.name}</span>
+          <Show when={option.voters.length > 0}>
+            <span class="poll-voter-thumbnails" aria-label={`${option.voters.length} known voters`}>
+              <For each={option.voters.slice(0, 4)}>{(voter) => <PollVoterAvatar voter={voter} model={props.model} chatId={props.chatId} size={22} />}</For>
+              <Show when={option.voters.length > 4}><span class="poll-voter-overflow">+{option.voters.length - 4}</span></Show>
+            </span>
+          </Show>
+          <strong>{option.voteCount}</strong>
+        </button>
+      </div>
     }</For>
+    <Show when={hasVotes()}>
+      <button type="button" class="poll-view-votes" aria-expanded={showVotes()} onClick={() => setShowVotes((shown) => !shown)}>
+        {showVotes() ? "Hide votes" : "View votes"}
+      </button>
+    </Show>
+    <Show when={showVotes()}>
+      <div class="poll-vote-details">
+        <For each={props.poll.options}>{(option) => (
+          <Show when={option.voteCount > 0}>
+            <section>
+              <strong>{option.name}</strong>
+              <For each={option.voters}>{(voter) => (
+                <div class="poll-voter-row">
+                  <PollVoterAvatar voter={voter} model={props.model} chatId={props.chatId} size={28} />
+                  <span>{voter.fromMe ? "You" : voter.displayName || voter.userId.split("@")[0]}</span>
+                </div>
+              )}</For>
+              <Show when={option.voteCount > option.voters.length}>
+                <small>{option.voteCount - option.voters.length} older {option.voteCount - option.voters.length === 1 ? "vote" : "votes"} without identity data</small>
+              </Show>
+            </section>
+          </Show>
+        )}</For>
+      </div>
+    </Show>
     <small>{pending() ? "Saving vote…" : props.poll.selectableOptionsCount === 0 ? "Poll results snapshot" : `${props.poll.totalVoters} ${props.poll.totalVoters === 1 ? "voter" : "voters"} · choose up to ${props.poll.selectableOptionsCount}`}</small>
   </section>;
+}
+
+function PollVoterAvatar(props: { voter: PollVoter; model: AppModel; chatId: string; size: number }) {
+  createEffect(() => {
+    if (props.voter.avatarPath) return;
+    const cancel = props.model.actions.loadParticipantAvatar(props.voter.userId, props.chatId);
+    onCleanup(cancel);
+  });
+  const name = () => props.voter.fromMe ? "You" : props.voter.displayName || props.voter.userId.split("@")[0] || "Voter";
+  return (
+    <Avatar
+      class="poll-voter-avatar"
+      name={name()}
+      path={props.voter.avatarPath || props.model.state.participantAvatars[props.voter.userId]}
+      size={props.size}
+    />
+  );
 }
 
 function UnsupportedMessage(props: { content: { fallbackText: string; typeName: string } }) {
@@ -365,7 +476,7 @@ function UnsupportedMessage(props: { content: { fallbackText: string; typeName: 
   );
 }
 
-function TextMessage(props: { content: TextContent; onOpenLink: (url: string) => Promise<void> }) {
+function TextMessage(props: { content: TextContent; mentions: string[]; onOpenLink: (url: string) => Promise<void> }) {
   return (
     <>
       <Show when={props.content.linkPreview}>
@@ -373,39 +484,98 @@ function TextMessage(props: { content: TextContent; onOpenLink: (url: string) =>
           <LinkPreviewCard preview={preview()} onOpenLink={props.onOpenLink} />
         )}
       </Show>
-      <p class="message-text">
-        <LinkifiedText text={props.content.text} onOpenLink={props.onOpenLink} />
-      </p>
+      <div class="message-text whatsapp-text">
+        <LinkifiedText text={props.content.text} mentions={props.mentions} onOpenLink={props.onOpenLink} />
+      </div>
     </>
   );
 }
 
-function LinkifiedText(props: { text: string; onOpenLink: (url: string) => Promise<void> }) {
-  const tokens = () => props.text.split(/(https?:\/\/[^\s]+)/gi);
+function LinkifiedText(props: { text: string; mentions?: string[]; onOpenLink: (url: string) => Promise<void> }) {
+  const blocks = () => parseWhatsAppText(props.text, { mentions: props.mentions });
   return (
-    <For each={tokens()}>
-      {(token) => {
-        const visibleUrl = token.replace(/[),.!?;:]+$/, "");
-        const url = safeHttpUrl(visibleUrl);
-        const suffix = url ? token.slice(visibleUrl.length) : "";
-        return url ? (
-          <>
-            <a
-              href={url}
-              title={visibleUrl}
-              onClick={(event) => {
-                event.preventDefault();
-                void props.onOpenLink(url);
-              }}
-            >
-              {visibleUrl}
-            </a>
-            {suffix}
-          </>
-        ) : token;
-      }}
+    <For each={blocks()}>
+      {(block) => <WhatsAppBlock block={block} onOpenLink={props.onOpenLink} />}
     </For>
   );
+}
+
+function WhatsAppBlock(props: {
+  block: WhatsAppTextBlock;
+  onOpenLink: (url: string) => Promise<void>;
+}) {
+  const segments = () => "segments" in props.block ? props.block.segments : [];
+  const content = () => (
+    <For each={segments()}>
+      {(segment) => <WhatsAppSegment segment={segment} onOpenLink={props.onOpenLink} />}
+    </For>
+  );
+  return (
+    <Switch>
+      <Match when={props.block.kind === "paragraph"}>
+        <span class="whatsapp-line">{content()}</span>
+      </Match>
+      <Match when={props.block.kind === "blank-line"}>
+        <span class="whatsapp-blank-line" aria-hidden="true" />
+      </Match>
+      <Match when={props.block.kind === "quote"}>
+        <span class="whatsapp-line whatsapp-quote">{content()}</span>
+      </Match>
+      <Match when={props.block.kind === "bullet-list-item"}>
+        <span class="whatsapp-line whatsapp-list-item">
+          <span class="whatsapp-list-marker" aria-hidden="true">•</span>
+          <span>{content()}</span>
+        </span>
+      </Match>
+      <Match when={props.block.kind === "numbered-list-item"}>
+        <span class="whatsapp-line whatsapp-list-item">
+          <span class="whatsapp-list-marker">
+            {props.block.kind === "numbered-list-item" ? `${props.block.number}.` : ""}
+          </span>
+          <span>{content()}</span>
+        </span>
+      </Match>
+      <Match when={props.block.kind === "code-block"}>
+        <code class="whatsapp-code-block">
+          {props.block.kind === "code-block" ? props.block.text : ""}
+        </code>
+      </Match>
+    </Switch>
+  );
+}
+
+function WhatsAppSegment(props: {
+  segment: WhatsAppInlineSegment;
+  onOpenLink: (url: string) => Promise<void>;
+}) {
+  const formatClass = () => formattingClass(props.segment.styles);
+  return (
+    <Switch>
+      <Match when={props.segment.kind === "link"}>
+        <a
+          class={formatClass()}
+          href={props.segment.kind === "link" ? props.segment.href : ""}
+          title={props.segment.text}
+          onClick={(event) => {
+            event.preventDefault();
+            if (props.segment.kind === "link") void props.onOpenLink(props.segment.href);
+          }}
+        >
+          {props.segment.text}
+        </a>
+      </Match>
+      <Match when={props.segment.kind === "mention"}>
+        <span class={`message-mention ${formatClass()}`}>{props.segment.text}</span>
+      </Match>
+      <Match when={true}>
+        <span class={formatClass()}>{props.segment.text}</span>
+      </Match>
+    </Switch>
+  );
+}
+
+function formattingClass(styles: readonly WhatsAppInlineStyle[]) {
+  return styles.map((style) => `whatsapp-format-${style}`).join(" ");
 }
 
 function LinkPreviewCard(props: {
@@ -483,7 +653,11 @@ function ImageMessage(props: { message: Message; model: AppModel; chatId: string
           {(url) => <img src={url()} alt={image()?.caption || (image()?.sticker ? "Sticker" : "Photo")} draggable={false} />}
         </Show>
       </button>
-      <Show when={image()?.caption}><p class="message-text">{image()?.caption}</p></Show>
+      <Show when={image()?.caption}>
+        <div class="message-text whatsapp-text">
+          <LinkifiedText text={image()?.caption ?? ""} mentions={props.message.mentionTexts} onOpenLink={props.model.actions.openExternalLink} />
+        </div>
+      </Show>
     </>
   );
 }
@@ -563,7 +737,11 @@ function AttachmentMessage(props: {
           </button>
         )}
       </Show>
-      <Show when={props.attachment.caption}><p class="message-text">{props.attachment.caption}</p></Show>
+      <Show when={props.attachment.caption}>
+        <div class="message-text whatsapp-text">
+          <LinkifiedText text={props.attachment.caption} mentions={props.message.mentionTexts} onOpenLink={props.model.actions.openExternalLink} />
+        </div>
+      </Show>
     </>
   );
 }

@@ -9,13 +9,14 @@ import {
   MessageCircleMore,
   MoreVertical,
   Search,
+  UsersRound,
   X,
   Pin,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import type { Density } from "../state/preferences";
 import { ChatKind, ConnectionState, type Message } from "../lib/types";
-import { connectionLabel, dayKey, formatDay, messageText } from "../lib/format";
+import { connectionLabel, dayKey, formatDay, formatTime, messageText } from "../lib/format";
 import { indexMessages } from "../lib/performance";
 import {
   captureScrollSnapshot,
@@ -51,12 +52,25 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
   const [searchQuery, setSearchQuery] = createSignal("");
   const [searchMatch, setSearchMatch] = createSignal(0);
   const [searchHighlight, setSearchHighlight] = createSignal("");
+  const [activePinIndex, setActivePinIndex] = createSignal(0);
+  const [pinsExpanded, setPinsExpanded] = createSignal(false);
 
   const conversation = () => actions.conversation(props.chatId);
   const chat = () => state.chats.find((candidate) => candidate.id === props.chatId);
   const messages = () => conversation().messages;
   const isGroup = () => chat()?.kind === ChatKind.Group;
   const messageIndex = createMemo(() => indexMessages(messages()));
+  const pins = createMemo(() => state.pinnedMessages[props.chatId] ?? []);
+  const activePin = () => pins()[activePinIndex()];
+
+  createEffect(on(() => props.chatId, () => {
+    setActivePinIndex(0);
+    setPinsExpanded(false);
+  }));
+  createEffect(() => {
+    const count = pins().length;
+    setActivePinIndex((index) => Math.min(index, Math.max(0, count - 1)));
+  });
 
   const searchMatches = createMemo(() => {
     const query = searchQuery().trim().toLocaleLowerCase();
@@ -229,6 +243,15 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
               <IconButton label="Search in chat" onClick={openSearch}>
                 <Search size={19} />
               </IconButton>
+              <Show when={chat()?.kind === ChatKind.Group}>
+                <IconButton
+                  label={preferences.memberPanelOpen ? "Hide members" : "Show members"}
+                  active={preferences.memberPanelOpen}
+                  onClick={() => props.model.prefActions.update("memberPanelOpen", !preferences.memberPanelOpen)}
+                >
+                  <UsersRound size={19} />
+                </IconButton>
+              </Show>
               <IconButton label="Conversation menu" onClick={() => void actions.showChatInfo()}>
                 <MoreVertical size={20} />
               </IconButton>
@@ -279,19 +302,50 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
         </div>
       </Show>
 
-      <Show when={(state.pinnedMessages[props.chatId]?.length ?? 0) > 0}>
-        <div class="pinned-message-strip" aria-label="Pinned messages">
-          <Pin size={15} />
-          <For each={state.pinnedMessages[props.chatId] ?? []}>{(pin) => (
-            <span class="pinned-message-chip">
-              <button type="button" disabled={!pin.available} title={pin.available ? "Open pinned message" : "Pinned message is unavailable"} onClick={() => scrollToMessage(pin.messageId)}>
-                {pin.message ? messageText(pin.message).slice(0, 64) || "Pinned message" : "Unavailable message"}
-              </button>
-              <button type="button" aria-label="Unpin message" onClick={() => void actions.setMessagePin(pin.messageId, false, props.chatId)}><X size={13} /></button>
-            </span>
-          )}</For>
+      <Show when={activePin()}>
+        {(pin) => <div class="pinned-messages" aria-label="Pinned messages">
+          <div class="pinned-message-banner">
+            <span class="pinned-message-marker"><Pin size={16} /></span>
+            <button
+              type="button"
+              class="pinned-message-current"
+              disabled={!pin().available}
+              title={pin().available ? "Open pinned message" : "Pinned message is unavailable"}
+              onClick={() => scrollToMessage(pin().messageId)}
+            >
+              <strong>{pins().length === 1 ? "Pinned message" : `${pins().length} pinned messages`}</strong>
+              <span>{pin().message ? messageText(pin().message!).slice(0, 110) || "Media message" : "Pinned message is unavailable"}</span>
+              <small>{pin().pinnedAtMs > 0 ? formatTime(pin().pinnedAtMs) : ""}</small>
+            </button>
+            <Show when={pins().length > 1}>
+              <span class="pinned-message-position">{activePinIndex() + 1}/{pins().length}</span>
+              <IconButton label="Previous pinned message" disabled={activePinIndex() === 0} onClick={() => setActivePinIndex((index) => Math.max(0, index - 1))}><ChevronUp size={17} /></IconButton>
+              <IconButton label="Next pinned message" disabled={activePinIndex() >= pins().length - 1} onClick={() => setActivePinIndex((index) => Math.min(pins().length - 1, index + 1))}><ChevronDown size={17} /></IconButton>
+              <IconButton label={pinsExpanded() ? "Hide all pinned messages" : "Show all pinned messages"} active={pinsExpanded()} onClick={() => setPinsExpanded((expanded) => !expanded)}><MoreVertical size={17} /></IconButton>
+            </Show>
+            <IconButton label="Unpin message" onClick={() => void actions.setMessagePin(pin().messageId, false, props.chatId)}><X size={17} /></IconButton>
+          </div>
+          <Show when={pinsExpanded() && pins().length > 1}>
+            <div class="pinned-message-list">
+              <For each={pins()}>{(item, index) => (
+                <button
+                  type="button"
+                  class={index() === activePinIndex() ? "active" : ""}
+                  disabled={!item.available}
+                  onClick={() => {
+                    setActivePinIndex(index());
+                    scrollToMessage(item.messageId);
+                  }}
+                >
+                  <Pin size={13} />
+                  <span>{item.message ? messageText(item.message).slice(0, 90) || "Media message" : "Pinned message is unavailable"}</span>
+                  <small>{item.pinnedAtMs > 0 ? formatTime(item.pinnedAtMs) : ""}</small>
+                </button>
+              )}</For>
+            </div>
+          </Show>
         </div>
-      </Show>
+        }</Show>
 
       <div
         ref={scrollRef}
@@ -356,7 +410,11 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
                           suppressSender={grouped()}
                           quotedMessage={
                             value().replyToMessageId
-                              ? messageIndex().byId.get(value().replyToMessageId)
+                              ? (value().replyToChatId && value().replyToChatId !== props.chatId
+                                  ? state.conversations[value().replyToChatId]?.messages.find(
+                                      (candidate) => candidate.id === value().replyToMessageId,
+                                    )
+                                  : messageIndex().byId.get(value().replyToMessageId))
                               : undefined
                           }
                           replyCount={messageIndex().replyCountById.get(value().id) ?? 0}

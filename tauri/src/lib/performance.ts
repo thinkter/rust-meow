@@ -96,6 +96,9 @@ export function indexMessages(messages: readonly Message[]): MessageIndex {
   for (const message of messages) {
     byId.set(message.id, message);
     if (!message.replyToMessageId) continue;
+    // A private reply quotes a message from its source group, not another
+    // message in the direct conversation currently being indexed.
+    if (message.replyToChatId && message.replyToChatId !== message.chatId) continue;
     replyCountById.set(
       message.replyToMessageId,
       (replyCountById.get(message.replyToMessageId) ?? 0) + 1,

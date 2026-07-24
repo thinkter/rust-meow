@@ -5,7 +5,10 @@ import type { Message, PollContent } from "./types";
 export function clonePollContent(poll: PollContent): PollContent {
   return {
     ...poll,
-    options: poll.options.map((option) => ({ ...option })),
+    options: poll.options.map((option) => ({
+      ...option,
+      voters: option.voters.map((voter) => ({ ...voter })),
+    })),
   };
 }
 
