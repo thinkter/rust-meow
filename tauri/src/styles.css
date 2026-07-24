@@ -2172,10 +2172,6 @@ html[data-appearance="light"] .message-sender {
   flex: 1;
 }
 
-.participant-list {
-  margin: 0 calc(-20px * var(--scale)) calc(-14px * var(--scale));
-}
-
 .participant-virtual-list {
   position: relative;
   min-height: 0;
@@ -2277,33 +2273,6 @@ html[data-appearance="light"] .message-sender {
   font-weight: 600;
   letter-spacing: 0.6px;
   text-transform: uppercase;
-}
-
-.member-row {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  min-height: calc(44px * var(--scale));
-  align-items: center;
-  gap: calc(9px * var(--scale));
-  padding: 4px calc(14px * var(--scale));
-  border: 0;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color 120ms ease-out;
-}
-
-.member-row:hover {
-  background: var(--bg-hover);
-}
-
-.member-row-copy {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* ── Settings ── */
@@ -2656,8 +2625,7 @@ html[data-appearance="light"] .message-sender {
   line-height: 1.8;
 }
 
-.modal-backdrop,
-.modal-scrim {
+.modal-backdrop {
   position: fixed;
   inset: 0;
   z-index: 50;
