@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import {
   Archive,
@@ -269,30 +269,22 @@ function SearchResults(props: { model: AppModel; ref?: (element: HTMLDivElement)
         }
       }}
     >
-      <Show when={state.searchLoading}>
-        <EmptyState title="Searching…"><LoaderCircle class="spinner" size={22} /></EmptyState>
-      </Show>
-      <Show when={!state.searchLoading && state.searchError}>
-        <EmptyState title={state.searchError}><X size={22} /></EmptyState>
-      </Show>
-      <Show when={!state.searchLoading && !state.searchError && state.searchResults && rows().length === 0}>
-        <EmptyState title="No contacts, groups, or messages found"><Search size={22} /></EmptyState>
-      </Show>
+      <Switch>
+        <Match when={state.searchLoading}>
+          <EmptyState title="Searching…"><LoaderCircle class="spinner" size={22} /></EmptyState>
+        </Match>
+        <Match when={state.searchError}>
+          <EmptyState title={state.searchError}><X size={22} /></EmptyState>
+        </Match>
+        <Match when={state.searchResults && rows().length === 0}>
+          <EmptyState title="No contacts, groups, or messages found"><Search size={22} /></EmptyState>
+        </Match>
+      </Switch>
       <Show when={!state.searchLoading && rows().length > 0}>
         <For each={rows()}>
-          {(row) => (
-            <Show
-              when={row.type !== "heading"}
-              fallback={<div class="search-section-label">{row.type === "heading" ? row.label : ""}</div>}
-            >
-              <SearchResultRow
-                row={row as Exclude<SearchRow, { type: "heading" }>}
-                active={selectable()[selected()] === row}
-                model={props.model}
-                onActivate={() => void activate(row as Exclude<SearchRow, { type: "heading" }>)}
-              />
-            </Show>
-          )}
+          {(row) => row.type === "heading"
+            ? <div class="search-section-label">{row.label}</div>
+            : <SearchResultRow row={row} active={selectable()[selected()] === row} model={props.model} onActivate={() => void activate(row)} />}
         </For>
       </Show>
     </div>

@@ -1,12 +1,4 @@
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  on,
-  onCleanup,
-  Show,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import {
   ArrowDown,
@@ -33,7 +25,7 @@ import {
 import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
 import { MessageBubble } from "./MessageBubble";
-import { IconButton, Spinner } from "./Primitives";
+import { EmptyState, IconButton, Spinner } from "./Primitives";
 
 /**
  * One conversation pane's worth of chrome: header, message list, jump-to-
@@ -307,16 +299,14 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
         aria-live="polite"
         onScroll={scheduleScrollStateUpdate}
       >
-        <Show when={conversation().loading}>
-          <div class="empty-state"><Spinner label="Loading messages" /></div>
-        </Show>
-        <Show when={!conversation().loading && messages().length === 0}>
-          <div class="empty-state">
-            <MessageCircleMore size={25} />
-            <strong>No messages here yet. Say hello.</strong>
-          </div>
-        </Show>
-        <Show when={!conversation().loading && messages().length > 0}>
+        <Switch>
+          <Match when={conversation().loading}>
+          <EmptyState><Spinner label="Loading messages" /></EmptyState>
+          </Match>
+          <Match when={messages().length === 0}>
+            <EmptyState title="No messages here yet. Say hello."><MessageCircleMore size={25} /></EmptyState>
+          </Match>
+          <Match when={true}>
           <div class="message-canvas" style={{ height: `${virtualizer.getTotalSize()}px` }}>
             <For each={virtualizer.getVirtualItems()}>
               {(virtualRow) => {
@@ -380,7 +370,8 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
               }}
             </For>
           </div>
-        </Show>
+          </Match>
+        </Switch>
         <Show when={conversation().loadingOlder}>
           <div style={{ position: "sticky", top: "8px", display: "flex", "justify-content": "center", "z-index": 5 }}>
             <span class="date-separator" style={{ position: "static", transform: "none" }}><Spinner small label="Loading older messages" /></span>

@@ -33,11 +33,11 @@ export function Spinner(props: { label?: string; small?: boolean }) {
   );
 }
 
-export function EmptyState(props: ParentProps & { title: string }) {
+export function EmptyState(props: ParentProps & { title?: string; style?: JSX.CSSProperties }) {
   return (
-    <div class="empty-state">
+    <div class="empty-state" style={props.style}>
       {props.children}
-      <strong>{props.title}</strong>
+      {props.title !== undefined ? <strong>{props.title}</strong> : null}
     </div>
   );
 }
