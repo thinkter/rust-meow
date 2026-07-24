@@ -1,9 +1,10 @@
-import { For, onCleanup, onMount, Show } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   Archive,
   PanelLeftClose,
   PanelLeftOpen,
   MessageCircle,
+  Search,
   Settings,
   ShieldCheck,
 } from "lucide-solid";
@@ -13,6 +14,7 @@ import { Conversation } from "./components/Conversation";
 import { TitleBar } from "./components/TitleBar";
 import { MemberPanel } from "./components/MemberPanel";
 import { ChatSwitcher } from "./components/ChatSwitcher";
+import { SpotlightSearch } from "./components/SpotlightSearch";
 import { ChatInfoPanel, SettingsPanel } from "./components/Panels";
 import {
   EmptyConversation,
@@ -38,6 +40,7 @@ export default function App() {
     };
   }
   let searchInput: HTMLInputElement | undefined;
+  const [spotlightOpen, setSpotlightOpen] = createSignal(false);
 
   onMount(() => {
     void actions.bootstrap();
@@ -76,8 +79,8 @@ export default function App() {
       <Show when={state.screen === "chats"}>
         <main
           class={`app-shell ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""}`}
-          inert={Boolean(state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
-          aria-hidden={state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
+          inert={Boolean(spotlightOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
+          aria-hidden={spotlightOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
         >
           <TitleBar model={model} />
           <nav class="nav-rail" aria-label="Primary navigation">
@@ -90,6 +93,9 @@ export default function App() {
               onClick={() => actions.setFilter("all")}
             >
               <MessageCircle size={21} />
+            </IconButton>
+            <IconButton label="Quick search (Ctrl+K)" onClick={toggleSpotlight}>
+              <Search size={20} />
             </IconButton>
             <IconButton
               label="Archived chats"
@@ -144,6 +150,7 @@ export default function App() {
         </main>
       </Show>
       <ChatSwitcher model={model} />
+      <SpotlightSearch model={model} open={spotlightOpen()} onClose={() => setSpotlightOpen(false)} />
       <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {state.tabAnnouncement}
       </p>
@@ -160,6 +167,19 @@ export default function App() {
     const target = event.target as HTMLElement | null;
     const editing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable;
 
+    if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
+      toggleSpotlight();
+      event.preventDefault();
+      return;
+    }
+    if (spotlightOpen()) {
+      if (event.key === "Escape") {
+        setSpotlightOpen(false);
+        event.preventDefault();
+      }
+      return;
+    }
+
     // G4: first Ctrl+Tab opens the alt-tab-style overlay; further presses
     // while it is open only move the highlight, never switch chats outright.
     if (event.ctrlKey && event.key === "Tab") {
@@ -170,12 +190,6 @@ export default function App() {
     }
     if (event.ctrlKey && event.key === "\\") {
       toggleSplit();
-      event.preventDefault();
-      return;
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
-      searchInput?.focus();
-      searchInput?.select();
       event.preventDefault();
       return;
     }
@@ -217,5 +231,18 @@ export default function App() {
       actions.splitPane();
     }
     prefActions.update("splitView", state.panes.length >= 2);
+  }
+
+  function toggleSpotlight() {
+    if (!spotlightOpen() && (
+      state.logoutConfirmation ||
+      state.imageViewer ||
+      state.forwardDialog ||
+      state.fileSendConfirmation
+    )) {
+      return;
+    }
+    if (!spotlightOpen()) actions.cancelSwitcher();
+    setSpotlightOpen((open) => !open);
   }
 }

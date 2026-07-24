@@ -3,6 +3,10 @@ import { createStore, reconcile } from "solid-js/store";
 import { bridge, normalizeBridgeError, openFile, openUrl, revealMediaPath } from "../lib/bridge";
 import { messageText } from "../lib/format";
 import { BoundedSet, boundWindowAround } from "../lib/performance";
+import {
+  mergeSpotlightChatUsage,
+  recordSpotlightChatUse,
+} from "../lib/spotlight";
 import { ParticipantAvatarQueue } from "../lib/participant-avatar-queue";
 import { clearMergedPollVotes } from "../lib/chat-merge";
 import { clonePollContent, optimisticPollVote, preservePendingPollIntent } from "../lib/polls";
@@ -709,6 +713,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     });
     ensureDraft(chatId);
     rememberRecentChat(chatId);
+    recordSpotlightChatUse(chatId);
     touchConversationFocus(chatId);
     pruneConversations();
     persistWorkspace();
@@ -753,6 +758,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     });
     ensureDraft(chatId);
     rememberRecentChat(chatId);
+    recordSpotlightChatUse(chatId);
     touchConversationFocus(chatId);
     pruneConversations();
     persistWorkspace();
@@ -2094,6 +2100,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     if (typingChatId === oldId) typingChatId = newId;
     const recent = readRecentChats().map((id) => (id === oldId ? newId : id));
     writeRecentChats([...new Set(recent)]);
+    mergeSpotlightChatUsage(oldId, newId);
     persistWorkspace();
     // Active pin lists omit unpin tombstones, so old and canonical lists must
     // never be merged locally. Hydrate the authoritative canonical set.
