@@ -1,8 +1,5 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
-  Archive,
-  PanelLeftClose,
-  PanelLeftOpen,
   MessageCircle,
   Search,
   Settings,
@@ -89,33 +86,14 @@ export default function App() {
               <ThemeIcon icon={MessageCircle} name="chat" size={22} />
             </div>
             <IconButton
-              label="Chats"
-              active={state.chatFilter !== "archived"}
-              onClick={() => actions.setFilter("all")}
+              label={preferences.sidebarCollapsed ? "Show chat list" : "Hide chat list"}
+              active={!preferences.sidebarCollapsed}
+              onClick={() => prefActions.update("sidebarCollapsed", !preferences.sidebarCollapsed)}
             >
               <ThemeIcon icon={MessageCircle} name="chat" size={21} />
             </IconButton>
             <IconButton label="Quick search (Ctrl+K)" onClick={toggleSpotlight}>
               <ThemeIcon icon={Search} name="search" size={20} />
-            </IconButton>
-            <IconButton
-              label="Archived chats"
-              active={state.chatFilter === "archived"}
-              onClick={() => actions.setFilter("archived")}
-            >
-              <ThemeIcon icon={Archive} name="archive" size={20} />
-            </IconButton>
-            <IconButton
-              label={preferences.sidebarCollapsed ? "Show chat list" : "Hide chat list"}
-              active={!preferences.sidebarCollapsed}
-              onClick={() => prefActions.update("sidebarCollapsed", !preferences.sidebarCollapsed)}
-            >
-              <Show
-                when={preferences.sidebarCollapsed}
-                fallback={<ThemeIcon icon={PanelLeftClose} name="sidebar" size={20} />}
-              >
-                <ThemeIcon icon={PanelLeftOpen} name="sidebar" size={20} />
-              </Show>
             </IconButton>
             <div class="nav-spacer" />
             <IconButton label="Privacy architecture" onClick={() => actions.toggleSettings(true)}>
