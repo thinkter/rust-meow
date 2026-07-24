@@ -44,7 +44,7 @@ release even if the visible UI appears correct.
   processes or read arbitrary local files.
 - Tauri and the sidecar communicate only through one coordinated protocol
   version using four-byte big-endian length, protobuf payload, and a maximum
-  frame size of 8 MiB. Poll and pinned-message work advanced the wire contract to v15; both
+  frame size of 8 MiB. Forwarding and message editing advanced the wire contract to v16; both
   processes must always be rebuilt together at that version.
 - `Hello` is the first request. Normal requests are not sent before its version
   handshake succeeds.
@@ -95,7 +95,7 @@ Known foundation blockers at this snapshot:
   must be accepted explicitly rather than inferred from the smaller size;
 - the Makefile now makes Tauri the default development/build/check path; GPUI
   regressions remain an explicit migration gate;
-- protocol v15 and attachment, poll, and pinned-message RPCs are wired through the Go backend,
+- protocol v16 and attachment, poll, pinned-message, forward, and edit RPCs are wired through the Go backend,
   shared fake bridge, Tauri commands, and typed frontend, but the end-to-end
   document/audio/video gates remain unproven.
 
@@ -104,7 +104,7 @@ Known foundation blockers at this snapshot:
 | Capability | GPUI baseline | Tauri state | Proof required before cutover |
 | --- | --- | --- | --- |
 | Sidecar is sole state owner | GPUI | Core | **TR-01:** inspect open files while paired; only the Go PID may hold `session.db`/`client.db`; webview and Tauri code contain no SQL/session access. |
-| Protocol v15 Hello-first handshake | Shared GPUI bridge at v15 | Core | **TR-02:** both processes declare v15; valid Hello succeeds; request-before-Hello and incompatible versions fail closed in backend tests and a packaged-app smoke test. |
+| Protocol v16 Hello-first handshake | Shared GPUI bridge at v16 | Core | **TR-02:** both processes declare v16; valid Hello succeeds; request-before-Hello and incompatible versions fail closed in backend tests and a packaged-app smoke test. |
 | 8 MiB framed protobuf codec | GPUI | Core | **TR-03:** round-trip, zero-length, truncated, corrupt, and oversized frame tests pass on both sides. |
 | Concurrent request correlation | GPUI | Core | **TR-04:** issue mixed read/write RPCs with deliberately reordered responses; each promise completes once with its own response. |
 | Per-operation timeouts | GPUI | Core | **TR-05:** control/read/write stalls produce typed errors; late replies are ignored and pending entries are removed. |
