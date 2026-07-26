@@ -76,6 +76,15 @@ the backend takes an OS-level profile lock and fails a second process closed.
 | `make legacy-test` | GPUI regression tests |
 | `make legacy-release` | Previous GPUI release layout |
 
+GitHub's **Release** workflow builds downloadable installers for Linux x86-64
+and ARM64 (`.deb` and AppImage), macOS Intel and Apple Silicon (`.dmg`), and
+Windows x86-64 (NSIS `.exe` and `.msi`). Run it manually from the Actions tab
+for test artifacts. Pushing a `v*` tag builds the same matrix and publishes the
+installers to that tag's GitHub Release. The macOS artifacts are ad-hoc signed;
+Windows and macOS production code signing/notarization still require release
+credentials. Linux x86-64 releases also include a portable `.tar.gz` containing
+the `rust-meow` executable and its required `rust-meow-backend` sidecar.
+
 `make build` writes `tauri/src-tauri/target/release/rust-meow` and places a
 stripped static sidecar next to it. `make release-linux` detects the native Linux
 architecture, stages the target-triple-suffixed sidecar expected by Tauri, and

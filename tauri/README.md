@@ -174,6 +174,13 @@ The base `tauri.conf.json` deliberately omits `externalBin`, so fake development
 does not require a staged Go binary. The generated sidecar inputs under
 `src-tauri/binaries/` are ignored.
 
+The GitHub **Release** workflow uses
+`scripts/release/prepare-sidecar.mjs` to build the matching static Go sidecar
+before packaging Linux x86-64/ARM64, macOS Intel/Apple Silicon, and Windows
+x86-64 installers. Manual runs retain the matrix outputs as workflow artifacts;
+`v*` tags also attach them to a GitHub Release. The Linux x86-64 job additionally
+packages the executable and required sidecar together as a portable `.tar.gz`.
+
 Bundling is only the first distribution gate. Unpack the package, verify the
 sidecar and executable modes, launch without `RUST_MEOW_BACKEND`, and prove the
 installed app completes Hello. Signing, atomic app/sidecar updates, and clean
