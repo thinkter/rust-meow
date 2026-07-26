@@ -82,7 +82,8 @@ Windows x86-64 (NSIS `.exe` and `.msi`). Run it manually from the Actions tab
 for test artifacts. Pushing a `v*` tag builds the same matrix and publishes the
 installers to that tag's GitHub Release. The macOS artifacts are ad-hoc signed;
 Windows and macOS production code signing/notarization still require release
-credentials.
+credentials. Linux x86-64 releases also include a portable `.tar.gz` containing
+the `rust-meow` executable and its required `rust-meow-backend` sidecar.
 
 `make build` writes `tauri/src-tauri/target/release/rust-meow` and places a
 stripped static sidecar next to it. `make release-linux` detects the native Linux
