@@ -1850,6 +1850,10 @@ impl RustMeow {
                     self.load_chats(String::new());
                 }
             }
+            // Detailed sync/coverage UI is implemented by the primary Tauri
+            // shell. The legacy behavioral reference keeps its coarse status.
+            Some(backend_event::Event::SyncStatusChanged(_)) => {}
+            Some(backend_event::Event::HistoryCoverageChanged(_)) => {}
             Some(backend_event::Event::ChatUpserted(upsert)) => {
                 if let Some(chat) = upsert.chat {
                     self.store.upsert_chat(chat);

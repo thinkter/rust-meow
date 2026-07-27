@@ -15,7 +15,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 18;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -86,6 +86,7 @@ impl BackendClient {
             .name("bridge-reader".into())
             .spawn(move || {
                 if let Err(error) = reader_loop(stdout, &incoming_tx) {
+                    let transport_error = error.to_string();
                     let status = reader_child
                         .lock()
                         .ok()
@@ -97,11 +98,18 @@ impl BackendClient {
                         .map(|value| value.clone())
                         .unwrap_or_default();
                     let message = match (diagnostic.trim(), status) {
-                        ("", Some(status)) => format!("{error}; backend {status}"),
-                        ("", None) => error.to_string(),
-                        (diagnostic, Some(status)) => format!("{diagnostic}; backend {status}"),
-                        (diagnostic, None) => diagnostic.to_owned(),
+                        ("", Some(status)) => {
+                            format!("backend transport failed: {transport_error}; backend {status}")
+                        }
+                        ("", None) => format!("backend transport failed: {transport_error}"),
+                        (diagnostic, Some(status)) => format!(
+                            "backend transport failed: {transport_error}; diagnostics: {diagnostic}; backend {status}"
+                        ),
+                        (diagnostic, None) => format!(
+                            "backend transport failed: {transport_error}; diagnostics: {diagnostic}"
+                        ),
                     };
+                    eprintln!("{message}");
                     let _ = incoming_tx.send_blocking(BridgeMessage::Exited(BridgeExit {
                         kind: classify_exit(&message),
                         message,
@@ -301,6 +309,23 @@ fn backend_executable() -> Result<PathBuf> {
     Ok(current.parent().unwrap_or(Path::new(".")).join(name))
 }
 
+fn fake_history_coverage(chat_id: String) -> proto::HistoryCoverage {
+    proto::HistoryCoverage {
+        chat_id,
+        state: proto::HistoryCoverageState::Unknown as i32,
+        revision: 1,
+        local_message_count: 1_000,
+        oldest_message_timestamp_ms: 1_700_000_000_000,
+        on_demand_messages_added: 0,
+        last_requested_count: 0,
+        last_received_count: 0,
+        last_added_count: 0,
+        last_requested_at_ms: 0,
+        retry_after_ms: 0,
+        detail: "Older WhatsApp history has not been checked".into(),
+    }
+}
+
 fn fake_loop(
     outgoing: async_channel::Receiver<proto::Envelope>,
     incoming: async_channel::Sender<BridgeMessage>,
@@ -348,6 +373,59 @@ fn fake_loop(
                     }),
                 );
                 rpc_response::Result::StartPairing(proto::StartPairingResponse { started: true })
+            }
+            Some(rpc_request::Request::GetSyncStatus(_)) => {
+                rpc_response::Result::SyncStatus(proto::SyncStatusResponse {
+                    status: Some(proto::SyncStatus {
+                        phase: proto::SyncPhase::Complete as i32,
+                        revision: 1,
+                        chats_processed: 10_000,
+                        messages_processed: message_total as u64,
+                        whatsapp_progress: 100,
+                        started_at_ms: 0,
+                        completed_at_ms: 0,
+                        detail: "Up to date".into(),
+                    }),
+                })
+            }
+            Some(rpc_request::Request::GetChatHistoryCoverage(request)) => {
+                rpc_response::Result::GetChatHistoryCoverage(
+                    proto::GetChatHistoryCoverageResponse {
+                        coverage: Some(fake_history_coverage(request.chat_id)),
+                    },
+                )
+            }
+            Some(rpc_request::Request::RequestOlderHistory(request)) => {
+                let mut coverage = fake_history_coverage(request.chat_id);
+                coverage.state = proto::HistoryCoverageState::Requesting as i32;
+                coverage.detail = "Requesting 50 older messages from WhatsApp".into();
+                let mut completed = coverage.clone();
+                completed.state = proto::HistoryCoverageState::Exhausted as i32;
+                completed.revision += 1;
+                completed.detail = "WhatsApp returned no older messages".into();
+                emit_fake_event(
+                    &incoming,
+                    &event_sequence,
+                    proto::backend_event::Event::HistoryCoverageChanged(
+                        proto::HistoryCoverageChanged {
+                            coverage: Some(completed),
+                        },
+                    ),
+                );
+                rpc_response::Result::RequestOlderHistory(proto::RequestOlderHistoryResponse {
+                    coverage: Some(coverage),
+                })
+            }
+            Some(rpc_request::Request::GetHistoryOverview(_)) => {
+                rpc_response::Result::GetHistoryOverview(proto::GetHistoryOverviewResponse {
+                    overview: Some(proto::HistoryOverview {
+                        local_message_count: message_total as u64,
+                        chats_with_messages: 10_000,
+                        chats_checked: 0,
+                        chats_unknown: 10_000,
+                        chats_without_anchor: 0,
+                    }),
+                })
             }
             Some(rpc_request::Request::ListChats(request)) => {
                 let start = request.cursor.parse::<usize>().unwrap_or(0);
