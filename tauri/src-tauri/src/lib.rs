@@ -14,13 +14,14 @@ use std::{
     collections::HashMap,
     io::Cursor,
     path::{Path, PathBuf},
-    process::{Child, Command},
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
+#[cfg(target_os = "linux")]
+use std::process::{Child, Command};
 
 use proto::{rpc_request, rpc_response};
 use serde::Serialize;
@@ -78,6 +79,8 @@ enum FrontendEventKind {
     ConnectionChanged(proto::ConnectionChanged),
     PairingQr(proto::PairingQr),
     SyncProgress(proto::SyncProgress),
+    SyncStatusChanged(proto::SyncStatusChanged),
+    HistoryCoverageChanged(proto::HistoryCoverageChanged),
     ChatUpserted(proto::ChatUpserted),
     MessageUpserted(proto::MessageUpserted),
     ReceiptUpdated(proto::ReceiptUpdated),
@@ -163,6 +166,8 @@ impl From<proto::BackendEvent> for Option<FrontendEvent> {
             Event::ConnectionChanged(value) => FrontendEventKind::ConnectionChanged(value),
             Event::PairingQr(value) => FrontendEventKind::PairingQr(value),
             Event::SyncProgress(value) => FrontendEventKind::SyncProgress(value),
+            Event::SyncStatusChanged(value) => FrontendEventKind::SyncStatusChanged(value),
+            Event::HistoryCoverageChanged(value) => FrontendEventKind::HistoryCoverageChanged(value),
             Event::ChatUpserted(value) => FrontendEventKind::ChatUpserted(value),
             Event::MessageUpserted(value) => FrontendEventKind::MessageUpserted(value),
             Event::ReceiptUpdated(value) => FrontendEventKind::ReceiptUpdated(value),
@@ -1492,6 +1497,22 @@ rpc_commands! {
         rpc_request::Request::StartPairing(proto::StartPairingRequest {}),
         WRITE_TIMEOUT => StartPairing
     }
+    get_sync_status() -> proto::SyncStatusResponse {
+        rpc_request::Request::GetSyncStatus(proto::GetSyncStatusRequest {}),
+        CONTROL_TIMEOUT => SyncStatus
+    }
+    request_older_history(chat_id: String) -> proto::RequestOlderHistoryResponse {
+        rpc_request::Request::RequestOlderHistory(proto::RequestOlderHistoryRequest { chat_id }),
+        WRITE_TIMEOUT => RequestOlderHistory
+    }
+    get_chat_history_coverage(chat_id: String) -> proto::GetChatHistoryCoverageResponse {
+        rpc_request::Request::GetChatHistoryCoverage(proto::GetChatHistoryCoverageRequest { chat_id }),
+        READ_TIMEOUT => GetChatHistoryCoverage
+    }
+    get_history_overview() -> proto::GetHistoryOverviewResponse {
+        rpc_request::Request::GetHistoryOverview(proto::GetHistoryOverviewRequest {}),
+        READ_TIMEOUT => GetHistoryOverview
+    }
     list_chats(cursor: String, limit: u32) -> proto::ListChatsResponse {
         rpc_request::Request::ListChats(proto::ListChatsRequest { cursor, limit }),
         READ_TIMEOUT => ListChats
@@ -1873,6 +1894,10 @@ pub fn run() {
             hello,
             get_auth_state,
             start_pairing,
+            get_sync_status,
+            request_older_history,
+            get_chat_history_coverage,
+            get_history_overview,
             list_chats,
             list_messages,
             open_message_window,
