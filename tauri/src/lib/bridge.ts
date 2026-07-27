@@ -44,6 +44,10 @@ import type {
   ListPinnedMessagesResponse,
   ForwardMessageResponse,
   EditMessageResponse,
+  SyncStatusResponse,
+  RequestOlderHistoryResponse,
+  GetChatHistoryCoverageResponse,
+  GetHistoryOverviewResponse,
 } from "./types";
 
 export type BackendEventHandler = (
@@ -298,6 +302,10 @@ export interface BridgeApi {
   hello(): Promise<HelloResponse>;
   getAuthState(): Promise<AuthStateResponse>;
   startPairing(): Promise<StartPairingResponse>;
+  getSyncStatus(): Promise<SyncStatusResponse>;
+  requestOlderHistory(chatId: string): Promise<RequestOlderHistoryResponse>;
+  getChatHistoryCoverage(chatId: string): Promise<GetChatHistoryCoverageResponse>;
+  getHistoryOverview(): Promise<GetHistoryOverviewResponse>;
   listChats(cursor?: string, limit?: number): Promise<ListChatsResponse>;
   listMessages(
     chatId: string,
@@ -406,6 +414,13 @@ const nativeBridge: BridgeApi = {
   hello: () => invokeCommand<HelloResponse>("hello"),
   getAuthState: () => invokeCommand<AuthStateResponse>("get_auth_state"),
   startPairing: () => invokeCommand<StartPairingResponse>("start_pairing"),
+  getSyncStatus: () => invokeCommand<SyncStatusResponse>("get_sync_status"),
+  requestOlderHistory: (chatId) =>
+    invokeCommand<RequestOlderHistoryResponse>("request_older_history", { chatId }),
+  getChatHistoryCoverage: (chatId) =>
+    invokeCommand<GetChatHistoryCoverageResponse>("get_chat_history_coverage", { chatId }),
+  getHistoryOverview: () =>
+    invokeCommand<GetHistoryOverviewResponse>("get_history_overview"),
   listChats: (cursor = "", limit = 100) =>
     invokeCommand<ListChatsResponse>("list_chats", { cursor, limit }),
   listMessages: (

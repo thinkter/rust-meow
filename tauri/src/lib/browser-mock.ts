@@ -2,6 +2,8 @@ import {
   AttachmentKind,
   ChatKind,
   ConnectionState,
+  SyncPhase,
+  HistoryCoverageState,
   MessageStatus,
   type AttachmentContent, type Chat, type ChatInfo, type ChatParticipant,
   type FrontendEventPayload, type Message, type MessageContent, type Reaction, type PinnedMessage,
@@ -12,7 +14,7 @@ import type {
 } from "./bridge";
 
 const OWN_USER_ID = "919900001111@s.whatsapp.net";
-const PROTOCOL_VERSION = 16;
+const PROTOCOL_VERSION = 18;
 const STARTED_AT = Date.now();
 const MINUTE = 60_000;
 const DAY = 86_400_000;
@@ -163,6 +165,42 @@ class BrowserMockBridge implements BridgeApi {
       ownUserId: OWN_USER_ID,
       connectionState: this.connected ? ConnectionState.Connected : ConnectionState.LoggedOut,
     };
+  }
+
+  async getSyncStatus() {
+    return { status: { phase: SyncPhase.Complete, revision: 1, chatsProcessed: 10_000, messagesProcessed: 2_000, whatsAppProgress: 100, startedAtMs: STARTED_AT, completedAtMs: Date.now(), detail: "Up to date" } };
+  }
+
+  async getChatHistoryCoverage(chatId: string) {
+    const messages = this.messages.get(chatId) ?? [];
+    return { coverage: {
+      chatId, state: messages.length ? HistoryCoverageState.Unknown : HistoryCoverageState.NoAnchor,
+      revision: 1, localMessageCount: messages.length,
+      oldestMessageTimestampMs: messages[0]?.timestampMs ?? 0,
+      onDemandMessagesAdded: 0, lastRequestedCount: 0, lastReceivedCount: 0,
+      lastAddedCount: 0, lastRequestedAtMs: 0, retryAfterMs: 0,
+      detail: messages.length ? "Older WhatsApp history has not been checked" : "No local message is available to anchor an older-history request",
+    } };
+  }
+
+  async requestOlderHistory(chatId: string) {
+    const snapshot = await this.getChatHistoryCoverage(chatId);
+    const requesting = { ...snapshot.coverage, state: HistoryCoverageState.Requesting, revision: snapshot.coverage.revision + 1, detail: "Requesting 50 older messages from WhatsApp" };
+    queueMicrotask(() => void this.emit({
+      type: "historyCoverageChanged",
+      payload: { coverage: { ...requesting, state: HistoryCoverageState.Exhausted, revision: requesting.revision + 1, detail: "WhatsApp returned no older messages" } },
+    }));
+    return { coverage: requesting };
+  }
+
+  async getHistoryOverview() {
+    let localMessageCount = 0;
+    let chatsWithMessages = 0;
+    for (const messages of this.messages.values()) {
+      localMessageCount += messages.length;
+      if (messages.length) chatsWithMessages++;
+    }
+    return { overview: { localMessageCount, chatsWithMessages, chatsChecked: 0, chatsUnknown: this.chats.size, chatsWithoutAnchor: this.chats.size - chatsWithMessages } };
   }
 
   async startPairing() {

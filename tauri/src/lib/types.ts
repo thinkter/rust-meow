@@ -73,6 +73,47 @@ export interface AuthState {
 
 export type AuthStateResponse = AuthState;
 
+export const SyncPhase = { Unspecified: 0, NotStarted: 1, Connecting: 2, InitialHistory: 3, AppState: 4, CatchingUp: 5, Complete: 6, Partial: 7, Failed: 8, Offline: 9 } as const;
+export type SyncPhase = (typeof SyncPhase)[keyof typeof SyncPhase];
+export interface SyncStatus { phase: SyncPhase; revision: number; chatsProcessed: number; messagesProcessed: number; whatsAppProgress: number; startedAtMs: number; completedAtMs: number; detail: string; }
+export interface SyncStatusResponse { status: SyncStatus | null; }
+
+export const HistoryCoverageState = {
+  Unknown: 0,
+  Requesting: 1,
+  MoreAvailable: 2,
+  Exhausted: 3,
+  NoAnchor: 4,
+  Offline: 5,
+  Failed: 6,
+  Stalled: 7,
+} as const;
+export type HistoryCoverageState = (typeof HistoryCoverageState)[keyof typeof HistoryCoverageState];
+export interface HistoryCoverage {
+  chatId: string;
+  state: HistoryCoverageState;
+  revision: number;
+  localMessageCount: number;
+  oldestMessageTimestampMs: number;
+  onDemandMessagesAdded: number;
+  lastRequestedCount: number;
+  lastReceivedCount: number;
+  lastAddedCount: number;
+  lastRequestedAtMs: number;
+  retryAfterMs: number;
+  detail: string;
+}
+export interface RequestOlderHistoryResponse { coverage: HistoryCoverage | null; }
+export interface GetChatHistoryCoverageResponse { coverage: HistoryCoverage | null; }
+export interface HistoryOverview {
+  localMessageCount: number;
+  chatsWithMessages: number;
+  chatsChecked: number;
+  chatsUnknown: number;
+  chatsWithoutAnchor: number;
+}
+export interface GetHistoryOverviewResponse { overview: HistoryOverview | null; }
+
 export interface StartPairingResponse {
   started: boolean;
 }
@@ -374,6 +415,8 @@ export interface SyncProgress {
   messagesProcessed: number;
   complete: boolean;
 }
+export interface SyncStatusChanged { status: SyncStatus | null; }
+export interface HistoryCoverageChanged { coverage: HistoryCoverage | null; }
 
 export interface ChatUpserted {
   chat: Chat | null;
@@ -434,6 +477,8 @@ export type FrontendEventPayload =
   | { type: "connectionChanged"; payload: ConnectionChanged }
   | { type: "pairingQr"; payload: PairingQr }
   | { type: "syncProgress"; payload: SyncProgress }
+  | { type: "syncStatusChanged"; payload: SyncStatusChanged }
+  | { type: "historyCoverageChanged"; payload: HistoryCoverageChanged }
   | { type: "chatUpserted"; payload: ChatUpserted }
   | { type: "messageUpserted"; payload: MessageUpserted }
   | { type: "receiptUpdated"; payload: ReceiptUpdated }
