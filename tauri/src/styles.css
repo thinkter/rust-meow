@@ -913,6 +913,16 @@ html[data-appearance="light"] .avatar {
   font-size: 11px;
 }
 
+.sync-strip-warning {
+  background: color-mix(in srgb, var(--warning) 14%, var(--bg-panel));
+  color: var(--fg);
+}
+
+.sync-strip-warning svg {
+  flex: none;
+  color: var(--warning);
+}
+
 .sync-strip .progress-track {
   position: relative;
   height: 3px;
@@ -1136,6 +1146,54 @@ html[data-appearance="light"] .avatar {
   overflow-y: auto;
   overscroll-behavior: contain;
   contain: strict;
+}
+
+.history-coverage {
+  position: relative;
+  z-index: 4;
+  width: min(430px, calc(100% - 32px));
+  margin: 12px auto 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.history-coverage strong {
+  color: var(--text-primary);
+}
+
+.history-coverage .secondary-button {
+  margin-top: 4px;
+}
+
+.history-coverage-actions,
+.history-sync-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.history-sync-controls {
+  padding: 7px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.history-sync-controls .secondary-button {
+  min-height: 28px;
+  padding: 4px 9px;
+  font-size: 12px;
 }
 
 .message-canvas {
