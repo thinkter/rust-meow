@@ -129,6 +129,22 @@ export function ChatInfoPanel(props: { model: AppModel }) {
               </Show>
 
               <section class="info-section">
+                <h3>Message history</h3>
+                <Show when={state.conversations[props.model.state.selectedChatId]?.historyCoverage} fallback={<p>History coverage is unavailable.</p>}>
+                  {(coverage) => (
+                    <>
+                      <div class="info-row"><HardDrive size={18} /><span>{coverage().localMessageCount.toLocaleString()} messages stored locally</span></div>
+                      <Show when={coverage().onDemandMessagesAdded > 0}>
+                        <div class="info-row"><Download size={18} /><span>{coverage().onDemandMessagesAdded.toLocaleString()} added on demand</span></div>
+                      </Show>
+                      <p>{coverage().detail}</p>
+                      <small>WhatsApp does not provide a lifetime message total, so the app cannot calculate a truthful percentage.</small>
+                    </>
+                  )}
+                </Show>
+              </section>
+
+              <section class="info-section">
                 <Show when={chat()?.muted}><div class="info-row"><BellOff size={18} /><span>Notifications muted</span></div></Show>
                 <Show when={chat()?.archived}><div class="info-row"><Archive size={18} /><span>Archived</span></div></Show>
                 <Show when={chat()?.pinned}><div class="info-row"><ShieldCheck size={18} /><span>Pinned chat</span></div></Show>
