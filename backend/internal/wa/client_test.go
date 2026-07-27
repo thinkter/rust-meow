@@ -1380,9 +1380,12 @@ func TestHistorySyncDoesNotFloodChatEvents(t *testing.T) {
 	for i := range conversations {
 		conversations[i] = &waHistorySync.Conversation{ID: proto.String("123@g.us"), Archived: proto.Bool(true)}
 	}
-	c.reduceHistory(&events.HistorySync{Data: &waHistorySync.HistorySync{Conversations: conversations, Progress: proto.Uint32(100)}})
-	if len(emitted) != 1 || emitted[0].Kind != "sync" || !emitted[0].Complete {
+	c.reduceHistory(&events.HistorySync{Data: &waHistorySync.HistorySync{SyncType: waHistorySync.HistorySync_FULL.Enum(), Conversations: conversations, Progress: proto.Uint32(100)}})
+	if len(emitted) != 2 || emitted[0].Kind != "sync_status" || emitted[1].Kind != "sync" || !emitted[1].Complete {
 		t.Fatalf("history emitted %d events: %+v", len(emitted), emitted)
+	}
+	if status := emitted[0].SyncStatus; status.Phase != "app_state" || status.WhatsAppProgress != 100 || status.ChatsProcessed != 1000 {
+		t.Fatalf("history sync status=%+v", status)
 	}
 	chat, err := productStore.Chat(ctx, "123@g.us")
 	if err != nil {
@@ -1390,6 +1393,32 @@ func TestHistorySyncDoesNotFloodChatEvents(t *testing.T) {
 	}
 	if !chat.Archived {
 		t.Fatal("history archive metadata was not persisted")
+	}
+}
+
+func TestBootstrapProgressAloneDoesNotClaimInitialSyncComplete(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	c, err := New(ctx, directory, productStore, func(Event) {}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.reduceHistory(&events.HistorySync{Data: &waHistorySync.HistorySync{
+		SyncType: waHistorySync.HistorySync_INITIAL_BOOTSTRAP.Enum(),
+		Progress: proto.Uint32(100),
+	}})
+	c.reconcileChatStateForGeneration(c.generation.Load(), func(context.Context, appstate.WAPatchName, bool, bool) error {
+		return nil
+	})
+	status := c.SyncStatus()
+	if status.Phase == "complete" || status.CompletedAtMS != 0 {
+		t.Fatalf("bootstrap was treated as complete: %+v", status)
 	}
 }
 
@@ -1709,11 +1738,11 @@ func TestChatStateProjectionRetriesThenRunsOnlyOncePerProcess(t *testing.T) {
 		return nil
 	}
 	c.reconcileChatState()
-	if c.projectionComplete {
+	if c.projectionComplete.Load() {
 		t.Fatal("failed projection was marked complete")
 	}
 	c.reconcileChatState()
-	if !c.projectionComplete {
+	if !c.projectionComplete.Load() {
 		t.Fatal("successful projection was not marked complete")
 	}
 	c.reconcileChatState()

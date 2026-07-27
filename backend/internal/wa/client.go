@@ -46,6 +46,7 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 	"google.golang.org/protobuf/proto"
@@ -72,49 +73,64 @@ type Event struct {
 	Complete                          bool
 	RecoveredReactions                uint32
 	RepairComplete                    bool
+	SyncStatus                        store.SyncStatus
+	HistoryCoverage                   store.HistoryCoverage
 }
 type Sink func(Event)
 
 type Client struct {
-	ctx                context.Context
-	wa                 *whatsmeow.Client
-	sessions           *sqlstore.Container
-	db                 *sql.DB
-	store              *store.Store
-	sink               Sink
-	log                *slog.Logger
-	lifecycleMu        sync.Mutex
-	eventMu            sync.Mutex
-	pairingMu          sync.Mutex
-	pairing            bool
-	pairingAttempt     *pairingAttempt
-	handlerID          uint32
-	reducer            chan func()
-	reducerWG          sync.WaitGroup
-	reducerDone        chan struct{}
-	closeOnce          sync.Once
-	accepting          atomic.Bool
-	generation         atomic.Uint64
-	logoutFn           func(context.Context) error
-	clearSessionDataFn func(context.Context) error
-	clearAccountDataFn func(context.Context) error
-	markReadFn         func(context.Context, []types.MessageID, time.Time, types.JID, types.JID, ...types.ReceiptType) error
-	avatarDir          string
-	mediaDir           string
-	contactCache       sync.Map
-	avatarCache        sync.Map
-	avatarFetchMu      sync.Mutex
-	avatarFetches      map[string]*avatarFetch
-	negativeAvatarMu   sync.Mutex
-	negativeAvatars    map[string]time.Time
-	appStateProjection sync.Mutex
-	projectionComplete bool
-	fetchAppStateFn    func(context.Context, appstate.WAPatchName, bool, bool) error
-	groupNameFetchMu   sync.Mutex
-	groupNameFetches   map[string]*groupNameFetch
-	getGroupInfoFn     func(context.Context, *whatsmeow.Client, types.JID) (*types.GroupInfo, error)
-	sendPresenceFn     func(context.Context, *whatsmeow.Client, types.Presence) error
-	connectFn          func(context.Context, *whatsmeow.Client) error
+	ctx                 context.Context
+	wa                  *whatsmeow.Client
+	sessions            *sqlstore.Container
+	db                  *sql.DB
+	store               *store.Store
+	sink                Sink
+	log                 *slog.Logger
+	lifecycleMu         sync.Mutex
+	eventMu             sync.Mutex
+	pairingMu           sync.Mutex
+	pairing             bool
+	pairingAttempt      *pairingAttempt
+	handlerID           uint32
+	reducer             chan func()
+	reducerWG           sync.WaitGroup
+	reducerDone         chan struct{}
+	closeOnce           sync.Once
+	accepting           atomic.Bool
+	generation          atomic.Uint64
+	logoutFn            func(context.Context) error
+	clearSessionDataFn  func(context.Context) error
+	clearAccountDataFn  func(context.Context) error
+	markReadFn          func(context.Context, []types.MessageID, time.Time, types.JID, types.JID, ...types.ReceiptType) error
+	avatarDir           string
+	mediaDir            string
+	contactCache        sync.Map
+	avatarCache         sync.Map
+	avatarFetchMu       sync.Mutex
+	avatarFetches       map[string]*avatarFetch
+	negativeAvatarMu    sync.Mutex
+	negativeAvatars     map[string]time.Time
+	appStateProjection  sync.Mutex
+	projectionComplete  atomic.Bool
+	syncMu              sync.Mutex
+	syncStatus          store.SyncStatus
+	syncEpoch           atomic.Uint64
+	historySyncComplete atomic.Bool
+	historyRequestMu    sync.Mutex
+	historyRequest      *olderHistoryRequest
+	fetchAppStateFn     func(context.Context, appstate.WAPatchName, bool, bool) error
+	groupNameFetchMu    sync.Mutex
+	groupNameFetches    map[string]*groupNameFetch
+	getGroupInfoFn      func(context.Context, *whatsmeow.Client, types.JID) (*types.GroupInfo, error)
+	sendPresenceFn      func(context.Context, *whatsmeow.Client, types.Presence) error
+	connectFn           func(context.Context, *whatsmeow.Client) error
+}
+
+type olderHistoryRequest struct {
+	chatID        string
+	anchorID      string
+	anchorTime    time.Time
+	requestedAtMS int64
 }
 
 type avatarFetch struct {
@@ -143,6 +159,30 @@ type cachedContactDetails struct {
 type cachedAvatarMetadata struct {
 	path      string
 	expiresAt time.Time
+}
+
+// whatsmeowLogger keeps WhatsMeow diagnostics on stderr/backend.log. Its
+// stdout protocol stream is framed protobuf and must never receive logs.
+type whatsmeowLogger struct{ log *slog.Logger }
+
+func (l whatsmeowLogger) Warnf(message string, args ...any) {
+	l.log.Warn(fmt.Sprintf(message, args...))
+}
+func (l whatsmeowLogger) Errorf(message string, args ...any) {
+	l.log.Error(fmt.Sprintf(message, args...))
+}
+func (l whatsmeowLogger) Infof(message string, args ...any) {
+	l.log.Info(fmt.Sprintf(message, args...))
+}
+func (l whatsmeowLogger) Debugf(message string, args ...any) {
+	l.log.Debug(fmt.Sprintf(message, args...))
+}
+func (l whatsmeowLogger) Sub(module string) waLog.Logger {
+	return whatsmeowLogger{log: l.log.With("whatsmeow_module", module)}
+}
+
+func newWhatsmeowClient(device *wastore.Device, log *slog.Logger) *whatsmeow.Client {
+	return whatsmeow.NewClient(device, whatsmeowLogger{log: log.With("component", "whatsmeow")})
 }
 
 type ContactDetails struct {
@@ -222,8 +262,17 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 		return nil, err
 	}
 	c := &Client{ctx: ctx, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time), groupNameFetches: make(map[string]*groupNameFetch)}
+	if syncStatus, syncErr := productStore.SyncStatus(ctx); syncErr != nil {
+		c.log.Warn("load persisted sync status", "error", syncErr)
+	} else {
+		c.syncStatus = syncStatus
+		c.historySyncComplete.Store(
+			syncStatus.WhatsAppProgress >= 100 &&
+				(syncStatus.Phase == "app_state" || syncStatus.Phase == "complete"),
+		)
+	}
 	c.loadCachedAvatars()
-	c.bindWhatsmeow(whatsmeow.NewClient(device, nil))
+	c.bindWhatsmeow(newWhatsmeowClient(device, log))
 	c.clearSessionDataFn = c.clearSessionData
 	c.clearAccountDataFn = productStore.ClearAccountData
 	c.accepting.Store(true)
@@ -302,6 +351,86 @@ func (c *Client) OwnID() string {
 		return ""
 	}
 	return c.wa.Store.ID.String()
+}
+
+func (c *Client) SyncStatus() store.SyncStatus {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
+	return c.syncStatus
+}
+
+func (c *Client) updateSyncStatus(update func(*store.SyncStatus)) {
+	c.syncMu.Lock()
+	update(&c.syncStatus)
+	c.syncStatus.Revision++
+	snapshot := c.syncStatus
+	if c.store != nil {
+		if err := c.store.SaveSyncStatus(c.ctx, snapshot); err != nil {
+			c.log.Error("persist sync status", "error", err)
+			c.syncStatus.Phase = "failed"
+			c.syncStatus.Detail = "Sync progress could not be saved locally"
+			c.syncStatus.CompletedAtMS = 0
+			snapshot = c.syncStatus
+		}
+	}
+	c.syncMu.Unlock()
+	if c.sink != nil && c.store != nil {
+		c.sink(Event{Kind: "sync_status", SyncStatus: snapshot})
+	}
+}
+
+func (c *Client) beginInitialSync() {
+	epoch := c.syncEpoch.Add(1)
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		if status.Phase == "not_started" || status.StartedAtMS == 0 {
+			status.ChatsProcessed = 0
+			status.MessagesProcessed = 0
+			status.WhatsAppProgress = 0
+			status.CompletedAtMS = 0
+			status.StartedAtMS = time.Now().UnixMilli()
+		}
+		if status.ChatsProcessed > 0 || status.MessagesProcessed > 0 {
+			status.Phase = "catching_up"
+			status.Detail = "Resuming chat history sync"
+		} else {
+			status.Phase = "connecting"
+			status.Detail = "Waiting for WhatsApp history"
+		}
+	})
+	generation := c.generation.Load()
+	go func() {
+		timer := time.NewTimer(60 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-c.ctx.Done():
+			return
+		}
+		if c.generation.Load() != generation || c.syncEpoch.Load() != epoch {
+			return
+		}
+		current := c.SyncStatus()
+		if current.Phase == "complete" || current.Phase == "failed" || current.Phase == "offline" {
+			return
+		}
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "partial"
+			status.Detail = "WhatsApp has not finished sending initial chat history"
+		})
+	}()
+}
+
+func (c *Client) resetSyncTracking() {
+	c.syncEpoch.Add(1)
+	c.historySyncComplete.Store(false)
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		revision := status.Revision
+		*status = store.SyncStatus{
+			Phase:    "not_started",
+			Revision: revision,
+			Detail:   "Sync has not started",
+		}
+	})
 }
 
 func (c *Client) resolveConversation(rawJID string) (string, string, error) {
@@ -1258,11 +1387,26 @@ func (c *Client) StartPairing(ctx context.Context) (bool, error) {
 				}
 			}
 			var event Event
+			stopAfterEvent := false
 			switch item.Event {
 			case whatsmeow.QRChannelEventCode:
 				event = Event{Kind: "qr", QR: item.Code, QRExpires: time.Now().Add(item.Timeout)}
+			case whatsmeow.QRChannelEventPasskeyRequest:
+				// A passkey assertion is not a QR refresh. Do not leave the user
+				// looking at a QR code that can no longer finish pairing. The desktop
+				// shell does not yet have a native WebAuthn provider, so report the
+				// precise, recoverable condition instead of the opaque event name.
+				event = Event{Kind: "problem", Detail: "WhatsApp requires a passkey to finish linking this device. Rust Meow does not yet support passkey pairing; use a WhatsApp client that supports your passkey, then try again."}
+				stopAfterEvent = true
+			case whatsmeow.QRChannelEventPasskeyResponse:
+				event = Event{Kind: "problem", Detail: "WhatsApp is waiting for passkey verification. Rust Meow cannot complete passkey pairing yet; cancel this attempt and use a supported WhatsApp client."}
+				stopAfterEvent = true
 			case "success":
-				event = Event{Kind: "connection", Detail: "connected"}
+				// PairSuccess only means the phone accepted the new companion. The
+				// authenticated connection happens after a fresh websocket login;
+				// reporting connected here made the UI load chats before WhatsApp
+				// had accepted requests from the new device.
+				event = Event{Kind: "connection", Detail: "connecting"}
 			case whatsmeow.QRChannelEventError:
 				detail := "pairing failed"
 				if item.Error != nil {
@@ -1271,16 +1415,49 @@ func (c *Client) StartPairing(ctx context.Context) (bool, error) {
 				event = Event{Kind: "problem", Detail: detail}
 			case "timeout":
 				event = Event{Kind: "connection", Detail: "offline"}
+			case "err-scanned-without-multidevice":
+				event = Event{Kind: "problem", Detail: "Your phone cannot link this device until WhatsApp multi-device support is enabled. Update WhatsApp on your phone and try again."}
+			case "err-client-outdated":
+				event = Event{Kind: "problem", Detail: "WhatsApp rejected this client because it is out of date. Update Rust Meow and try again."}
+			case "err-unexpected-state":
+				event = Event{Kind: "problem", Detail: "WhatsApp ended the pairing attempt unexpectedly. Refresh the QR code and try again."}
 			default:
 				event = Event{Kind: "problem", Detail: "pairing ended: " + item.Event}
 			}
 			if !c.emitPairingEvent(attempt, event) {
 				return
 			}
+			if stopAfterEvent {
+				// The QR channel otherwise remains open waiting for a WebAuthn
+				// response that this build cannot produce. Disconnecting lets the
+				// next Refresh QR action start a clean pairing attempt.
+				source.Disconnect()
+				return
+			}
+			if item.Event == "success" {
+				go c.reconnectAfterPairing(source, generation)
+				return
+			}
 		}
 	}()
 	c.lifecycleMu.Unlock()
 	return true, nil
+}
+
+// reconnectAfterPairing establishes the authenticated companion session after
+// WhatsApp accepts the QR link. PairSuccess is deliberately not treated as a
+// usable connection: WhatsMeow documents that callers must wait for Connected.
+func (c *Client) reconnectAfterPairing(source *whatsmeow.Client, generation uint64) {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.wa != source || c.generation.Load() != generation || !c.accepting.Load() {
+		return
+	}
+	source.Disconnect()
+	if err := source.ConnectContext(c.ctx); err != nil {
+		c.log.Error("connect after pairing", "error", err)
+		c.sink(Event{Kind: "problem", Detail: "WhatsApp accepted the device link but the new session could not connect. Refresh the QR code and try again."})
+	}
 }
 
 func (c *Client) replaceFailedPairingClient(ctx context.Context, source *whatsmeow.Client, generation uint64) error {
@@ -1306,8 +1483,8 @@ func (c *Client) replaceFailedPairingClient(ctx context.Context, source *whatsme
 	if c.sessions == nil {
 		return errors.New("replace failed pairing client: session store unavailable")
 	}
-	c.bindWhatsmeow(whatsmeow.NewClient(c.sessions.NewDevice(), nil))
-	c.projectionComplete = false
+	c.bindWhatsmeow(newWhatsmeowClient(c.sessions.NewDevice(), c.log))
+	c.projectionComplete.Store(false)
 	c.eventMu.Lock()
 	c.accepting.Store(true)
 	c.eventMu.Unlock()
@@ -3662,6 +3839,126 @@ func (c *Client) SendReaction(ctx context.Context, clientID, chatID, messageID, 
 	return reaction, nil
 }
 
+func (c *Client) HistoryCoverage(ctx context.Context, chatID string) (store.HistoryCoverage, error) {
+	return c.store.HistoryCoverage(ctx, chatID)
+}
+
+func (c *Client) HistoryOverview(ctx context.Context) (store.HistoryOverview, error) {
+	return c.store.HistoryOverview(ctx)
+}
+
+func (c *Client) emitHistoryCoverage(coverage store.HistoryCoverage) {
+	c.sink(Event{Kind: "history_coverage", ChatJID: coverage.ChatID, HistoryCoverage: coverage})
+}
+
+func (c *Client) RequestOlderHistory(ctx context.Context, chatID string) (store.HistoryCoverage, error) {
+	coverage, err := c.store.HistoryCoverage(ctx, chatID)
+	if err != nil {
+		return coverage, err
+	}
+	now := time.Now()
+	if coverage.LocalMessageCount == 0 {
+		return coverage, store.ErrHistoryNoAnchor
+	}
+	if coverage.State == "exhausted" {
+		return coverage, store.ErrHistoryExhausted
+	}
+	if coverage.RetryAfterMS > now.UnixMilli() {
+		return coverage, store.ErrHistoryRateLimit
+	}
+	if !c.IsConnected() {
+		coverage.State = "offline"
+		coverage.Detail = "WhatsApp is offline; reconnect before requesting older messages"
+		coverage, _ = c.store.SaveHistoryCoverage(ctx, coverage)
+		c.emitHistoryCoverage(coverage)
+		return coverage, whatsmeow.ErrNotConnected
+	}
+	anchor, err := c.store.OldestMessage(ctx, chatID)
+	if err != nil {
+		return coverage, err
+	}
+	transport, err := types.ParseJID(anchor.TransportJID)
+	if err != nil {
+		return coverage, err
+	}
+
+	c.historyRequestMu.Lock()
+	if c.historyRequest != nil {
+		c.historyRequestMu.Unlock()
+		return coverage, store.ErrHistoryRequestBusy
+	}
+	request := &olderHistoryRequest{chatID: anchor.ChatJID, anchorID: anchor.ID, anchorTime: anchor.Timestamp, requestedAtMS: now.UnixMilli()}
+	c.historyRequest = request
+	c.historyRequestMu.Unlock()
+
+	coverage.State = "requesting"
+	coverage.LastRequestedCount = 50
+	coverage.LastReceivedCount = 0
+	coverage.LastAddedCount = 0
+	coverage.LastRequestedAtMS = request.requestedAtMS
+	coverage.RetryAfterMS = 0
+	coverage.Detail = "Requesting 50 older messages from WhatsApp"
+	coverage, err = c.store.SaveHistoryCoverage(ctx, coverage)
+	if err != nil {
+		c.clearOlderHistoryRequest(request)
+		return coverage, err
+	}
+	c.emitHistoryCoverage(coverage)
+
+	info := &types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: transport, IsFromMe: anchor.FromMe},
+		ID:            types.MessageID(anchor.ID),
+		Timestamp:     anchor.Timestamp,
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	_, err = c.wa.SendPeerMessage(sendCtx, c.wa.BuildHistorySyncRequest(info, 50))
+	cancel()
+	if err != nil {
+		c.clearOlderHistoryRequest(request)
+		coverage.State = "failed"
+		coverage.Detail = "Failed to send older-history request: " + err.Error()
+		coverage.RetryAfterMS = time.Now().Add(15 * time.Second).UnixMilli()
+		coverage, _ = c.store.SaveHistoryCoverage(context.Background(), coverage)
+		c.emitHistoryCoverage(coverage)
+		return coverage, err
+	}
+	go c.expireOlderHistoryRequest(request)
+	return coverage, nil
+}
+
+func (c *Client) clearOlderHistoryRequest(request *olderHistoryRequest) bool {
+	c.historyRequestMu.Lock()
+	defer c.historyRequestMu.Unlock()
+	if c.historyRequest != request {
+		return false
+	}
+	c.historyRequest = nil
+	return true
+}
+
+func (c *Client) expireOlderHistoryRequest(request *olderHistoryRequest) {
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-c.ctx.Done():
+		return
+	case <-timer.C:
+	}
+	if !c.clearOlderHistoryRequest(request) {
+		return
+	}
+	coverage, err := c.store.HistoryCoverage(c.ctx, request.chatID)
+	if err != nil || coverage.State != "requesting" || coverage.LastRequestedAtMS != request.requestedAtMS {
+		return
+	}
+	coverage.State = "failed"
+	coverage.Detail = "WhatsApp did not return older messages before the request timed out"
+	coverage.RetryAfterMS = time.Now().Add(15 * time.Second).UnixMilli()
+	if coverage, err = c.store.SaveHistoryCoverage(c.ctx, coverage); err == nil {
+		c.emitHistoryCoverage(coverage)
+	}
+}
+
 func (c *Client) RepairRecentReactions(ctx context.Context, chatID string) (uint32, bool, error) {
 	items, targeted, err := c.store.ReserveLegacyReactionReplays(ctx, chatID, 16)
 	if err != nil {
@@ -3805,6 +4102,9 @@ func (c *Client) MarkRead(ctx context.Context, chatID, messageID string) error {
 }
 
 func (c *Client) Logout(ctx context.Context) error {
+	c.historyRequestMu.Lock()
+	c.historyRequest = nil
+	c.historyRequestMu.Unlock()
 	// Group-name fetch registration reads accepting, generation, and c.wa while
 	// holding this mutex. Keep it through both purges and the fresh-client swap
 	// so no fetch can combine an old client with the new account generation.
@@ -3855,10 +4155,11 @@ func (c *Client) Logout(ctx context.Context) error {
 	c.negativeAvatarMu.Lock()
 	clear(c.negativeAvatars)
 	c.negativeAvatarMu.Unlock()
-	c.projectionComplete = false
+	c.projectionComplete.Store(false)
 	if localErr != nil {
 		return &LogoutError{Stage: "local_clear", Remote: remoteErr, Local: localErr}
 	}
+	c.resetSyncTracking()
 	if remoteErr != nil && !errors.Is(remoteErr, whatsmeow.ErrNotLoggedIn) {
 		return &LogoutError{Stage: "remote", Remote: remoteErr}
 	}
@@ -3936,7 +4237,7 @@ func (c *Client) clearSessionData(ctx context.Context) error {
 	// caches such as the account-specific LID map, then give pairing a fresh,
 	// non-deleted device store.
 	c.sessions = sqlstore.NewWithDB(c.db, "sqlite3", nil)
-	c.bindWhatsmeow(whatsmeow.NewClient(c.sessions.NewDevice(), nil))
+	c.bindWhatsmeow(newWhatsmeowClient(c.sessions.NewDevice(), c.log))
 	return clearErr
 }
 
@@ -3958,6 +4259,77 @@ func (c *Client) Close() {
 	})
 }
 
+// resetAfterRemoteLogout turns WhatsApp's permanent 401/logout event into the
+// same clean local state as an operator-initiated logout. WhatsMeow invalidates
+// the current device itself, but its database row remains enough for IsPaired
+// to keep returning true unless we purge it and bind a fresh device store.
+func (c *Client) resetAfterRemoteLogout(source *whatsmeow.Client, generation uint64) {
+	c.eventMu.Lock()
+	current := c.accepting.Load() && c.wa == source && c.generation.Load() == generation
+	c.eventMu.Unlock()
+	if !current {
+		return
+	}
+	if err := c.resetLocalSessionAfterRemoteLogout(c.ctx); err != nil {
+		c.log.Error("reset local state after remote logout", "error", err)
+		c.sink(Event{Kind: "problem", Detail: "WhatsApp logged this device out, and Rust Meow could not reset its local session. Restart the app and try again."})
+		return
+	}
+	c.sink(Event{Kind: "connection", Detail: "logged_out"})
+	if _, err := c.StartPairing(c.ctx); err != nil {
+		c.log.Error("start pairing after remote logout", "error", err)
+		c.sink(Event{Kind: "problem", Detail: "WhatsApp logged this device out. Refresh the QR code to try linking again."})
+	}
+}
+
+// resetLocalSessionAfterRemoteLogout mirrors the local half of Logout without
+// sending a logout RPC. The server has already invalidated the socket, so a
+// remote request would necessarily fail and must not prevent recovery.
+func (c *Client) resetLocalSessionAfterRemoteLogout(ctx context.Context) error {
+	c.groupNameFetchMu.Lock()
+	defer c.groupNameFetchMu.Unlock()
+	c.eventMu.Lock()
+	c.accepting.Store(false)
+	c.generation.Add(1)
+	clear(c.groupNameFetches)
+	c.eventMu.Unlock()
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	pairingErr := c.cancelAndWaitPairing(ctx)
+	if err := c.reducerBarrier(ctx); err != nil {
+		return fmt.Errorf("isolate remote logout: %w", err)
+	}
+	c.appStateProjection.Lock()
+	defer c.appStateProjection.Unlock()
+	var localErr error
+	if pairingErr != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("stop pairing stream: %w", pairingErr))
+	}
+	if err := c.clearSessionDataFn(ctx); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear session database: %w", err))
+	}
+	if err := c.clearAccountDataFn(ctx); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear product database: %w", err))
+	}
+	if err := os.RemoveAll(c.avatarDir); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear avatar cache: %w", err))
+	}
+	c.clearAvatarCache()
+	if err := os.RemoveAll(c.mediaDir); err != nil {
+		localErr = errors.Join(localErr, fmt.Errorf("clear media cache: %w", err))
+	}
+	c.clearContactCache()
+	c.negativeAvatarMu.Lock()
+	clear(c.negativeAvatars)
+	c.negativeAvatarMu.Unlock()
+	c.projectionComplete.Store(false)
+	if localErr == nil {
+		c.resetSyncTracking()
+		c.accepting.Store(true)
+	}
+	return localErr
+}
+
 func (c *Client) handleEvent(source *whatsmeow.Client, sourceGeneration uint64, raw any) {
 	c.eventMu.Lock()
 	defer c.eventMu.Unlock()
@@ -3967,6 +4339,15 @@ func (c *Client) handleEvent(source *whatsmeow.Client, sourceGeneration uint64, 
 	switch evt := raw.(type) {
 	case *events.Connected:
 		c.sink(Event{Kind: "connection", Detail: "connected"})
+		syncStatus := c.SyncStatus()
+		if syncStatus.CompletedAtMS > 0 && syncStatus.WhatsAppProgress >= 100 {
+			c.updateSyncStatus(func(status *store.SyncStatus) {
+				status.Phase = "complete"
+				status.Detail = "Up to date"
+			})
+		} else {
+			c.beginInitialSync()
+		}
 		// WhatsApp only delivers chat-presence (typing) updates to clients
 		// that have marked themselves available. Use the client that emitted
 		// this event: logout may install a fresh unpaired client before this
@@ -3975,8 +4356,28 @@ func (c *Client) handleEvent(source *whatsmeow.Client, sourceGeneration uint64, 
 		go c.reconcileChatStateForGeneration(sourceGeneration, source.FetchAppState)
 	case *events.Disconnected:
 		c.sink(Event{Kind: "connection", Detail: "offline"})
+		c.historyRequestMu.Lock()
+		pendingHistory := c.historyRequest
+		c.historyRequest = nil
+		c.historyRequestMu.Unlock()
+		if pendingHistory != nil {
+			if coverage, coverageErr := c.store.HistoryCoverage(c.ctx, pendingHistory.chatID); coverageErr == nil {
+				coverage.State = "offline"
+				coverage.Detail = "WhatsApp disconnected while requesting older messages"
+				if saved, saveErr := c.store.SaveHistoryCoverage(c.ctx, coverage); saveErr == nil {
+					c.emitHistoryCoverage(saved)
+				}
+			}
+		}
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "offline"
+			status.Detail = "Offline; sync will resume when connected"
+		})
 	case *events.LoggedOut:
-		c.sink(Event{Kind: "connection", Detail: "logged_out"})
+		// A remote logout permanently invalidates this device. Resetting in a
+		// goroutine avoids taking Logout's event lock recursively from the
+		// WhatsMeow event handler.
+		go c.resetAfterRemoteLogout(source, sourceGeneration)
 	case *events.StreamReplaced:
 		c.sink(Event{Kind: "problem", Detail: "session replaced by another client"})
 	case *events.Message:
@@ -4070,11 +4471,15 @@ func (c *Client) reconcileChatStateForGeneration(generation uint64, fetch func(c
 	if c.generation.Load() != generation || !c.accepting.Load() || c.store == nil || fetch == nil {
 		return
 	}
-	if c.projectionComplete {
+	if c.projectionComplete.Load() {
 		return
 	}
 	if err := fetch(c.ctx, appstate.WAPatchRegularLow, true, false); err != nil {
 		c.log.Error("reconcile WhatsApp chat state", "error", err)
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "partial"
+			status.Detail = "Chat state could not be fully synchronized"
+		})
 		return
 	}
 	// Mute status lives in the high-priority patch. Fetching it on link — with
@@ -4083,13 +4488,31 @@ func (c *Client) reconcileChatStateForGeneration(generation uint64, fetch func(c
 	// notifications after a fresh pairing rather than only after a live toggle.
 	if err := fetch(c.ctx, appstate.WAPatchRegularHigh, true, false); err != nil {
 		c.log.Error("reconcile WhatsApp mute state", "error", err)
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "partial"
+			status.Detail = "Mute and archive state could not be fully synchronized"
+		})
 		return
 	}
 	if err := c.reducerBarrier(c.ctx); err != nil {
 		c.log.Error("wait for WhatsApp chat-state projection", "error", err)
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			status.Phase = "failed"
+			status.Detail = "Local sync processing did not finish"
+		})
 		return
 	}
-	c.projectionComplete = true
+	c.projectionComplete.Store(true)
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		if c.historySyncComplete.Load() {
+			status.Phase = "complete"
+			status.Detail = "Up to date"
+			status.CompletedAtMS = time.Now().UnixMilli()
+		} else if status.Phase != "complete" {
+			status.Phase = "app_state"
+			status.Detail = "Finishing local setup"
+		}
+	})
 }
 
 func (c *Client) sendPresence(source *whatsmeow.Client, generation uint64) {
@@ -5209,8 +5632,19 @@ func (c *Client) reduceMarkChatAsRead(evt *events.MarkChatAsRead) {
 
 func (c *Client) reduceHistory(evt *events.HistorySync) {
 	var chats, messages uint64
+	historyPersistFailed := false
 	pushNames := make(map[types.JID]string)
-	isReactionRepair := evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND
+	syncType := evt.Data.GetSyncType()
+	isReactionRepair := syncType == waHistorySync.HistorySync_ON_DEMAND
+	c.historyRequestMu.Lock()
+	pendingHistory := c.historyRequest
+	c.historyRequestMu.Unlock()
+	historyRequestMatched := false
+	contributesToInitialSync := syncType == waHistorySync.HistorySync_INITIAL_BOOTSTRAP ||
+		syncType == waHistorySync.HistorySync_FULL ||
+		syncType == waHistorySync.HistorySync_RECENT
+	terminalInitialHistory := syncType == waHistorySync.HistorySync_FULL ||
+		syncType == waHistorySync.HistorySync_RECENT
 	for _, conversation := range evt.Data.GetConversations() {
 		rawChatID := conversation.GetID()
 		chatID, transportJID, identityErr := c.resolveConversation(rawChatID)
@@ -5220,6 +5654,7 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 		}
 		if err := c.store.UpsertChatMetadata(c.ctx, chatID, conversation.GetName(), conversation.Archived); err != nil {
 			c.log.Error("persist history chat metadata", "chat_id", chatID, "error", err)
+			historyPersistFailed = true
 		}
 		chats++
 		jid, err := types.ParseJID(rawChatID)
@@ -5336,19 +5771,50 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 			c.resolveMessageReplyChat(&message)
 			batch = append(batch, message)
 		}
-		if err = c.store.ApplyMessages(c.ctx, batch, false); err != nil {
+		added, applyErr := c.store.ApplyMessagesCount(c.ctx, batch, false)
+		if applyErr != nil {
+			err = applyErr
 			c.log.Error("persist history batch", "chat_id", chatID, "count", len(batch), "error", err)
+			historyPersistFailed = true
 			continue
+		}
+		if isReactionRepair && pendingHistory != nil && chatID == pendingHistory.chatID {
+			historyRequestMatched = true
+			coverage, coverageErr := c.store.HistoryCoverage(c.ctx, chatID)
+			if coverageErr == nil && coverage.State == "requesting" && coverage.LastRequestedAtMS == pendingHistory.requestedAtMS {
+				rawCount := uint32(len(conversation.GetMessages()))
+				coverage.LastReceivedCount = rawCount
+				coverage.LastAddedCount = added
+				coverage.OnDemandMessagesAdded += uint64(added)
+				coverage.RetryAfterMS = 0
+				switch {
+				case rawCount == 0:
+					coverage.State = "exhausted"
+					coverage.Detail = "WhatsApp returned no older messages"
+				case added == 0:
+					coverage.State = "stalled"
+					coverage.Detail = "WhatsApp returned history, but it did not add a usable older message"
+				default:
+					coverage.State = "more_available"
+					coverage.Detail = fmt.Sprintf("Added %d older messages from WhatsApp; more can be requested", added)
+				}
+				if saved, saveErr := c.store.SaveHistoryCoverage(c.ctx, coverage); saveErr == nil {
+					c.emitHistoryCoverage(saved)
+				}
+			}
+			c.clearOlderHistoryRequest(pendingHistory)
 		}
 		for _, option := range historyPollOptions {
 			if _, _, optionErr := c.store.AddPollOption(c.ctx, chatID, option.messageID, option.name); optionErr != nil {
 				c.log.Error("persist history poll option", "chat_id", chatID, "poll_message_id", option.messageID, "error", optionErr)
+				historyPersistFailed = true
 			}
 		}
 		for _, historyVote := range historyPollVotes {
 			poll, pollErr := c.store.Poll(c.ctx, chatID, historyVote.vote.PollMessageID)
 			if pollErr != nil {
 				c.log.Error("load history poll for vote", "chat_id", chatID, "poll_message_id", historyVote.vote.PollMessageID, "error", pollErr)
+				historyPersistFailed = true
 				continue
 			}
 			selected, unknown := pollSelectedNames(poll, historyVote.hashes)
@@ -5359,17 +5825,20 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 			historyVote.vote.SelectedOptions = selected
 			if _, _, voteErr := c.store.ApplyPollVote(c.ctx, historyVote.vote); voteErr != nil {
 				c.log.Error("persist history poll vote", "chat_id", chatID, "poll_message_id", historyVote.vote.PollMessageID, "error", voteErr)
+				historyPersistFailed = true
 			}
 		}
 		for _, snapshot := range historyPollSnapshots {
 			if _, _, snapshotErr := c.store.ApplyPollSnapshot(c.ctx, chatID, snapshot.messageID, snapshot.poll, snapshot.at); errors.Is(snapshotErr, sql.ErrNoRows) {
 				if fallbackErr := c.store.ApplyMessage(c.ctx, snapshot.fallback, false); fallbackErr != nil {
 					c.log.Error("persist standalone history poll snapshot", "chat_id", chatID, "message_id", snapshot.fallback.ID, "error", fallbackErr)
+					historyPersistFailed = true
 				} else {
 					messages++
 				}
 			} else if snapshotErr != nil {
 				c.log.Error("persist history poll snapshot", "chat_id", chatID, "poll_message_id", snapshot.messageID, "error", snapshotErr)
+				historyPersistFailed = true
 			}
 		}
 		if unknownHistoryPollOption {
@@ -5379,6 +5848,7 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 		for _, pin := range historyPins {
 			if pinErr := c.store.SetMessagePinned(c.ctx, chatID, pin.messageID, pin.pinnedBy, pin.at, pin.pinned); pinErr != nil {
 				c.log.Error("persist history pin", "chat_id", chatID, "message_id", pin.messageID, "error", pinErr)
+				historyPersistFailed = true
 			} else {
 				historyPinsChanged = true
 			}
@@ -5390,6 +5860,7 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 		recovered := len(reactions)
 		if err = c.store.ApplyReactions(c.ctx, reactions); err != nil {
 			c.log.Error("persist history reactions", "chat_id", chatID, "count", len(reactions), "error", err)
+			historyPersistFailed = true
 			recovered = 0
 		}
 		if isReactionRepair {
@@ -5401,6 +5872,19 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 			}
 		}
 	}
+	if isReactionRepair && pendingHistory != nil && !historyRequestMatched && len(evt.Data.GetConversations()) == 0 {
+		if c.clearOlderHistoryRequest(pendingHistory) {
+			if coverage, coverageErr := c.store.HistoryCoverage(c.ctx, pendingHistory.chatID); coverageErr == nil {
+				coverage.State = "exhausted"
+				coverage.LastReceivedCount = 0
+				coverage.LastAddedCount = 0
+				coverage.Detail = "WhatsApp returned no older messages"
+				if saved, saveErr := c.store.SaveHistoryCoverage(c.ctx, coverage); saveErr == nil {
+					c.emitHistoryCoverage(saved)
+				}
+			}
+		}
+	}
 	for jid, pushName := range pushNames {
 		if _, _, err := c.wa.Store.Contacts.PutPushName(c.ctx, jid, pushName); err != nil {
 			c.log.Warn("persist history sender push name", "jid", jid, "error", err)
@@ -5409,5 +5893,37 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 	if len(pushNames) > 0 {
 		c.clearContactCache()
 	}
-	c.sink(Event{Kind: "sync", ChatsProcessed: chats, MessagesProcessed: messages, Complete: evt.Data.GetProgress() >= 100})
+	progress := evt.Data.GetProgress()
+	if contributesToInitialSync {
+		c.updateSyncStatus(func(status *store.SyncStatus) {
+			if status.StartedAtMS == 0 {
+				status.StartedAtMS = time.Now().UnixMilli()
+			}
+			status.Phase = "initial_history"
+			status.Detail = "Receiving WhatsApp history"
+			status.ChatsProcessed += chats
+			status.MessagesProcessed += messages
+			if progress > status.WhatsAppProgress {
+				status.WhatsAppProgress = progress
+			}
+			if historyPersistFailed {
+				status.Phase = "failed"
+				status.Detail = "Some chat history could not be saved locally"
+				status.CompletedAtMS = 0
+				return
+			}
+			if terminalInitialHistory && progress >= 100 {
+				c.historySyncComplete.Store(true)
+				if c.projectionComplete.Load() {
+					status.Phase = "complete"
+					status.Detail = "Up to date"
+					status.CompletedAtMS = time.Now().UnixMilli()
+				} else {
+					status.Phase = "app_state"
+					status.Detail = "Finishing local setup"
+				}
+			}
+		})
+	}
+	c.sink(Event{Kind: "sync", ChatsProcessed: chats, MessagesProcessed: messages, Complete: terminalInitialHistory && progress >= 100})
 }
