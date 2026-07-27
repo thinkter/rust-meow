@@ -3,6 +3,7 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import {
   Archive,
   CheckCheck,
+  CircleAlert,
   Pin,
   Search,
   VolumeX,
@@ -14,7 +15,8 @@ import type {
   ContactSearchResult,
   MessageSearchResult,
 } from "../lib/types";
-import { ChatKind } from "../lib/types";
+import { ChatKind, SyncPhase } from "../lib/types";
+import { syncStatusLabel } from "../state/sync";
 import { chatSubtitle, formatChatTime } from "../lib/format";
 import { Avatar } from "./Avatar";
 import { EmptyState, IconButton, Spinner } from "./Primitives";
@@ -30,6 +32,12 @@ export function Sidebar(props: SidebarProps) {
   let listRef: HTMLDivElement | undefined;
   let searchResultsRef: HTMLDivElement | undefined;
   const chats = createMemo(() => actions.filteredChats());
+  const syncLabel = createMemo(() => syncStatusLabel(state.syncStatus));
+  const syncNeedsAttention = createMemo(() =>
+    state.syncStatus.phase === SyncPhase.Partial ||
+    state.syncStatus.phase === SyncPhase.Failed ||
+    state.syncStatus.phase === SyncPhase.Offline,
+  );
   const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
     get count() {
       return chats().length;
@@ -135,12 +143,33 @@ export function Sidebar(props: SidebarProps) {
         <SearchResults model={props.model} ref={(element) => (searchResultsRef = element)} />
       </Show>
 
-      <Show when={state.syncActive}>
-        <div class="sync-strip">
-          <span>Syncing {state.syncMessages.toLocaleString()} messages</span>
-          <span class="progress-track" />
-        </div>
-      </Show>
+      <div
+        class="sync-strip"
+        classList={{ "sync-strip-warning": syncNeedsAttention() }}
+        role="status"
+        aria-live="polite"
+      >
+        <Show when={syncNeedsAttention()}><CircleAlert size={14} /></Show>
+        <span>{syncLabel()}</span>
+        <Show when={state.historyOverview}>
+          {(overview) => <small>· {overview().localMessageCount.toLocaleString()} local messages</small>}
+        </Show>
+        <Show when={state.syncActive}><span class="progress-track" /></Show>
+      </div>
+      <div class="history-sync-controls">
+        <Show
+          when={state.historySyncJob.running}
+          fallback={<button type="button" class="secondary-button" onClick={() => void actions.syncAllChatHistory()}>Sync older history for all chats</button>}
+        >
+          <span>
+            {state.historySyncJob.totalChats > 0
+              ? `${state.historySyncJob.completedChats}/${state.historySyncJob.totalChats} chats · `
+              : ""}
+            {state.historySyncJob.messagesAdded.toLocaleString()} added
+          </span>
+          <button type="button" class="secondary-button" onClick={actions.stopHistorySync}>Cancel</button>
+        </Show>
+      </div>
     </aside>
   );
 }
