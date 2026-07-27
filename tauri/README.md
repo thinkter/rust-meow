@@ -13,7 +13,7 @@ boundaries compile, not evidence of WhatsApp Desktop feature parity.
 
 - Tauri 2.11 Rust core
 - SolidJS 1.9, TypeScript, Vite 8, and TanStack Solid Virtual
-- protocol v16 of the existing framed protobuf bridge
+- protocol v18 of the existing framed protobuf bridge
 - the existing statically linked Go/whatsmeow sidecar
 
 ```text
@@ -108,7 +108,7 @@ processes and deliberate profile overrides still require operator care.
 The frontend initializes in this order:
 
 1. create a Tauri `Channel` and invoke `subscribe_backend`;
-2. invoke `hello` and require protocol v16 on both sides;
+2. invoke `hello` and require protocol v18 on both sides;
 3. invoke `get_auth_state`;
 4. start pairing or load the first chat page;
 5. apply responses as snapshots and Channel messages as idempotent live

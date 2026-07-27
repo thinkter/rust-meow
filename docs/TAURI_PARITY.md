@@ -95,7 +95,7 @@ Known foundation blockers at this snapshot:
   must be accepted explicitly rather than inferred from the smaller size;
 - the Makefile now makes Tauri the default development/build/check path; GPUI
   regressions remain an explicit migration gate;
-- protocol v16 and attachment, poll, pinned-message, forward, and edit RPCs are wired through the Go backend,
+- protocol v18 and attachment, poll, pinned-message, forward, edit, persisted sync-status, and on-demand history RPCs are wired through the Go backend,
   shared fake bridge, Tauri commands, and typed frontend, but the end-to-end
   document/audio/video gates remain unproven.
 

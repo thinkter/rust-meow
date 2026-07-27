@@ -61,6 +61,10 @@ Build and run against the real Go sidecar with:
 make dev
 ```
 
+On Windows, run this from Git Bash. The Makefile builds and launches
+`build/rust-meow-backend.exe`; using the explicit `.exe` path prevents Windows
+from selecting an older extensionless or adjacent sidecar.
+
 The first clean launch displays a QR code. Scan it from **WhatsApp > Linked
 devices > Link a device**. Use `RUST_MEOW_DATA_DIR` to isolate a QA profile;
 the backend takes an OS-level profile lock and fails a second process closed.
@@ -97,7 +101,7 @@ tauri/src-tauri/target/<target-triple>/release/bundle/deb/
 The bundle-only config is `tauri/src-tauri/tauri.bundle.conf.json`. Keeping
 `externalBin` there means normal fake development does not require a staged Go
 binary. A release is not validated merely because it bundles: unpack it and
-prove the installed app starts its adjacent sidecar and completes protocol v16
+prove the installed app starts its adjacent sidecar and completes protocol v18
 Hello without `RUST_MEOW_BACKEND`.
 
 The 2026-07-22 Linux x86-64 release measurement is:
