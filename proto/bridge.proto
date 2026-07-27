@@ -52,6 +52,10 @@ message RpcRequest {
     ListPinnedMessagesRequest list_pinned_messages = 31;
     ForwardMessageRequest forward_message = 32;
     EditMessageRequest edit_message = 33;
+    GetSyncStatusRequest get_sync_status = 34;
+    RequestOlderHistoryRequest request_older_history = 35;
+    GetChatHistoryCoverageRequest get_chat_history_coverage = 36;
+    GetHistoryOverviewRequest get_history_overview = 37;
   }
 }
 
@@ -92,6 +96,10 @@ message RpcResponse {
     ListPinnedMessagesResponse list_pinned_messages = 40;
     ForwardMessageResponse forward_message = 41;
     EditMessageResponse edit_message = 42;
+    SyncStatusResponse sync_status = 43;
+    RequestOlderHistoryResponse request_older_history = 44;
+    GetChatHistoryCoverageResponse get_chat_history_coverage = 45;
+    GetHistoryOverviewResponse get_history_overview = 46;
   }
 }
 
@@ -114,6 +122,8 @@ message BackendEvent {
     TypingChanged typing_changed = 20;
     StickersChanged stickers_changed = 21;
     PinnedMessagesChanged pinned_messages_changed = 22;
+    SyncStatusChanged sync_status_changed = 23;
+    HistoryCoverageChanged history_coverage_changed = 24;
   }
 }
 
@@ -152,6 +162,10 @@ message StartPairingRequest {}
 message StartPairingResponse {
   bool started = 1;
 }
+
+message GetSyncStatusRequest {}
+
+message SyncStatusResponse { SyncStatus status = 1; }
 
 message ListChatsRequest {
   // Empty means the newest page. The opaque cursor is exclusive and stable
@@ -679,6 +693,73 @@ message PairingQr {
   string code = 1;
   int64 expires_at_ms = 2;
 }
+
+enum SyncPhase {
+  SYNC_PHASE_UNSPECIFIED = 0;
+  SYNC_PHASE_NOT_STARTED = 1;
+  SYNC_PHASE_CONNECTING = 2;
+  SYNC_PHASE_INITIAL_HISTORY = 3;
+  SYNC_PHASE_APP_STATE = 4;
+  SYNC_PHASE_CATCHING_UP = 5;
+  SYNC_PHASE_COMPLETE = 6;
+  SYNC_PHASE_PARTIAL = 7;
+  SYNC_PHASE_FAILED = 8;
+  SYNC_PHASE_OFFLINE = 9;
+}
+
+message SyncStatus {
+  SyncPhase phase = 1;
+  uint64 revision = 2;
+  uint64 chats_processed = 3;
+  uint64 messages_processed = 4;
+  uint32 whatsapp_progress = 5;
+  int64 started_at_ms = 6;
+  int64 completed_at_ms = 7;
+  string detail = 8;
+}
+
+message SyncStatusChanged { SyncStatus status = 1; }
+
+enum HistoryCoverageState {
+  HISTORY_COVERAGE_STATE_UNKNOWN = 0;
+  HISTORY_COVERAGE_STATE_REQUESTING = 1;
+  HISTORY_COVERAGE_STATE_MORE_AVAILABLE = 2;
+  HISTORY_COVERAGE_STATE_EXHAUSTED = 3;
+  HISTORY_COVERAGE_STATE_NO_ANCHOR = 4;
+  HISTORY_COVERAGE_STATE_OFFLINE = 5;
+  HISTORY_COVERAGE_STATE_FAILED = 6;
+  HISTORY_COVERAGE_STATE_STALLED = 7;
+}
+
+message HistoryCoverage {
+  string chat_id = 1;
+  HistoryCoverageState state = 2;
+  uint64 revision = 3;
+  uint64 local_message_count = 4;
+  int64 oldest_message_timestamp_ms = 5;
+  uint64 on_demand_messages_added = 6;
+  uint32 last_requested_count = 7;
+  uint32 last_received_count = 8;
+  uint32 last_added_count = 9;
+  int64 last_requested_at_ms = 10;
+  int64 retry_after_ms = 11;
+  string detail = 12;
+}
+
+message RequestOlderHistoryRequest { string chat_id = 1; }
+message RequestOlderHistoryResponse { HistoryCoverage coverage = 1; }
+message GetChatHistoryCoverageRequest { string chat_id = 1; }
+message GetChatHistoryCoverageResponse { HistoryCoverage coverage = 1; }
+message GetHistoryOverviewRequest {}
+message HistoryOverview {
+  uint64 local_message_count = 1;
+  uint64 chats_with_messages = 2;
+  uint64 chats_checked = 3;
+  uint64 chats_unknown = 4;
+  uint64 chats_without_anchor = 5;
+}
+message GetHistoryOverviewResponse { HistoryOverview overview = 1; }
+message HistoryCoverageChanged { HistoryCoverage coverage = 1; }
 
 message SyncProgress {
   uint64 chats_processed = 1;
