@@ -15,7 +15,7 @@ import {
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
 import type { Density } from "../state/preferences";
-import { ChatKind, ConnectionState, type Message } from "../lib/types";
+import { ChatKind, ConnectionState, HistoryCoverageState, SyncPhase, type Message } from "../lib/types";
 import { connectionLabel, dayKey, formatDay, formatTime, messageText } from "../lib/format";
 import { indexMessages } from "../lib/performance";
 import {
@@ -23,6 +23,7 @@ import {
   resolveScrollRestore,
   type ScrollSnapshot,
 } from "../state/scroll-restoration";
+import { emptyConversationSyncMessage } from "../state/sync";
 import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
 import { MessageBubble } from "./MessageBubble";
@@ -58,6 +59,28 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
   const conversation = () => actions.conversation(props.chatId);
   const chat = () => state.chats.find((candidate) => candidate.id === props.chatId);
   const messages = () => conversation().messages;
+  const historyCoverage = () => conversation().historyCoverage;
+  const canRequestOlderHistory = () => {
+    const coverage = historyCoverage();
+    return Boolean(
+      coverage &&
+      coverage.localMessageCount > 0 &&
+      !conversation().hasOlder &&
+      state.connection === ConnectionState.Connected &&
+      coverage.retryAfterMs <= Date.now() &&
+      coverage.state !== HistoryCoverageState.Requesting &&
+      coverage.state !== HistoryCoverageState.Exhausted &&
+      coverage.state !== HistoryCoverageState.NoAnchor,
+    );
+  };
+  const emptySyncMessage = createMemo(() =>
+    messages().length === 0 ? emptyConversationSyncMessage(state.syncStatus) : null,
+  );
+  const canRelinkForHistory = createMemo(() =>
+    state.syncStatus.phase === SyncPhase.Partial &&
+    state.syncStatus.messagesProcessed === 0 &&
+    state.syncStatus.whatsAppProgress === 0,
+  );
   const isGroup = () => chat()?.kind === ChatKind.Group;
   const messageIndex = createMemo(() => indexMessages(messages()));
   const pins = createMemo(() => state.pinnedMessages[props.chatId] ?? []);
@@ -353,9 +376,51 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
         aria-live="polite"
         onScroll={scheduleScrollStateUpdate}
       >
+        <Show when={!conversation().loading && !conversation().hasOlder && historyCoverage()}>
+          {(coverage) => (
+            <div class="history-coverage" role="status">
+              <strong>{coverage().localMessageCount.toLocaleString()} messages stored locally</strong>
+              <span>{coverage().detail}</span>
+              <Show when={coverage().onDemandMessagesAdded > 0}>
+                <small>{coverage().onDemandMessagesAdded.toLocaleString()} added through older-history requests</small>
+              </Show>
+              <Show when={canRequestOlderHistory() && !state.historySyncJob.running}>
+                <div class="history-coverage-actions">
+                  <button type="button" class="secondary-button" onClick={() => void actions.requestOlderHistory(props.chatId)}>
+                    Request 50 older messages
+                  </button>
+                  <button type="button" class="secondary-button" onClick={() => void actions.syncChatHistory(props.chatId)}>
+                    Sync all for this chat
+                  </button>
+                </div>
+              </Show>
+              <Show when={coverage().state === HistoryCoverageState.Requesting}>
+                <Spinner small label="Requesting older messages from WhatsApp" />
+              </Show>
+              <Show when={coverage().state === HistoryCoverageState.NoAnchor}>
+                <button type="button" class="secondary-button" onClick={() => actions.setLogoutConfirmation(true)}>
+                  Relink WhatsApp to receive initial history
+                </button>
+              </Show>
+            </div>
+          )}
+        </Show>
         <Switch>
           <Match when={conversation().loading}>
           <EmptyState><Spinner label="Loading messages" /></EmptyState>
+          </Match>
+          <Match when={emptySyncMessage()}>
+            {(message) => (
+              <div class="empty-state">
+                <CircleAlert size={25} />
+                <strong>{message()}</strong>
+                <Show when={canRelinkForHistory()}>
+                  <button type="button" class="secondary-button" onClick={() => actions.setLogoutConfirmation(true)}>
+                    Relink WhatsApp
+                  </button>
+                </Show>
+              </div>
+            )}
           </Match>
           <Match when={messages().length === 0}>
             <EmptyState title="No messages here yet. Say hello."><MessageCircleMore size={25} /></EmptyState>
