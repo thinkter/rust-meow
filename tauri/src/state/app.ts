@@ -24,6 +24,8 @@ import {
   AttachmentKind,
   ChatKind,
   ConnectionState,
+  SyncPhase,
+  HistoryCoverageState,
   type Chat,
   type ChatInfo,
   type ChatParticipant,
@@ -33,9 +35,13 @@ import {
   type MessageSearchResult,
   type Reaction,
   type SearchResults,
+  type SyncStatus,
+  type HistoryCoverage,
+  type HistoryOverview,
   type PinnedMessage,
 } from "../lib/types";
 import { pairingStartupDecision } from "./pairing";
+import { shouldApplySyncStatus, syncStatusActive } from "./sync";
 import {
   activeConversationIds,
   backendLifecycleDecision,
@@ -147,6 +153,7 @@ export interface ConversationState {
   firstUnreadMessageId: string;
   highlightedMessageId: string;
   liveMessageVersion: number;
+  historyCoverage: HistoryCoverage | null;
 }
 
 /**
@@ -177,6 +184,17 @@ export interface AppState {
   syncChats: number;
   syncMessages: number;
   syncActive: boolean;
+  syncStatus: SyncStatus;
+  historyOverview: HistoryOverview | null;
+  historySyncJob: {
+    running: boolean;
+    scope: "chat" | "all";
+    chatId: string;
+    totalChats: number;
+    completedChats: number;
+    messagesAdded: number;
+    detail: string;
+  };
   chats: Chat[];
   totalChats: number;
   nextChatCursor: string;
@@ -242,6 +260,7 @@ function emptyConversation(chatId: string): ConversationState {
     firstUnreadMessageId: "",
     highlightedMessageId: "",
     liveMessageVersion: 0,
+    historyCoverage: null,
   };
 }
 
@@ -269,6 +288,26 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     syncChats: 0,
     syncMessages: 0,
     syncActive: false,
+    syncStatus: {
+      phase: SyncPhase.NotStarted,
+      revision: 0,
+      chatsProcessed: 0,
+      messagesProcessed: 0,
+      whatsAppProgress: 0,
+      startedAtMs: 0,
+      completedAtMs: 0,
+      detail: "Sync has not started",
+    },
+    historyOverview: null,
+    historySyncJob: {
+      running: false,
+      scope: "chat",
+      chatId: "",
+      totalChats: 0,
+      completedChats: 0,
+      messagesAdded: 0,
+      detail: "",
+    },
     chats: [],
     totalChats: 0,
     nextChatCursor: "",
@@ -330,6 +369,13 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   const backendChatRevisions = new Map<string, number>();
   /** Per-chat load generations so a stale in-flight fetch cannot clobber a fresher one. */
   const conversationGenerations = new Map<string, number>();
+  const historyResultWaiters = new Map<string, {
+    afterRevision: number;
+    resolve: (coverage: HistoryCoverage) => void;
+    reject: (error: Error) => void;
+    timer: number;
+  }>();
+  let cancelHistorySync = false;
   /** Monotonic across evictions so a reopened chat can never reuse an in-flight token. */
   let conversationGenerationSequence = 0;
   /** Drives LRU eviction once more than `MAX_HYDRATED_CONVERSATIONS` chats are hydrated. */
@@ -356,6 +402,16 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     lifecycleHooks.backendReady?.();
   }
 
+  function applySyncStatus(status: SyncStatus | null | undefined) {
+    if (!status || !shouldApplySyncStatus(state.syncStatus, status)) return;
+    batch(() => {
+      setState("syncStatus", status);
+      setState("syncChats", status.chatsProcessed);
+      setState("syncMessages", status.messagesProcessed);
+      setState("syncActive", syncStatusActive(status));
+    });
+  }
+
   async function bootstrap() {
     try {
       try {
@@ -371,7 +427,11 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       }
       await bridge.subscribeBackend(handleEvent);
       const hello = await bridge.hello();
-      const auth = await bridge.getAuthState();
+      const [auth, sync] = await Promise.all([
+        bridge.getAuthState(),
+        bridge.getSyncStatus(),
+      ]);
+      applySyncStatus(sync.status);
       batch(() => {
         setState("backendVersion", hello.backendVersion);
         setState("connection", auth.connectionState);
@@ -583,7 +643,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       }
       void markChatRead(chatId);
       void loadAvatar(chatId);
-      void bridge.repairRecentReactions(chatId).catch(() => undefined);
+      void loadHistoryCoverage(chatId);
     } catch (error) {
       if (isCurrentGeneration(chatId, generation)) {
         if (throwOnError) throw error;
@@ -619,6 +679,158 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
         setState("conversations", chatId, "loadingOlder", false);
       }
     }
+  }
+
+  async function loadHistoryCoverage(chatId = state.selectedChatId) {
+    if (!chatId) return;
+    try {
+      const response = await bridge.getChatHistoryCoverage(chatId);
+      const coverage = response.coverage;
+      if (!coverage || !state.conversations[chatId]) return;
+      const current = state.conversations[chatId]!.historyCoverage;
+      if (!current || coverage.revision >= current.revision) {
+        setState("conversations", chatId, "historyCoverage", coverage);
+      }
+    } catch {
+      // Conversation loading remains useful even when coverage metadata fails.
+    }
+  }
+
+  async function loadHistoryOverview() {
+    try {
+      const response = await bridge.getHistoryOverview();
+      if (response.overview) setState("historyOverview", response.overview);
+    } catch {
+      // The per-chat surface remains authoritative if the overview is unavailable.
+    }
+  }
+
+  async function requestOlderHistory(chatId = state.selectedChatId) {
+    const conversation = state.conversations[chatId];
+    if (!conversation || conversation.historyCoverage?.state === HistoryCoverageState.Requesting) return;
+    try {
+      const response = await bridge.requestOlderHistory(chatId);
+      if (response.coverage && state.conversations[chatId]) {
+        const current = state.conversations[chatId]!.historyCoverage;
+        if (!current || response.coverage.revision >= current.revision) {
+          setState("conversations", chatId, "historyCoverage", response.coverage);
+        }
+      }
+    } catch (error) {
+      toast(normalizeBridgeError(error).message);
+      void loadHistoryCoverage(chatId);
+    }
+  }
+
+  async function requestHistoryBatchAndWait(chatId: string): Promise<HistoryCoverage> {
+    const snapshot = await bridge.getChatHistoryCoverage(chatId);
+    const before = snapshot.coverage?.revision ?? 0;
+    const completion = new Promise<HistoryCoverage>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        historyResultWaiters.delete(chatId);
+        reject(new Error("Timed out waiting for WhatsApp history"));
+      }, 35_000);
+      historyResultWaiters.set(chatId, { afterRevision: before, resolve, reject, timer });
+    });
+    try {
+      const response = await bridge.requestOlderHistory(chatId);
+      if (response.coverage && state.conversations[chatId]) {
+        const current = state.conversations[chatId]!.historyCoverage;
+        if (!current || response.coverage.revision >= current.revision) {
+          setState("conversations", chatId, "historyCoverage", response.coverage);
+        }
+      }
+      return await completion;
+    } catch (error) {
+      const waiter = historyResultWaiters.get(chatId);
+      if (waiter) {
+        window.clearTimeout(waiter.timer);
+        historyResultWaiters.delete(chatId);
+      }
+      throw error;
+    }
+  }
+
+  async function syncChatHistory(chatId: string, nested = false): Promise<number> {
+    let added = 0;
+    if (!nested) {
+      if (state.historySyncJob.running) return 0;
+      cancelHistorySync = false;
+      setState("historySyncJob", {
+        running: true, scope: "chat", chatId, totalChats: 1,
+        completedChats: 0, messagesAdded: 0, detail: "Preparing chat history sync",
+      });
+    }
+    try {
+      while (!cancelHistorySync) {
+        const snapshot = await bridge.getChatHistoryCoverage(chatId);
+        const coverage = snapshot.coverage;
+        if (!coverage || coverage.state === HistoryCoverageState.Exhausted || coverage.state === HistoryCoverageState.NoAnchor) break;
+        if (coverage.state === HistoryCoverageState.Stalled) break;
+        setState("historySyncJob", "detail", `Requesting older messages for ${state.chats.find((chat) => chat.id === chatId)?.title || "chat"}`);
+        const result = await requestHistoryBatchAndWait(chatId);
+        added += result.lastAddedCount;
+        setState("historySyncJob", "messagesAdded", (count) => count + result.lastAddedCount);
+        if (result.state !== HistoryCoverageState.MoreAvailable) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 300));
+      }
+      return added;
+    } catch (error) {
+      if (nested) throw error;
+      toast(normalizeBridgeError(error).message);
+      setState("historySyncJob", "detail", `History sync stopped: ${normalizeBridgeError(error).message}`);
+      return added;
+    } finally {
+      if (!nested) {
+        setState("historySyncJob", "completedChats", 1);
+        setState("historySyncJob", "running", false);
+        setState("historySyncJob", "detail", cancelHistorySync ? "History sync cancelled" : `History sync finished · ${added} messages added`);
+        void loadHistoryOverview();
+      }
+    }
+  }
+
+  async function syncAllChatHistory() {
+    if (state.historySyncJob.running) return;
+    cancelHistorySync = false;
+    setState("historySyncJob", {
+      running: true, scope: "all", chatId: "", totalChats: 0,
+      completedChats: 0, messagesAdded: 0, detail: "Loading complete chat list",
+    });
+    try {
+      const chatIds: string[] = [];
+      let cursor = "";
+      do {
+        const page = await bridge.listChats(cursor, 100);
+        for (const chat of page.chats) if (!chatIds.includes(chat.id)) chatIds.push(chat.id);
+        cursor = page.nextCursor;
+      } while (cursor && !cancelHistorySync);
+      setState("historySyncJob", "totalChats", chatIds.length);
+      for (const chatId of chatIds) {
+        if (cancelHistorySync) break;
+        try {
+          await syncChatHistory(chatId, true);
+        } catch (error) {
+          setState("historySyncJob", "detail", `Skipped one chat: ${normalizeBridgeError(error).message}`);
+        }
+        setState("historySyncJob", "completedChats", (count) => count + 1);
+      }
+    } finally {
+      setState("historySyncJob", "running", false);
+      setState(
+        "historySyncJob",
+        "detail",
+        cancelHistorySync
+          ? "History sync cancelled"
+          : `All chats checked · ${state.historySyncJob.messagesAdded.toLocaleString()} messages added`,
+      );
+      void loadHistoryOverview();
+    }
+  }
+
+  function stopHistorySync() {
+    cancelHistorySync = true;
+    setState("historySyncJob", "detail", "Stopping after the current request");
   }
 
   async function loadNewer(chatId = state.selectedChatId) {
@@ -1693,6 +1905,12 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
 
   function dispose() {
     disposed = true;
+    cancelHistorySync = true;
+    for (const waiter of historyResultWaiters.values()) {
+      window.clearTimeout(waiter.timer);
+      waiter.reject(new Error("Application disposed"));
+    }
+    historyResultWaiters.clear();
     disposeNotificationActions?.();
     disposeNotificationActions = undefined;
     participantAvatarQueue.clear();
@@ -1753,6 +1971,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
           }
         });
         if (event.payload.state === ConnectionState.Connected) {
+          void loadHistoryOverview();
           void loadChats(true).then(async () => {
             await restoreWorkspaceConversations();
             markBackendReady();
@@ -1767,11 +1986,13 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
         });
         break;
       case "syncProgress":
-        batch(() => {
-          setState("syncChats", (value) => value + event.payload.chatsProcessed);
-          setState("syncMessages", (value) => value + event.payload.messagesProcessed);
-          setState("syncActive", !event.payload.complete);
-        });
+        if (state.syncStatus.revision === 0) {
+          batch(() => {
+            setState("syncChats", (value) => value + event.payload.chatsProcessed);
+            setState("syncMessages", (value) => value + event.payload.messagesProcessed);
+            setState("syncActive", !event.payload.complete);
+          });
+        }
         if (event.payload.complete) {
           if (syncRefreshTimer !== undefined) window.clearTimeout(syncRefreshTimer);
           syncRefreshTimer = undefined;
@@ -1781,6 +2002,41 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
             syncRefreshTimer = undefined;
             void loadChats(true);
           }, 500);
+        }
+        break;
+      case "syncStatusChanged":
+        applySyncStatus(event.payload.status);
+        if (event.payload.status?.phase === SyncPhase.Complete) {
+          if (syncRefreshTimer !== undefined) window.clearTimeout(syncRefreshTimer);
+          syncRefreshTimer = undefined;
+          void loadChats(true);
+        }
+        break;
+      case "historyCoverageChanged":
+        if (event.payload.coverage) {
+          const coverage = event.payload.coverage;
+          const conversation = state.conversations[coverage.chatId];
+          const current = conversation?.historyCoverage;
+          if (conversation && (!current || coverage.revision >= current.revision)) {
+            batch(() => {
+              setState("conversations", coverage.chatId, "historyCoverage", coverage);
+              if (coverage.lastAddedCount > 0) {
+                setState("conversations", coverage.chatId, "hasOlder", true);
+              }
+            });
+            if (coverage.lastAddedCount > 0) void loadOlder(coverage.chatId);
+            void loadHistoryOverview();
+          }
+          const waiter = historyResultWaiters.get(coverage.chatId);
+          if (
+            waiter &&
+            coverage.revision > waiter.afterRevision &&
+            coverage.state !== HistoryCoverageState.Requesting
+          ) {
+            window.clearTimeout(waiter.timer);
+            historyResultWaiters.delete(coverage.chatId);
+            waiter.resolve(coverage);
+          }
         }
         break;
       case "chatUpserted":
@@ -2044,7 +2300,12 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     const base = newConversation ?? emptyConversation(newId);
     const oldMessages = oldConversation ? remapMessagesChatId(oldConversation.messages, newId) : [];
     const messages = sortMessages(mergeMessages(base.messages, oldMessages));
-    return { ...base, chatId: newId, messages };
+    const historyCoverage = base.historyCoverage
+      ? { ...base.historyCoverage, chatId: newId }
+      : oldConversation?.historyCoverage
+        ? { ...oldConversation.historyCoverage, chatId: newId }
+        : null;
+    return { ...base, chatId: newId, messages, historyCoverage };
   }
 
   function mergeChatId(oldId: string, newId: string) {
@@ -2276,6 +2537,12 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       splitPane,
       closePane,
       loadOlder,
+      loadHistoryCoverage,
+      loadHistoryOverview,
+      requestOlderHistory,
+      syncChatHistory,
+      syncAllChatHistory,
+      stopHistorySync,
       loadNewer,
       jumpToLatest,
       openSwitcher,
