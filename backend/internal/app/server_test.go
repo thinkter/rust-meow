@@ -11,6 +11,7 @@ import (
 	bridgev1 "github.com/rust-meow/rust-meow/backend/gen/bridgev1"
 	"github.com/rust-meow/rust-meow/backend/internal/bridge"
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
+	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"github.com/rust-meow/rust-meow/backend/internal/wa"
 	"google.golang.org/protobuf/proto"
 )
@@ -289,6 +290,9 @@ func TestUnsupportedEventDoesNotConsumeSequence(t *testing.T) {
 	if len(envelopes) != 1 {
 		t.Fatalf("events=%d, want 1", len(envelopes))
 	}
+	if got := envelopes[0].GetProtocolVersion(); got != ProtocolVersion {
+		t.Fatalf("event protocol version=%d, want %d", got, ProtocolVersion)
+	}
 	event := envelopes[0].GetEvent()
 	if got := event.GetSequence(); got != 1 {
 		t.Fatalf("sequence=%d, want 1", got)
@@ -440,5 +444,23 @@ func TestValidReactionEmoji(t *testing.T) {
 		if validReactionEmoji(value) {
 			t.Errorf("validReactionEmoji(%q)=true", value)
 		}
+	}
+}
+
+func TestWireSyncStatusPreservesPersistentState(t *testing.T) {
+	got := wireSyncStatus(store.SyncStatus{
+		Phase:             "partial",
+		Revision:          9,
+		ChatsProcessed:    12,
+		MessagesProcessed: 345,
+		WhatsAppProgress:  64,
+		StartedAtMS:       100,
+		Detail:            "waiting for full history",
+	})
+	if got.GetPhase() != bridgev1.SyncPhase_SYNC_PHASE_PARTIAL ||
+		got.GetRevision() != 9 ||
+		got.GetMessagesProcessed() != 345 ||
+		got.GetWhatsappProgress() != 64 {
+		t.Fatalf("wire sync status=%+v", got)
 	}
 }

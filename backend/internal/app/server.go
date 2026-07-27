@@ -22,10 +22,11 @@ import (
 	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
 	"github.com/rust-meow/rust-meow/backend/internal/store"
 	"github.com/rust-meow/rust-meow/backend/internal/wa"
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 16
+const ProtocolVersion uint32 = 18
 const maxTextBytes = 65_536
 const maxConcurrentMediaJobs = 4
 const maxMediaJobsInFlight = 32
@@ -188,6 +189,10 @@ func (s *Server) Emit(event wa.Event) {
 		body.Event = &bridgev1.BackendEvent_PairingQr{PairingQr: &bridgev1.PairingQr{Code: event.QR, ExpiresAtMs: event.QRExpires.UnixMilli()}}
 	case "sync":
 		body.Event = &bridgev1.BackendEvent_SyncProgress{SyncProgress: &bridgev1.SyncProgress{ChatsProcessed: event.ChatsProcessed, MessagesProcessed: event.MessagesProcessed, Complete: event.Complete}}
+	case "sync_status":
+		body.Event = &bridgev1.BackendEvent_SyncStatusChanged{SyncStatusChanged: &bridgev1.SyncStatusChanged{Status: wireSyncStatus(event.SyncStatus)}}
+	case "history_coverage":
+		body.Event = &bridgev1.BackendEvent_HistoryCoverageChanged{HistoryCoverageChanged: &bridgev1.HistoryCoverageChanged{Coverage: wireHistoryCoverage(event.HistoryCoverage)}}
 	case "message":
 		body.Event = &bridgev1.BackendEvent_MessageUpserted{MessageUpserted: &bridgev1.MessageUpserted{Message: s.wireMessage(event.Message)}}
 	case "reaction":
@@ -277,6 +282,44 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, err
 		}
 		return &bridgev1.RpcResponse_StartPairing{StartPairing: &bridgev1.StartPairingResponse{Started: started}}, nil
+	case *bridgev1.RpcRequest_GetSyncStatus:
+		return &bridgev1.RpcResponse_SyncStatus{SyncStatus: &bridgev1.SyncStatusResponse{Status: wireSyncStatus(s.wa.SyncStatus())}}, nil
+	case *bridgev1.RpcRequest_GetChatHistoryCoverage:
+		if req.GetChatHistoryCoverage.GetChatId() == "" {
+			return nil, fail("invalid_argument", "chat_id is required", false)
+		}
+		coverage, err := s.wa.HistoryCoverage(s.ctx, req.GetChatHistoryCoverage.GetChatId())
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_GetChatHistoryCoverage{GetChatHistoryCoverage: &bridgev1.GetChatHistoryCoverageResponse{Coverage: wireHistoryCoverage(coverage)}}, nil
+	case *bridgev1.RpcRequest_GetHistoryOverview:
+		overview, err := s.wa.HistoryOverview(s.ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_GetHistoryOverview{GetHistoryOverview: &bridgev1.GetHistoryOverviewResponse{Overview: &bridgev1.HistoryOverview{
+			LocalMessageCount: overview.LocalMessageCount, ChatsWithMessages: overview.ChatsWithMessages,
+			ChatsChecked: overview.ChatsChecked, ChatsUnknown: overview.ChatsUnknown, ChatsWithoutAnchor: overview.ChatsWithoutAnchor,
+		}}}, nil
+	case *bridgev1.RpcRequest_RequestOlderHistory:
+		if req.RequestOlderHistory.GetChatId() == "" {
+			return nil, fail("invalid_argument", "chat_id is required", false)
+		}
+		coverage, err := s.wa.RequestOlderHistory(s.ctx, req.RequestOlderHistory.GetChatId())
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrHistoryNoAnchor), errors.Is(err, store.ErrHistoryExhausted):
+				return nil, fail("history_unavailable", err.Error(), false)
+			case errors.Is(err, store.ErrHistoryRateLimit), errors.Is(err, store.ErrHistoryRequestBusy):
+				return nil, fail("history_busy", err.Error(), true)
+			case errors.Is(err, whatsmeow.ErrNotConnected):
+				return nil, fail("not_connected", err.Error(), true)
+			default:
+				return nil, err
+			}
+		}
+		return &bridgev1.RpcResponse_RequestOlderHistory{RequestOlderHistory: &bridgev1.RequestOlderHistoryResponse{Coverage: wireHistoryCoverage(coverage)}}, nil
 	case *bridgev1.RpcRequest_ListChats:
 		page, err := s.store.Chats(s.ctx, req.ListChats.GetCursor(), int(req.ListChats.GetLimit()))
 		if err != nil {
@@ -883,6 +926,14 @@ func success(result any) *bridgev1.RpcResponse {
 		response.Result = value
 	case *bridgev1.RpcResponse_EditMessage:
 		response.Result = value
+	case *bridgev1.RpcResponse_SyncStatus:
+		response.Result = value
+	case *bridgev1.RpcResponse_RequestOlderHistory:
+		response.Result = value
+	case *bridgev1.RpcResponse_GetChatHistoryCoverage:
+		response.Result = value
+	case *bridgev1.RpcResponse_GetHistoryOverview:
+		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageImage:
 		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageAttachment:
@@ -1243,6 +1294,56 @@ func connectionState(detail string) bridgev1.ConnectionState {
 		return bridgev1.ConnectionState_CONNECTION_STATE_LOGGED_OUT
 	default:
 		return bridgev1.ConnectionState_CONNECTION_STATE_FAILED
+	}
+}
+
+func wireSyncStatus(status store.SyncStatus) *bridgev1.SyncStatus {
+	phase := bridgev1.SyncPhase_SYNC_PHASE_NOT_STARTED
+	switch status.Phase {
+	case "connecting":
+		phase = bridgev1.SyncPhase_SYNC_PHASE_CONNECTING
+	case "initial_history":
+		phase = bridgev1.SyncPhase_SYNC_PHASE_INITIAL_HISTORY
+	case "app_state":
+		phase = bridgev1.SyncPhase_SYNC_PHASE_APP_STATE
+	case "catching_up":
+		phase = bridgev1.SyncPhase_SYNC_PHASE_CATCHING_UP
+	case "complete":
+		phase = bridgev1.SyncPhase_SYNC_PHASE_COMPLETE
+	case "partial":
+		phase = bridgev1.SyncPhase_SYNC_PHASE_PARTIAL
+	case "failed":
+		phase = bridgev1.SyncPhase_SYNC_PHASE_FAILED
+	case "offline":
+		phase = bridgev1.SyncPhase_SYNC_PHASE_OFFLINE
+	}
+	return &bridgev1.SyncStatus{Phase: phase, Revision: status.Revision, ChatsProcessed: status.ChatsProcessed, MessagesProcessed: status.MessagesProcessed, WhatsappProgress: status.WhatsAppProgress, StartedAtMs: status.StartedAtMS, CompletedAtMs: status.CompletedAtMS, Detail: status.Detail}
+}
+
+func wireHistoryCoverage(coverage store.HistoryCoverage) *bridgev1.HistoryCoverage {
+	state := bridgev1.HistoryCoverageState_HISTORY_COVERAGE_STATE_UNKNOWN
+	switch coverage.State {
+	case "requesting":
+		state = bridgev1.HistoryCoverageState_HISTORY_COVERAGE_STATE_REQUESTING
+	case "more_available":
+		state = bridgev1.HistoryCoverageState_HISTORY_COVERAGE_STATE_MORE_AVAILABLE
+	case "exhausted":
+		state = bridgev1.HistoryCoverageState_HISTORY_COVERAGE_STATE_EXHAUSTED
+	case "no_anchor":
+		state = bridgev1.HistoryCoverageState_HISTORY_COVERAGE_STATE_NO_ANCHOR
+	case "offline":
+		state = bridgev1.HistoryCoverageState_HISTORY_COVERAGE_STATE_OFFLINE
+	case "failed":
+		state = bridgev1.HistoryCoverageState_HISTORY_COVERAGE_STATE_FAILED
+	case "stalled":
+		state = bridgev1.HistoryCoverageState_HISTORY_COVERAGE_STATE_STALLED
+	}
+	return &bridgev1.HistoryCoverage{
+		ChatId: coverage.ChatID, State: state, Revision: coverage.Revision,
+		LocalMessageCount: coverage.LocalMessageCount, OldestMessageTimestampMs: coverage.OldestMessageTimestamp,
+		OnDemandMessagesAdded: coverage.OnDemandMessagesAdded, LastRequestedCount: coverage.LastRequestedCount,
+		LastReceivedCount: coverage.LastReceivedCount, LastAddedCount: coverage.LastAddedCount,
+		LastRequestedAtMs: coverage.LastRequestedAtMS, RetryAfterMs: coverage.RetryAfterMS, Detail: coverage.Detail,
 	}
 }
 func authConnectionState(client *wa.Client) bridgev1.ConnectionState {
