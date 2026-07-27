@@ -17,6 +17,104 @@ import (
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 )
 
+func TestSyncStatusPersistsAcrossStoreRestartAndClearsWithAccount(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "client.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := SyncStatus{
+		Phase:             "partial",
+		Revision:          7,
+		ChatsProcessed:    12,
+		MessagesProcessed: 345,
+		WhatsAppProgress:  64,
+		StartedAtMS:       1234,
+		Detail:            "waiting for history",
+	}
+	if err = s.SaveSyncStatus(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.SyncStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("sync status=%+v want %+v", got, want)
+	}
+	if err = s.ClearAccountData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.SyncStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != "not_started" || got.Revision != 0 {
+		t.Fatalf("cleared sync status=%+v", got)
+	}
+}
+
+func TestHistoryCoverageReportsExactLocalAndOnDemandCounts(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chatID := "15551234567@s.whatsapp.net"
+	messages := []domain.Message{
+		{ID: "newer", ChatJID: chatID, TransportJID: chatID, Timestamp: time.Unix(200, 0), Kind: "text"},
+		{ID: "older", ChatJID: chatID, TransportJID: chatID, Timestamp: time.Unix(100, 0), Kind: "text"},
+	}
+	inserted, err := s.ApplyMessagesCount(ctx, messages, false)
+	if err != nil || inserted != 2 {
+		t.Fatalf("first apply inserted=%d err=%v", inserted, err)
+	}
+	inserted, err = s.ApplyMessagesCount(ctx, messages, false)
+	if err != nil || inserted != 0 {
+		t.Fatalf("idempotent apply inserted=%d err=%v", inserted, err)
+	}
+	coverage, err := s.HistoryCoverage(ctx, chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coverage.LocalMessageCount != 2 || coverage.OldestMessageTimestamp != 100_000 {
+		t.Fatalf("coverage=%+v", coverage)
+	}
+	coverage.State = "more_available"
+	coverage.OnDemandMessagesAdded = 2
+	coverage.LastAddedCount = 2
+	saved, err := s.SaveHistoryCoverage(ctx, coverage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Revision != 1 || saved.OnDemandMessagesAdded != 2 {
+		t.Fatalf("saved coverage=%+v", saved)
+	}
+	saved.State = "exhausted"
+	saved.LastReceivedCount = 45
+	saved.Detail = "legacy short-batch boundary"
+	if _, err = s.SaveHistoryCoverage(ctx, saved); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := s.HistoryCoverage(ctx, chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != "more_available" {
+		t.Fatalf("legacy short batch remained exhausted: %+v", recovered)
+	}
+}
+
 func TestOpenRestrictsDatabaseAndSQLiteSidecarModes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows permissions are enforced by the user-profile ACL")

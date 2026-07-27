@@ -25,10 +25,155 @@ import (
 
 type Store struct{ db *sql.DB }
 
+// SyncStatus is persisted per account so a shell restart cannot mistake an
+// interrupted initial history transfer for a completed sync.
+type SyncStatus struct {
+	Phase             string `json:"phase"`
+	Revision          uint64 `json:"revision"`
+	ChatsProcessed    uint64 `json:"chatsProcessed"`
+	MessagesProcessed uint64 `json:"messagesProcessed"`
+	WhatsAppProgress  uint32 `json:"whatsAppProgress"`
+	StartedAtMS       int64  `json:"startedAtMs"`
+	CompletedAtMS     int64  `json:"completedAtMs"`
+	Detail            string `json:"detail"`
+}
+
+type HistoryCoverage struct {
+	ChatID                 string
+	State                  string
+	Revision               uint64
+	LocalMessageCount      uint64
+	OldestMessageTimestamp int64
+	OnDemandMessagesAdded  uint64
+	LastRequestedCount     uint32
+	LastReceivedCount      uint32
+	LastAddedCount         uint32
+	LastRequestedAtMS      int64
+	RetryAfterMS           int64
+	Detail                 string
+}
+
+type HistoryOverview struct {
+	LocalMessageCount  uint64
+	ChatsWithMessages  uint64
+	ChatsChecked       uint64
+	ChatsUnknown       uint64
+	ChatsWithoutAnchor uint64
+}
+
+const syncStatusKey = "initial_sync_status"
+
+func (s *Store) SyncStatus(ctx context.Context) (SyncStatus, error) {
+	status := SyncStatus{Phase: "not_started"}
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM sync_state WHERE key=?`, syncStatusKey).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return status, nil
+	}
+	if err != nil {
+		return status, err
+	}
+	if err = json.Unmarshal([]byte(value), &status); err != nil {
+		return SyncStatus{}, fmt.Errorf("decode sync status: %w", err)
+	}
+	return status, nil
+}
+
+func (s *Store) SaveSyncStatus(ctx context.Context, status SyncStatus) error {
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("encode sync status: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO sync_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, syncStatusKey, string(encoded))
+	return err
+}
+
+func (s *Store) HistoryCoverage(ctx context.Context, chatID string) (HistoryCoverage, error) {
+	resolved, err := s.ResolveChat(ctx, chatID)
+	if err != nil {
+		return HistoryCoverage{}, err
+	}
+	coverage := HistoryCoverage{ChatID: resolved, State: "unknown", Detail: "Older WhatsApp history has not been checked"}
+	var oldest sql.NullInt64
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*),min(timestamp) FROM messages WHERE chat_jid=? AND kind<>'reaction'`, resolved).
+		Scan(&coverage.LocalMessageCount, &oldest); err != nil {
+		return HistoryCoverage{}, err
+	}
+	if oldest.Valid {
+		coverage.OldestMessageTimestamp = oldest.Int64
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT state,revision,on_demand_added,last_requested_count,last_received_count,last_added_count,last_requested_at,retry_after,detail
+FROM history_coverage WHERE chat_jid=?`, resolved).Scan(
+		&coverage.State, &coverage.Revision, &coverage.OnDemandMessagesAdded,
+		&coverage.LastRequestedCount, &coverage.LastReceivedCount, &coverage.LastAddedCount,
+		&coverage.LastRequestedAtMS, &coverage.RetryAfterMS, &coverage.Detail,
+	)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return HistoryCoverage{}, err
+	}
+	if coverage.LocalMessageCount == 0 {
+		coverage.State = "no_anchor"
+		coverage.Detail = "No local message is available to anchor an older-history request"
+	} else if coverage.State == "exhausted" && coverage.LastReceivedCount > 0 {
+		// Older builds treated any short batch as the end. Only an explicit
+		// zero-message response is a reliable stopping point.
+		coverage.State = "more_available"
+		coverage.Detail = "More older messages can be requested"
+	}
+	return coverage, nil
+}
+
+func (s *Store) SaveHistoryCoverage(ctx context.Context, coverage HistoryCoverage) (HistoryCoverage, error) {
+	resolved, err := s.ResolveChat(ctx, coverage.ChatID)
+	if err != nil {
+		return HistoryCoverage{}, err
+	}
+	coverage.ChatID = resolved
+	coverage.Revision++
+	_, err = s.db.ExecContext(ctx, `INSERT INTO history_coverage(
+chat_jid,state,revision,on_demand_added,last_requested_count,last_received_count,last_added_count,last_requested_at,retry_after,detail)
+VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_jid) DO UPDATE SET
+state=excluded.state,revision=excluded.revision,on_demand_added=excluded.on_demand_added,
+last_requested_count=excluded.last_requested_count,last_received_count=excluded.last_received_count,
+last_added_count=excluded.last_added_count,last_requested_at=excluded.last_requested_at,
+retry_after=excluded.retry_after,detail=excluded.detail`,
+		coverage.ChatID, coverage.State, coverage.Revision, coverage.OnDemandMessagesAdded,
+		coverage.LastRequestedCount, coverage.LastReceivedCount, coverage.LastAddedCount,
+		coverage.LastRequestedAtMS, coverage.RetryAfterMS, coverage.Detail)
+	if err != nil {
+		return HistoryCoverage{}, err
+	}
+	return s.HistoryCoverage(ctx, resolved)
+}
+
+func (s *Store) HistoryOverview(ctx context.Context) (HistoryOverview, error) {
+	var overview HistoryOverview
+	err := s.db.QueryRowContext(ctx, `SELECT
+(SELECT count(*) FROM messages WHERE kind<>'reaction'),
+(SELECT count(DISTINCT chat_jid) FROM messages WHERE kind<>'reaction'),
+(SELECT count(*) FROM history_coverage WHERE state='exhausted'),
+(SELECT count(*) FROM chats WHERE jid NOT IN (SELECT chat_jid FROM history_coverage)),
+(SELECT count(*) FROM chats WHERE jid NOT IN (SELECT DISTINCT chat_jid FROM messages WHERE kind<>'reaction'))`).
+		Scan(&overview.LocalMessageCount, &overview.ChatsWithMessages, &overview.ChatsChecked, &overview.ChatsUnknown, &overview.ChatsWithoutAnchor)
+	return overview, err
+}
+
+func (s *Store) OldestMessage(ctx context.Context, chatID string) (domain.Message, error) {
+	resolved, err := s.ResolveChat(ctx, chatID)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	var id string
+	if err = s.db.QueryRowContext(ctx, `SELECT id FROM messages WHERE chat_jid=? AND kind<>'reaction' ORDER BY timestamp,id LIMIT 1`, resolved).Scan(&id); err != nil {
+		return domain.Message{}, err
+	}
+	return s.Message(ctx, resolved, id)
+}
+
 const (
 	reactionReplaySchemaVersion = 9
 	searchSchemaVersion         = 10
-	supportedSchemaVersion      = 14
+	supportedSchemaVersion      = 15
 )
 
 type ChatMerge struct {
@@ -41,6 +186,10 @@ var (
 	ErrReactionRepairRateLimit      = errors.New("reaction repair is rate limited")
 	ErrReactionRepairExhausted      = errors.New("reaction repair attempts exhausted")
 	ErrReactionRepairCursorNotReady = errors.New("reaction repair cursor is not ready")
+	ErrHistoryNoAnchor              = errors.New("no local message is available to anchor an older-history request")
+	ErrHistoryExhausted             = errors.New("WhatsApp returned no older messages for this chat")
+	ErrHistoryRateLimit             = errors.New("older-history request is cooling down")
+	ErrHistoryRequestBusy           = errors.New("another older-history request is already in progress")
 )
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -89,7 +238,7 @@ func (s *Store) ClearAccountData(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{`DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM sticker_favorites`} {
+	for _, statement := range []string{`DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM history_coverage`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM sticker_favorites`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("clear account data: %w", err)
 		}
@@ -127,7 +276,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("client cache reset required: log out with the previous Rust Meow build before upgrading to conversation identities")
 		}
 		for _, statement := range []string{
-			`DROP TABLE IF EXISTS legacy_reaction_replays`, `DROP TABLE IF EXISTS reaction_repair_jobs`,
+			`DROP TABLE IF EXISTS legacy_reaction_replays`, `DROP TABLE IF EXISTS reaction_repair_jobs`, `DROP TABLE IF EXISTS history_coverage`,
 			`DROP TABLE IF EXISTS outgoing_reactions`, `DROP TABLE IF EXISTS outgoing_requests`,
 			`DROP TABLE IF EXISTS reactions`, `DROP TABLE IF EXISTS messages`, `DROP TABLE IF EXISTS chat_redirects`,
 			`DROP TABLE IF EXISTS chat_addresses`, `DROP TABLE IF EXISTS chats`, `DROP TABLE IF EXISTS sync_state`,
@@ -245,6 +394,19 @@ CREATE TABLE IF NOT EXISTS pinned_messages(
   PRIMARY KEY(chat_jid,message_id), FOREIGN KEY(chat_jid) REFERENCES chats(jid) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS sync_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS history_coverage(
+  chat_jid TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'unknown',
+  revision INTEGER NOT NULL DEFAULT 0,
+  on_demand_added INTEGER NOT NULL DEFAULT 0,
+  last_requested_count INTEGER NOT NULL DEFAULT 0,
+  last_received_count INTEGER NOT NULL DEFAULT 0,
+  last_added_count INTEGER NOT NULL DEFAULT 0,
+  last_requested_at INTEGER NOT NULL DEFAULT 0,
+  retry_after INTEGER NOT NULL DEFAULT 0,
+  detail TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(chat_jid) REFERENCES chats(jid) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS outgoing_requests(
   client_request_id TEXT PRIMARY KEY,
   chat_jid TEXT NOT NULL,
@@ -906,6 +1068,21 @@ SELECT ?,transport_jid,anchor_message_id,anchor_timestamp,anchor_from_me,request
 	if _, err := tx.ExecContext(ctx, `DELETE FROM reaction_repair_jobs WHERE chat_jid=?`, loser); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO history_coverage(chat_jid,state,revision,on_demand_added,last_requested_count,last_received_count,last_added_count,last_requested_at,retry_after,detail)
+SELECT ?,state,revision,on_demand_added,last_requested_count,last_received_count,last_added_count,last_requested_at,retry_after,detail
+FROM history_coverage WHERE chat_jid=?
+ON CONFLICT(chat_jid) DO UPDATE SET
+state=CASE WHEN history_coverage.state='exhausted' OR excluded.state='exhausted' THEN 'exhausted' ELSE excluded.state END,
+revision=max(history_coverage.revision,excluded.revision)+1,
+on_demand_added=history_coverage.on_demand_added+excluded.on_demand_added,
+last_requested_count=excluded.last_requested_count,last_received_count=excluded.last_received_count,
+last_added_count=excluded.last_added_count,last_requested_at=max(history_coverage.last_requested_at,excluded.last_requested_at),
+retry_after=max(history_coverage.retry_after,excluded.retry_after),detail=excluded.detail`, winner, loser); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM history_coverage WHERE chat_jid=?`, loser); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE chat_addresses SET chat_jid=? WHERE chat_jid=?`, winner, loser); err != nil {
 		return err
 	}
@@ -1513,20 +1690,42 @@ func (s *Store) ApplyMessage(ctx context.Context, message domain.Message, increm
 }
 
 func (s *Store) ApplyMessages(ctx context.Context, messages []domain.Message, incrementUnread bool) error {
+	_, err := s.ApplyMessagesCount(ctx, messages, incrementUnread)
+	return err
+}
+
+// ApplyMessagesCount applies a history batch and reports how many visible
+// message rows were newly inserted rather than updated.
+func (s *Store) ApplyMessagesCount(ctx context.Context, messages []domain.Message, incrementUnread bool) (uint32, error) {
 	if len(messages) == 0 {
-		return nil
+		return 0, nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
+	var inserted uint32
 	for _, message := range messages {
+		var existed bool
+		resolved, resolveErr := resolveOrCreateChatTx(ctx, tx, message.ChatJID)
+		if resolveErr != nil {
+			return 0, resolveErr
+		}
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE chat_jid=? AND id=?)`, resolved, message.ID).Scan(&existed); err != nil {
+			return 0, err
+		}
 		if err = applyMessageTx(ctx, tx, message, incrementUnread); err != nil {
-			return err
+			return 0, err
+		}
+		if !existed && message.Kind != "reaction" {
+			inserted++
 		}
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	return inserted, nil
 }
 
 func applyMessageTx(ctx context.Context, tx *sql.Tx, message domain.Message, incrementUnread bool) error {
