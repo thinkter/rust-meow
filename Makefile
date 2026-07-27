@@ -5,7 +5,12 @@ SHELL := /bin/sh
 TAURI_DIR := tauri
 TAURI_CRATE_DIR := $(TAURI_DIR)/src-tauri
 BUILD_DIR := build
-BACKEND_BIN := $(abspath $(BUILD_DIR)/rust-meow-backend)
+ifeq ($(OS),Windows_NT)
+EXE_EXT := .exe
+else
+EXE_EXT :=
+endif
+BACKEND_BIN := $(abspath $(BUILD_DIR)/rust-meow-backend$(EXE_EXT))
 TAURI_RELEASE_DIR := $(TAURI_CRATE_DIR)/target/release
 
 HOST_OS := $(shell uname -s)
@@ -86,11 +91,11 @@ perf-linux-battery: guard-linux build
 
 backend:
 	mkdir -p $(BUILD_DIR)
-	cd backend && go build -o ../$(BUILD_DIR)/rust-meow-backend ./cmd/rust-meow-backend
+	cd backend && go build -o $(BACKEND_BIN) ./cmd/rust-meow-backend
 
 backend-release:
 	mkdir -p $(BUILD_DIR)
-	cd backend && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../$(BUILD_DIR)/rust-meow-backend ./cmd/rust-meow-backend
+	cd backend && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BACKEND_BIN) ./cmd/rust-meow-backend
 
 frontend-build: deps
 	pnpm --dir $(TAURI_DIR) build
@@ -101,7 +106,7 @@ desktop: tauri-build
 
 tauri-build: deps backend-release
 	pnpm --dir $(TAURI_DIR) tauri build --no-bundle
-	cp $(BACKEND_BIN) $(TAURI_RELEASE_DIR)/rust-meow-backend
+	cp $(BACKEND_BIN) $(TAURI_RELEASE_DIR)/rust-meow-backend$(EXE_EXT)
 
 dev: dev-real
 
@@ -135,12 +140,12 @@ legacy-test:
 
 legacy-build: backend
 	cd desktop && cargo build --locked
-	cp $(BACKEND_BIN) desktop/target/debug/rust-meow-backend
+	cp $(BACKEND_BIN) desktop/target/debug/rust-meow-backend$(EXE_EXT)
 
 legacy-release: backend-release
 	mkdir -p desktop/target/release
 	cd desktop && cargo build --release --locked
-	cp $(BACKEND_BIN) desktop/target/release/rust-meow-backend
+	cp $(BACKEND_BIN) desktop/target/release/rust-meow-backend$(EXE_EXT)
 
 clean:
 	cd backend && go clean
