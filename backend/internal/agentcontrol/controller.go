@@ -40,6 +40,7 @@ type StatusSink func()
 
 type Controller struct {
 	ctx        context.Context
+	cancel     context.CancelFunc
 	store      *store.Store
 	send       Sender
 	aliases    IdentityAliases
@@ -53,6 +54,7 @@ type Controller struct {
 	active        map[string]context.CancelFunc
 	approvalIDs   map[string]json.RawMessage
 	planMilestone map[string]bool
+	seenMessages  map[string]struct{}
 }
 
 type ParsedCommand struct {
@@ -103,12 +105,16 @@ func New(ctx context.Context, productStore *store.Store, send Sender, aliases Id
 	if skillPath == "" {
 		skillPath = materializeRemoteSessionSkill()
 	}
-	return &Controller{
-		ctx: ctx, store: productStore, send: send, aliases: aliases, ownID: ownID,
+	controllerCtx, cancel := context.WithCancel(ctx)
+	controller := &Controller{
+		ctx: controllerCtx, cancel: cancel, store: productStore, send: send, aliases: aliases, ownID: ownID,
 		statusSink: statusSink, skillPath: skillPath,
 		threadRuns: make(map[string]string), active: make(map[string]context.CancelFunc),
 		approvalIDs: make(map[string]json.RawMessage), planMilestone: make(map[string]bool),
+		seenMessages: make(map[string]struct{}),
 	}
+	go controller.watchOwnerMessages(time.Now().UnixMilli())
+	return controller
 }
 
 func materializeRemoteSessionSkill() string {
@@ -128,6 +134,7 @@ func materializeRemoteSessionSkill() string {
 }
 
 func (c *Controller) Close() {
+	c.cancel()
 	c.mu.Lock()
 	app := c.app
 	c.app = nil
@@ -230,6 +237,9 @@ func (c *Controller) HandleMessage(message domain.Message) {
 	if _, generated, linkErr := c.store.AgentMessageRun(c.ctx, message.ChatJID, message.ID); linkErr == nil && generated {
 		return
 	}
+	if !c.claimMessage(message.ChatJID, message.ID) {
+		return
+	}
 	command, addressed := ParseCommand(message.Text)
 	if !addressed && message.ReplyToID != "" {
 		runID, generated, linkErr := c.store.AgentMessageRun(c.ctx, message.ChatJID, message.ReplyToID)
@@ -278,6 +288,47 @@ func (c *Controller) HandleMessage(message domain.Message) {
 			return
 		}
 		c.startRun(message, settings, workspaceIDs, command)
+	}
+}
+
+func (c *Controller) claimMessage(chatID, messageID string) bool {
+	key := chatID + "\x00" + messageID
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.seenMessages[key]; exists {
+		return false
+	}
+	if len(c.seenMessages) >= 10_000 {
+		clear(c.seenMessages)
+	}
+	c.seenMessages[key] = struct{}{}
+	return true
+}
+
+func (c *Controller) watchOwnerMessages(afterMS int64) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case now := <-ticker.C:
+			// Keep a short lag behind wall time so a message transaction with a
+			// server timestamp near the scan boundary is committed before the
+			// cursor advances past it.
+			throughMS := now.Add(-2 * time.Second).UnixMilli()
+			if throughMS <= afterMS {
+				continue
+			}
+			messages, err := c.store.AgentOwnerMessagesBetween(c.ctx, afterMS, throughMS, 200)
+			if err != nil {
+				continue
+			}
+			for _, message := range messages {
+				c.HandleMessage(message)
+			}
+			afterMS = throughMS
+		}
 	}
 }
 

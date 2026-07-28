@@ -4,6 +4,9 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/rust-meow/rust-meow/backend/internal/domain"
 )
 
 func TestAgentControlPolicyPersistsAndClearsWithAccount(t *testing.T) {
@@ -70,5 +73,41 @@ func TestAgentGrantRejectsInvalidRoleAndEmptyScope(t *testing.T) {
 	}
 	if _, err = s.SaveAgentGrant(ctx, AgentGrant{Role: "operator", Addresses: []string{"x"}, WorkspaceIDs: []string{"missing"}}); err == nil {
 		t.Fatal("expected an unknown workspace to be rejected")
+	}
+}
+
+func TestAgentOwnerMessagesBetweenOnlyReturnsNewControlChatMessages(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const address = "123456789@s.whatsapp.net"
+	if err = s.UpsertChatName(ctx, address, "Self"); err != nil {
+		t.Fatal(err)
+	}
+	chatID, err := s.ResolveChat(ctx, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetAgentControlChat(ctx, chatID, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []domain.Message{
+		{ID: "old", ChatJID: chatID, TransportJID: address, SenderJID: address, Kind: "text", Text: "!meow agent status", FromMe: true, Timestamp: time.UnixMilli(99)},
+		{ID: "owner", ChatJID: chatID, TransportJID: address, SenderJID: address, Kind: "text", Text: "!meow agent status", FromMe: true, Timestamp: time.UnixMilli(101)},
+		{ID: "friend", ChatJID: chatID, TransportJID: address, SenderJID: "friend@s.whatsapp.net", Kind: "text", Text: "!meow agent status", Timestamp: time.UnixMilli(102)},
+	} {
+		if err = s.ApplyMessage(ctx, message, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	messages, err := s.AgentOwnerMessagesBetween(ctx, 100, 200, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].ID != "owner" || !messages[0].FromMe {
+		t.Fatalf("messages=%+v", messages)
 	}
 }

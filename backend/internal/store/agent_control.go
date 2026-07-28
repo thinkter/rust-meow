@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rust-meow/rust-meow/backend/internal/domain"
 )
 
 var agentAliasPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -401,6 +402,44 @@ func (s *Store) AgentMessageRun(ctx context.Context, chatID, messageID string) (
 	var generated int
 	err := s.db.QueryRowContext(ctx, `SELECT run_id,generated FROM agent_message_links WHERE chat_id=? AND message_id=?`, chatID, messageID).Scan(&runID, &generated)
 	return runID, generated != 0, err
+}
+
+// AgentOwnerMessagesBetween returns newly persisted outgoing text messages in
+// explicitly enabled control chats. It is used as a bounded fallback for
+// linked-device/self-chat messages that WhatsApp may deliver through a sync
+// path without a live message event.
+func (s *Store) AgentOwnerMessagesBetween(ctx context.Context, afterMS, throughMS int64, limit int) ([]domain.Message, error) {
+	if throughMS <= afterMS {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id,m.chat_jid,m.transport_jid,m.sender_jid,m.text,m.timestamp,m.from_me,m.kind,m.reply_to_id,m.reply_to_chat_id,m.edited_at,m.revoked
+FROM messages m JOIN agent_control_chats c ON c.chat_id=m.chat_jid
+WHERE m.from_me=1 AND m.kind='text' AND m.timestamp>? AND m.timestamp<=?
+ORDER BY m.timestamp,m.id LIMIT ?`, afterMS, throughMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]domain.Message, 0, limit)
+	for rows.Next() {
+		var item domain.Message
+		var fromMe, revoked int
+		var timestampMS, editedAtMS int64
+		if err = rows.Scan(&item.ID, &item.ChatJID, &item.TransportJID, &item.SenderJID, &item.Text, &timestampMS, &fromMe, &item.Kind, &item.ReplyToID, &item.ReplyToChatID, &editedAtMS, &revoked); err != nil {
+			return nil, err
+		}
+		item.Timestamp = time.UnixMilli(timestampMS)
+		item.FromMe = fromMe != 0
+		item.Revoked = revoked != 0
+		if editedAtMS > 0 {
+			item.EditedAt = time.UnixMilli(editedAtMS)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) AddAgentAudit(ctx context.Context, runID, actor, action, detail string) error {
