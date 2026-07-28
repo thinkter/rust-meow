@@ -56,6 +56,7 @@ import (
 
 type Event struct {
 	Kind                              string
+	ControllerOnly                    bool
 	Message                           domain.Message
 	Reaction                          domain.Reaction
 	Chat                              domain.Chat
@@ -4873,6 +4874,12 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 	if unread {
 		c.sink(Event{Kind: "message", Message: m})
 		c.emitChat(m.ChatJID)
+	} else {
+		// Messages sent from another linked device are already read, so they
+		// should not create a desktop notification/update event. Agent Control
+		// still needs to inspect them to support commands in the owner's
+		// "Message yourself" conversation.
+		c.sink(Event{Kind: "message", Message: m, ControllerOnly: true})
 	}
 }
 

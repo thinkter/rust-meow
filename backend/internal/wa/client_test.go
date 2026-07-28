@@ -1285,6 +1285,35 @@ func TestMetadataOnlyLivePinIsReducedWithoutBubble(t *testing.T) {
 	}
 }
 
+func TestReadOutgoingMessageIsPublishedToControllerOnly(t *testing.T) {
+	ctx := context.Background()
+	productStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	chat, _ := types.ParseJID("123456789@s.whatsapp.net")
+	sender, _ := types.ParseJID("987654321@s.whatsapp.net")
+	var emitted []Event
+	c := &Client{ctx: ctx, store: productStore, sink: func(event Event) { emitted = append(emitted, event) }, log: slog.Default()}
+
+	c.reduceMessage(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsFromMe: true},
+			ID:            "owner-command",
+			Timestamp:     time.UnixMilli(200),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("!meow agent @repo inspect it")},
+	}, false)
+
+	if len(emitted) != 1 || emitted[0].Kind != "message" || !emitted[0].ControllerOnly {
+		t.Fatalf("emitted=%+v", emitted)
+	}
+	if emitted[0].Message.Text != "!meow agent @repo inspect it" || !emitted[0].Message.FromMe {
+		t.Fatalf("message=%+v", emitted[0].Message)
+	}
+}
+
 func TestHistoryAggregateReactionsTargetContainingMessage(t *testing.T) {
 	chat, _ := types.ParseJID("123@g.us")
 	sender, _ := types.ParseJID("456@s.whatsapp.net")

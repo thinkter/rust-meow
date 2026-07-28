@@ -193,6 +193,13 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) Emit(event wa.Event) {
+	if event.Kind == "message" && event.ControllerOnly {
+		if s.handshaken.Load() && s.agent != nil {
+			message := event.Message
+			go s.agent.HandleMessage(message)
+		}
+		return
+	}
 	if !s.handshaken.Load() {
 		return
 	}

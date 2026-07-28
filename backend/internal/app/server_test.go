@@ -350,6 +350,24 @@ func TestUnsupportedEventDoesNotConsumeSequence(t *testing.T) {
 	}
 }
 
+func TestControllerOnlyMessageDoesNotReachDesktopEventStream(t *testing.T) {
+	var output bytes.Buffer
+	s := &Server{ctx: context.Background(), codec: bridge.NewCodec(nil, &output)}
+	s.handshaken.Store(true)
+
+	s.Emit(wa.Event{
+		Kind: "message", ControllerOnly: true,
+		Message: domain.Message{ID: "owner-command", Kind: "text", Text: "!meow agent @repo inspect it", FromMe: true},
+	})
+
+	if got := s.sequence.Load(); got != 0 {
+		t.Fatalf("sequence=%d, want 0", got)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("controller-only event wrote %d desktop bytes", output.Len())
+	}
+}
+
 func TestHandshakeRequired(t *testing.T) {
 	s := &Server{ctx: context.Background()}
 	request := &bridgev1.Envelope{ProtocolVersion: 1, Body: &bridgev1.Envelope_Request{Request: &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_ListChats{ListChats: &bridgev1.ListChatsRequest{}}}}}
