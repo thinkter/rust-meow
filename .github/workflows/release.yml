@@ -72,7 +72,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libfuse2
+            libfuse2 \
+            xdg-utils
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
