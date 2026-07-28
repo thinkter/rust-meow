@@ -189,6 +189,10 @@ function SettingRow(props: { title: string; description: string; children: JSX.E
   </div>;
 }
 
+function formatIntegrityTime(timestampMs: number): string {
+  return timestampMs > 0 ? new Date(timestampMs).toLocaleString() : "not recorded yet";
+}
+
 type SettingsSection = "appearance" | "chats" | "notifications" | "storage" | "desktop" | "about";
 
 const SETTINGS_SECTIONS: ReadonlyArray<{
@@ -297,6 +301,7 @@ export function SettingsPanel(props: { model: AppModel }) {
 
   function selectSection(section: SettingsSection) {
     setActiveSection(section);
+    if (section === "storage") void actions.loadIntegrityStatus();
   }
 
   function duplicate(theme: Theme, openEditor: boolean) {
@@ -641,6 +646,43 @@ export function SettingsPanel(props: { model: AppModel }) {
               </div>
               <Show when={storageError()}><p>{storageError()}</p></Show>
               <p>This only affects files you explicitly save out of Rust Meow. The encrypted local message cache always stays in the app's own data directory.</p>
+              <h3>Local message integrity</h3>
+              <Show when={state.integrityStatus} fallback={<p>Checking local storage…</p>}>
+                {(status) => (
+                  <>
+                    <p>{status().detail}</p>
+                    <SettingRow
+                      title={status().databaseOk && status().inconsistentChats === 0 ? "Healthy" : "Needs attention"}
+                      description={`${status().pendingInbound} pending inbound event${status().pendingInbound === 1 ? "" : "s"} · ${status().failedInbound} awaiting retry`}
+                    >
+                      <ShieldCheck size={20} />
+                    </SettingRow>
+                    <p>
+                      Last durable message: {formatIntegrityTime(status().lastMessagePersistedAtMs)}
+                      {" · "}Last reconciliation: {formatIntegrityTime(status().lastReconciliationAtMs)}
+                    </p>
+                  </>
+                )}
+              </Show>
+              <div class="path-row">
+                <button
+                  type="button"
+                  class="secondary-button"
+                  disabled={state.integrityChecking}
+                  onClick={() => void actions.loadIntegrityStatus()}
+                >
+                  {state.integrityChecking ? "Checking…" : "Check now"}
+                </button>
+                <button
+                  type="button"
+                  class="secondary-button"
+                  disabled={state.integrityChecking}
+                  onClick={() => void actions.repairLocalCache()}
+                >
+                  Repair derived cache
+                </button>
+              </div>
+              <p>Repair rebuilds chat summaries and search data from stored messages. It does not delete messages or pending inbound events.</p>
             </section>
           </Show>
 

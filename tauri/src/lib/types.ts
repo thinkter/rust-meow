@@ -75,7 +75,7 @@ export type AuthStateResponse = AuthState;
 
 export const SyncPhase = { Unspecified: 0, NotStarted: 1, Connecting: 2, InitialHistory: 3, AppState: 4, CatchingUp: 5, Complete: 6, Partial: 7, Failed: 8, Offline: 9 } as const;
 export type SyncPhase = (typeof SyncPhase)[keyof typeof SyncPhase];
-export interface SyncStatus { phase: SyncPhase; revision: number; chatsProcessed: number; messagesProcessed: number; whatsAppProgress: number; startedAtMs: number; completedAtMs: number; detail: string; }
+export interface SyncStatus { phase: SyncPhase; revision: number; chatsProcessed: number; messagesProcessed: number; messagesReceived: number; messagesDecoded: number; messagesFailed: number; whatsAppProgress: number; startedAtMs: number; completedAtMs: number; detail: string; }
 export interface SyncStatusResponse { status: SyncStatus | null; }
 
 export const HistoryCoverageState = {
@@ -113,8 +113,24 @@ export interface HistoryOverview {
   chatsWithoutAnchor: number;
 }
 export interface GetHistoryOverviewResponse { overview: HistoryOverview | null; }
+export interface IntegrityStatus {
+  databaseOk: boolean;
+  detail: string;
+  pendingInbound: number;
+  failedInbound: number;
+  oldestPendingAtMs: number;
+  lastMessagePersistedAtMs: number;
+  lastReconciliationAtMs: number;
+  inconsistentChats: number;
+}
+export interface GetIntegrityStatusResponse { status: IntegrityStatus | null; }
+export interface RepairLocalCacheResponse { status: IntegrityStatus | null; }
 
 export interface StartPairingResponse {
+  started: boolean;
+}
+
+export interface ReconnectResponse {
   started: boolean;
 }
 

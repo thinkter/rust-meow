@@ -30,6 +30,7 @@ import type {
   OpenContactResponse,
   OpenMessageWindowResponse,
   RepairRecentReactionsResponse,
+  ReconnectResponse,
   SearchLocalResponse,
   SendAttachmentResponse,
   SendImageResponse,
@@ -48,6 +49,8 @@ import type {
   RequestOlderHistoryResponse,
   GetChatHistoryCoverageResponse,
   GetHistoryOverviewResponse,
+  GetIntegrityStatusResponse,
+  RepairLocalCacheResponse,
 } from "./types";
 
 export type BackendEventHandler = (
@@ -302,10 +305,13 @@ export interface BridgeApi {
   hello(): Promise<HelloResponse>;
   getAuthState(): Promise<AuthStateResponse>;
   startPairing(): Promise<StartPairingResponse>;
+  reconnect(): Promise<ReconnectResponse>;
   getSyncStatus(): Promise<SyncStatusResponse>;
   requestOlderHistory(chatId: string): Promise<RequestOlderHistoryResponse>;
   getChatHistoryCoverage(chatId: string): Promise<GetChatHistoryCoverageResponse>;
   getHistoryOverview(): Promise<GetHistoryOverviewResponse>;
+  getIntegrityStatus(): Promise<GetIntegrityStatusResponse>;
+  repairLocalCache(): Promise<RepairLocalCacheResponse>;
   listChats(cursor?: string, limit?: number): Promise<ListChatsResponse>;
   listMessages(
     chatId: string,
@@ -414,6 +420,7 @@ const nativeBridge: BridgeApi = {
   hello: () => invokeCommand<HelloResponse>("hello"),
   getAuthState: () => invokeCommand<AuthStateResponse>("get_auth_state"),
   startPairing: () => invokeCommand<StartPairingResponse>("start_pairing"),
+  reconnect: () => invokeCommand<ReconnectResponse>("reconnect"),
   getSyncStatus: () => invokeCommand<SyncStatusResponse>("get_sync_status"),
   requestOlderHistory: (chatId) =>
     invokeCommand<RequestOlderHistoryResponse>("request_older_history", { chatId }),
@@ -421,6 +428,10 @@ const nativeBridge: BridgeApi = {
     invokeCommand<GetChatHistoryCoverageResponse>("get_chat_history_coverage", { chatId }),
   getHistoryOverview: () =>
     invokeCommand<GetHistoryOverviewResponse>("get_history_overview"),
+  getIntegrityStatus: () =>
+    invokeCommand<GetIntegrityStatusResponse>("get_integrity_status"),
+  repairLocalCache: () =>
+    invokeCommand<RepairLocalCacheResponse>("repair_local_cache"),
   listChats: (cursor = "", limit = 100) =>
     invokeCommand<ListChatsResponse>("list_chats", { cursor, limit }),
   listMessages: (

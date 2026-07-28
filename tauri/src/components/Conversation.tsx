@@ -322,6 +322,14 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
         <div class="connection-banner">
           <CircleAlert size={15} />
           <span>{connectionLabel(state.connection)}{state.connectionDetail ? ` · ${state.connectionDetail}` : ""}</span>
+          <Show when={
+            state.connection === ConnectionState.Offline ||
+            state.connection === ConnectionState.Failed
+          }>
+            <button class="connection-reconnect-button" type="button" onClick={() => void actions.reconnect()}>
+              Reconnect
+            </button>
+          </Show>
         </div>
       </Show>
 

@@ -1135,6 +1135,22 @@ html[data-appearance="light"] .avatar {
   font-size: calc(12px * var(--scale));
 }
 
+.connection-reconnect-button {
+  min-height: calc(26px * var(--scale));
+  padding: 0 calc(11px * var(--scale));
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: calc(11.5px * var(--scale));
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.connection-reconnect-button:hover {
+  background: var(--bg-active);
+}
+
 /* The scroller must never grow horizontally: G13. Everything below relies on
    overflow-x staying hidden here rather than on any child's own overflow. */
 .message-scroller {

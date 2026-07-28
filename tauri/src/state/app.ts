@@ -38,6 +38,7 @@ import {
   type SyncStatus,
   type HistoryCoverage,
   type HistoryOverview,
+  type IntegrityStatus,
   type PinnedMessage,
 } from "../lib/types";
 import { pairingStartupDecision } from "./pairing";
@@ -59,6 +60,7 @@ import {
   encodeMentions,
   mediaKey,
   mergeChats,
+  reconcileAuthoritativeChats,
   mergeMessages,
   readRecentChats,
   rememberRecentChat,
@@ -186,6 +188,8 @@ export interface AppState {
   syncActive: boolean;
   syncStatus: SyncStatus;
   historyOverview: HistoryOverview | null;
+  integrityStatus: IntegrityStatus | null;
+  integrityChecking: boolean;
   historySyncJob: {
     running: boolean;
     scope: "chat" | "all";
@@ -293,12 +297,17 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       revision: 0,
       chatsProcessed: 0,
       messagesProcessed: 0,
+      messagesReceived: 0,
+      messagesDecoded: 0,
+      messagesFailed: 0,
       whatsAppProgress: 0,
       startedAtMs: 0,
       completedAtMs: 0,
       detail: "Sync has not started",
     },
     historyOverview: null,
+    integrityStatus: null,
+    integrityChecking: false,
     historySyncJob: {
       running: false,
       scope: "chat",
@@ -497,6 +506,37 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     }
   }
 
+  async function reconnect() {
+    if (
+      state.connection === ConnectionState.Connected ||
+      state.connection === ConnectionState.Connecting
+    ) return;
+    batch(() => {
+      setState("connection", ConnectionState.Connecting);
+      setState("connectionDetail", "Connecting on your request");
+    });
+    try {
+      const response = await bridge.reconnect();
+      if (response.started) return;
+      const auth = await bridge.getAuthState();
+      batch(() => {
+        setState("connection", auth.connectionState);
+        setState(
+          "connectionDetail",
+          auth.connectionState === ConnectionState.Connected
+            ? ""
+            : "Reconnect is already running or this device is not linked",
+        );
+      });
+    } catch (error) {
+      batch(() => {
+        setState("connection", ConnectionState.Offline);
+        setState("connectionDetail", "Reconnect failed");
+      });
+      notifyError(error);
+    }
+  }
+
   async function loadChats(reset = false, supersede = false, throwOnError = false) {
     if (state.loadingChats && !supersede) return;
     if (!reset && !state.nextChatCursor) return;
@@ -520,6 +560,47 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
         if (throwOnError) throw error;
         toast(normalizeBridgeError(error).message);
       }
+    } finally {
+      if (chatListGeneration.isCurrent(generation)) setState("loadingChats", false);
+    }
+  }
+
+  async function loadAllChatsAuthoritative() {
+    const generation = chatListGeneration.begin();
+    const revisionsBefore = new Map(backendChatRevisions);
+    setState("loadingChats", true);
+    try {
+      const authoritative: Chat[] = [];
+      let cursor = "";
+      let totalCount = 0;
+      do {
+        const response = await bridge.listChats(cursor, 100);
+        if (!chatListGeneration.isCurrent(generation)) {
+          throw new Error("Chat refresh was superseded");
+        }
+        authoritative.push(...response.chats);
+        totalCount = response.totalCount;
+        cursor = response.nextCursor;
+      } while (cursor);
+
+      // Preserve only live upserts that raced this exact snapshot. Everything
+      // else is replaced by the complete authoritative backend list.
+      batch(() => {
+        setState(
+          "chats",
+          reconcile(
+            reconcileAuthoritativeChats(
+              authoritative,
+              state.chats,
+              revisionsBefore,
+              backendChatRevisions,
+            ),
+            { key: "id" },
+          ),
+        );
+        setState("totalChats", totalCount);
+        setState("nextChatCursor", "");
+      });
     } finally {
       if (chatListGeneration.isCurrent(generation)) setState("loadingChats", false);
     }
@@ -580,7 +661,12 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   }
 
   /** Fetch (or refetch) a chat's message window and write it into `state.conversations`. */
-  async function loadConversation(chatId: string, aroundMessageId = "", throwOnError = false) {
+  async function loadConversation(
+    chatId: string,
+    aroundMessageId = "",
+    throwOnError = false,
+    authoritativeLatest = false,
+  ) {
     if (!chatId) return;
     ensureConversation(chatId);
     const generation = bumpConversationGeneration(chatId);
@@ -622,6 +708,29 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
             setState("conversations", chatId, "highlightedMessageId", "");
           }
         }, 3_000);
+      } else if (authoritativeLatest) {
+        const response = await bridge.listMessages(chatId, 0, "", 50);
+        if (!isCurrentGeneration(chatId, generation)) return;
+        const messages = sortMessages(response.messages);
+        const firstUnreadMessageId = state.conversations[chatId]?.firstUnreadMessageId ?? "";
+        batch(() => {
+          setState(
+            "conversations",
+            chatId,
+            "messages",
+            reconcile(messages, { key: "id" }),
+          );
+          setState("conversations", chatId, "hasOlder", response.hasMore);
+          setState("conversations", chatId, "hasNewer", false);
+          setState(
+            "conversations",
+            chatId,
+            "firstUnreadMessageId",
+            messages.some((message) => message.id === firstUnreadMessageId)
+              ? firstUnreadMessageId
+              : "",
+          );
+        });
       } else {
         const response = await bridge.openMessageWindow(chatId);
         if (!isCurrentGeneration(chatId, generation)) return;
@@ -702,6 +811,40 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       if (response.overview) setState("historyOverview", response.overview);
     } catch {
       // The per-chat surface remains authoritative if the overview is unavailable.
+    }
+  }
+
+  async function loadIntegrityStatus() {
+    setState("integrityChecking", true);
+    try {
+      const response = await bridge.getIntegrityStatus();
+      setState("integrityStatus", response.status);
+    } catch (error) {
+      toast(`Could not check local storage: ${normalizeBridgeError(error).message}`);
+    } finally {
+      setState("integrityChecking", false);
+    }
+  }
+
+  async function repairLocalCache() {
+    setState("integrityChecking", true);
+    try {
+      const response = await bridge.repairLocalCache();
+      setState("integrityStatus", response.status);
+      const openChats = activeConversationIds(state.panes);
+      const refreshed = await Promise.allSettled([
+        loadAllChatsAuthoritative(),
+        ...openChats.map((chatId) => loadConversation(chatId, "", true, true)),
+      ]);
+      const failed = refreshed.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failed) throw failed.reason;
+      toast("Local message cache checked and repaired", "info");
+    } catch (error) {
+      toast(`Could not repair local storage: ${normalizeBridgeError(error).message}`);
+    } finally {
+      setState("integrityChecking", false);
     }
   }
 
@@ -862,7 +1005,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
 
   async function jumpToLatest(chatId = state.selectedChatId) {
     if (!chatId) return;
-    await loadConversation(chatId);
+    await loadConversation(chatId, "", false, true);
   }
 
   // ---------------------------------------------------------------------
@@ -2174,10 +2317,17 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     eventGapResyncing = true;
     try {
       const openChatIds = activeConversationIds(state.panes);
-      await Promise.all([
-        ...openChatIds.flatMap((chatId) => [loadConversation(chatId).catch(() => undefined), loadPinnedMessages(chatId).catch(() => undefined)]),
-        loadChats(true),
+      const refreshes = await Promise.allSettled([
+        ...openChatIds.flatMap((chatId) => [
+          loadConversation(chatId, "", true, true),
+          loadPinnedMessages(chatId, true),
+        ]),
+        loadAllChatsAuthoritative(),
       ]);
+      const failed = refreshes.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failed) throw failed.reason;
       toast("Chat state refreshed after a missed backend event", "info");
     } catch (error) {
       toast(`Could not refresh after the event gap: ${normalizeBridgeError(error).message}`);
@@ -2205,9 +2355,9 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
               // prevents a slow, older pin response from overwriting a newer
               // attempt after Promise.all rejects early.
               const refreshes = await Promise.allSettled([
-                loadChats(true, true, true),
+                loadAllChatsAuthoritative(),
                 ...openChatIds.flatMap((chatId) => [
-                  loadConversation(chatId, "", true),
+                  loadConversation(chatId, "", true, true),
                   loadPinnedMessages(chatId, true),
                 ]),
               ]);
@@ -2525,6 +2675,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     actions: {
       bootstrap,
       refreshPairing,
+      reconnect,
       loadChats,
       conversation,
       selectChat,
@@ -2539,6 +2690,8 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       loadOlder,
       loadHistoryCoverage,
       loadHistoryOverview,
+      loadIntegrityStatus,
+      repairLocalCache,
       requestOlderHistory,
       syncChatHistory,
       syncAllChatHistory,

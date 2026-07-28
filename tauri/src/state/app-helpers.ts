@@ -18,6 +18,20 @@ export function mergeChats(existing: readonly Chat[], incoming: readonly Chat[])
   return [...byId.values()];
 }
 
+export function reconcileAuthoritativeChats(
+  authoritative: readonly Chat[],
+  current: readonly Chat[],
+  revisionsBefore: ReadonlyMap<string, number>,
+  revisionsAfter: ReadonlyMap<string, number>,
+): Chat[] {
+  const raced = current.filter(
+    (chat) =>
+      (revisionsAfter.get(chat.id) ?? 0) >
+      (revisionsBefore.get(chat.id) ?? 0),
+  );
+  return sortChats(mergeChats(authoritative, raced));
+}
+
 export function sortMessages(messages: readonly Message[]): Message[] {
   return [...messages].sort(compareMessages);
 }

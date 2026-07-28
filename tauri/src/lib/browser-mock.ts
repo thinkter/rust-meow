@@ -14,7 +14,7 @@ import type {
 } from "./bridge";
 
 const OWN_USER_ID = "919900001111@s.whatsapp.net";
-const PROTOCOL_VERSION = 18;
+const PROTOCOL_VERSION = 20;
 const STARTED_AT = Date.now();
 const MINUTE = 60_000;
 const DAY = 86_400_000;
@@ -168,7 +168,7 @@ class BrowserMockBridge implements BridgeApi {
   }
 
   async getSyncStatus() {
-    return { status: { phase: SyncPhase.Complete, revision: 1, chatsProcessed: 10_000, messagesProcessed: 2_000, whatsAppProgress: 100, startedAtMs: STARTED_AT, completedAtMs: Date.now(), detail: "Up to date" } };
+    return { status: { phase: SyncPhase.Complete, revision: 1, chatsProcessed: 10_000, messagesProcessed: 2_000, messagesReceived: 2_000, messagesDecoded: 2_000, messagesFailed: 0, whatsAppProgress: 100, startedAtMs: STARTED_AT, completedAtMs: Date.now(), detail: "Up to date" } };
   }
 
   async getChatHistoryCoverage(chatId: string) {
@@ -203,6 +203,19 @@ class BrowserMockBridge implements BridgeApi {
     return { overview: { localMessageCount, chatsWithMessages, chatsChecked: 0, chatsUnknown: this.chats.size, chatsWithoutAnchor: this.chats.size - chatsWithMessages } };
   }
 
+  async getIntegrityStatus() {
+    return { status: {
+      databaseOk: true, detail: "Local database and derived chat state are consistent",
+      pendingInbound: 0, failedInbound: 0, oldestPendingAtMs: 0,
+      lastMessagePersistedAtMs: Date.now(), lastReconciliationAtMs: Date.now(),
+      inconsistentChats: 0,
+    } };
+  }
+
+  async repairLocalCache() {
+    return this.getIntegrityStatus();
+  }
+
   async startPairing() {
     this.connected = false;
     void this.emit({
@@ -216,6 +229,16 @@ class BrowserMockBridge implements BridgeApi {
         expiresAtMs: Date.now() + 60_000,
       },
     });
+    return { started: true };
+  }
+
+  async reconnect() {
+    if (!this.paired || this.connected) return { started: false };
+    this.connected = true;
+    queueMicrotask(() => void this.emit({
+      type: "connectionChanged",
+      payload: { state: ConnectionState.Connected, detail: "connected" },
+    }));
     return { started: true };
   }
 
