@@ -36,6 +36,8 @@ are generated directly from `proto/bridge.proto`.
 - Node.js plus pnpm 10.28.2
 - Tauri v2 Linux development packages, including WebKitGTK 4.1 headers
 - `dpkg` tooling to create the Linux `.deb`
+- [Codex CLI](https://developers.openai.com/codex/cli/) installed and signed in
+  to use WhatsApp Agent Control
 
 Install the pinned frontend dependency graph with:
 
@@ -68,6 +70,53 @@ from selecting an older extensionless or adjacent sidecar.
 The first clean launch displays a QR code. Scan it from **WhatsApp > Linked
 devices > Link a device**. Use `RUST_MEOW_DATA_DIR` to isolate a QA profile;
 the backend takes an OS-level profile lock and fails a second process closed.
+
+## WhatsApp Agent Control
+
+Agent Control lets the machine owner and selected WhatsApp contacts start and
+monitor local Codex runs from allowlisted direct messages or group chats. It is
+an experimental trusted-host feature intended for machines and control chats
+you administer.
+
+> [!CAUTION]
+> Agent runs use Codex's `:danger-full-access` permission profile, have network
+> access, and never ask for approval. An Owner or Operator can execute arbitrary
+> commands and read or modify files outside the registered workspace. The
+> Access list and Control chats allowlist are the security boundary.
+
+To configure it:
+
+1. Build and launch Rust Meow with `make dev` or `make build`.
+2. Open **Agent Control** from the left navigation.
+3. In **Workspaces**, register a repository folder and a short alias such as
+   `rust-meow`.
+4. In **Control chats**, enable each direct message or group allowed to carry
+   agent commands.
+5. Optionally use **Access** to grant a contact an Operator or Viewer role for a
+   workspace.
+6. In **Overview**, choose the agent alias, verify the Codex executable
+   (normally `codex`), and enable Agent Control.
+
+The linked-device owner is recognized automatically and does not need an
+explicit grant. Owners can access every registered workspace. Operators can
+start and stop runs only in granted workspaces; Viewers can inspect status but
+cannot start or interrupt runs. In a group, everyone can read agent replies
+even if RBAC prevents them from issuing commands.
+
+With an agent alias of `agent` and a workspace alias of `rust-meow`:
+
+```text
+!meow agent @rust-meow inspect this repository and summarize it
+!meow agent status
+!meow agent stop 12AB34CD
+```
+
+Omit `@rust-meow` to use the default workspace. Reply to a run message to
+continue that Codex thread. The controller sends one short start
+acknowledgement and one capped final result; plans and progress commentary stay
+out of the chat. Use **Runs & audit** to inspect activity or emergency-stop an
+active run. Only one run may be active per workspace, with at most three active
+runs across the host.
 
 ## Checks and builds
 
