@@ -15,7 +15,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 20;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -326,6 +326,19 @@ fn fake_history_coverage(chat_id: String) -> proto::HistoryCoverage {
     }
 }
 
+fn fake_integrity_status() -> proto::IntegrityStatus {
+    proto::IntegrityStatus {
+        database_ok: true,
+        detail: "Local database and derived chat state are consistent".into(),
+        pending_inbound: 0,
+        failed_inbound: 0,
+        oldest_pending_at_ms: 0,
+        last_message_persisted_at_ms: 1_700_000_000_000,
+        last_reconciliation_at_ms: 1_700_000_000_000,
+        inconsistent_chats: 0,
+    }
+}
+
 fn fake_loop(
     outgoing: async_channel::Receiver<proto::Envelope>,
     incoming: async_channel::Sender<BridgeMessage>,
@@ -381,6 +394,9 @@ fn fake_loop(
                         revision: 1,
                         chats_processed: 10_000,
                         messages_processed: message_total as u64,
+                        messages_received: message_total as u64,
+                        messages_decoded: message_total as u64,
+                        messages_failed: 0,
                         whatsapp_progress: 100,
                         started_at_ms: 0,
                         completed_at_ms: 0,
@@ -425,6 +441,16 @@ fn fake_loop(
                         chats_unknown: 10_000,
                         chats_without_anchor: 0,
                     }),
+                })
+            }
+            Some(rpc_request::Request::GetIntegrityStatus(_)) => {
+                rpc_response::Result::GetIntegrityStatus(proto::GetIntegrityStatusResponse {
+                    status: Some(fake_integrity_status()),
+                })
+            }
+            Some(rpc_request::Request::RepairLocalCache(_)) => {
+                rpc_response::Result::RepairLocalCache(proto::RepairLocalCacheResponse {
+                    status: Some(fake_integrity_status()),
                 })
             }
             Some(rpc_request::Request::ListChats(request)) => {
@@ -890,6 +916,9 @@ fn fake_loop(
             }
             Some(rpc_request::Request::Logout(_)) => {
                 rpc_response::Result::Logout(proto::LogoutResponse {})
+            }
+            Some(rpc_request::Request::Reconnect(_)) => {
+                rpc_response::Result::Reconnect(proto::ReconnectResponse { started: true })
             }
             Some(rpc_request::Request::Shutdown(_)) => {
                 rpc_response::Result::Shutdown(proto::ShutdownResponse {})

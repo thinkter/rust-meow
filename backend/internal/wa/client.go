@@ -124,6 +124,18 @@ type Client struct {
 	getGroupInfoFn      func(context.Context, *whatsmeow.Client, types.JID) (*types.GroupInfo, error)
 	sendPresenceFn      func(context.Context, *whatsmeow.Client, types.Presence) error
 	connectFn           func(context.Context, *whatsmeow.Client) error
+	connecting          atomic.Bool
+	inboundRetryWake    chan struct{}
+	maintenanceWG       sync.WaitGroup
+	inboundMemoryMu     sync.Mutex
+	inboundMemory       []pendingInboundMessage
+	catchUpMu           sync.Mutex
+	catchUpTimer        *time.Timer
+}
+
+type pendingInboundMessage struct {
+	message         domain.Message
+	incrementUnread bool
 }
 
 type olderHistoryRequest struct {
@@ -182,7 +194,16 @@ func (l whatsmeowLogger) Sub(module string) waLog.Logger {
 }
 
 func newWhatsmeowClient(device *wastore.Device, log *slog.Logger) *whatsmeow.Client {
-	return whatsmeow.NewClient(device, whatsmeowLogger{log: log.With("component", "whatsmeow")})
+	client := whatsmeow.NewClient(device, whatsmeowLogger{log: log.With("component", "whatsmeow")})
+	// Transient disconnects must heal without operator action. Bound upstream's
+	// retry loop so a permanently rejected session eventually settles offline
+	// and the explicit Reconnect action remains useful.
+	client.EnableAutoReconnect = true
+	client.AutoReconnectHook = func(err error) bool {
+		log.Warn("automatic reconnect failed", "attempt", client.AutoReconnectErrors, "error", err)
+		return client.AutoReconnectErrors < 8
+	}
+	return client
 }
 
 type ContactDetails struct {
@@ -261,7 +282,7 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 		container.Close()
 		return nil, err
 	}
-	c := &Client{ctx: ctx, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time), groupNameFetches: make(map[string]*groupNameFetch)}
+	c := &Client{ctx: ctx, sessions: container, db: db, store: productStore, sink: sink, log: log, reducer: make(chan func(), 256), reducerDone: make(chan struct{}), inboundRetryWake: make(chan struct{}, 1), avatarDir: filepath.Join(dataDir, "avatars"), mediaDir: filepath.Join(dataDir, "media"), avatarFetches: make(map[string]*avatarFetch), negativeAvatars: make(map[string]time.Time), groupNameFetches: make(map[string]*groupNameFetch)}
 	if syncStatus, syncErr := productStore.SyncStatus(ctx); syncErr != nil {
 		c.log.Warn("load persisted sync status", "error", syncErr)
 	} else {
@@ -293,6 +314,9 @@ func New(ctx context.Context, dataDir string, productStore *store.Store, sink Si
 			}
 		}
 	}()
+	c.maintenanceWG.Add(1)
+	go c.runInboundReplay()
+	c.wakeInboundReplay()
 	return c, nil
 }
 
@@ -319,19 +343,44 @@ func (c *Client) Connect() error {
 // safely schedule the returned function. A delayed startup goroutine will
 // become a no-op if logout changes the account generation first.
 func (c *Client) PrepareConnect() func() error {
+	if !c.connecting.CompareAndSwap(false, true) {
+		return nil
+	}
 	c.lifecycleMu.Lock()
 	source := c.wa
 	generation := c.generation.Load()
-	paired := source != nil && source.Store.ID != nil && c.accepting.Load()
+	paired := source != nil && source.Store.ID != nil && c.accepting.Load() && !source.IsConnected()
 	c.lifecycleMu.Unlock()
 	if !paired {
+		c.connecting.Store(false)
 		return nil
 	}
 	return func() error {
 		c.lifecycleMu.Lock()
 		defer c.lifecycleMu.Unlock()
-		return c.connectLocked(source, generation)
+		defer c.connecting.Store(false)
+		err := c.connectLocked(source, generation)
+		if err != nil && c.wa == source && c.generation.Load() == generation && c.accepting.Load() {
+			c.sink(Event{Kind: "connection", Detail: "offline"})
+		}
+		return err
 	}
+}
+
+// Reconnect starts one user-requested connection attempt. It never queues a
+// second attempt and returns before the network dial completes.
+func (c *Client) Reconnect() bool {
+	connect := c.PrepareConnect()
+	if connect == nil {
+		return false
+	}
+	go func() {
+		if err := connect(); err != nil {
+			c.log.Error("manual reconnect failed", "error", err)
+			c.sink(Event{Kind: "problem", Detail: "Reconnect failed: " + err.Error()})
+		}
+	}()
+	return true
 }
 
 func (c *Client) connectLocked(source *whatsmeow.Client, generation uint64) error {
@@ -357,6 +406,10 @@ func (c *Client) SyncStatus() store.SyncStatus {
 	c.syncMu.Lock()
 	defer c.syncMu.Unlock()
 	return c.syncStatus
+}
+
+func shouldCatchUpAfterConnect(status store.SyncStatus, historyComplete bool) bool {
+	return historyComplete && status.WhatsAppProgress >= 100
 }
 
 func (c *Client) updateSyncStatus(update func(*store.SyncStatus)) {
@@ -385,6 +438,9 @@ func (c *Client) beginInitialSync() {
 		if status.Phase == "not_started" || status.StartedAtMS == 0 {
 			status.ChatsProcessed = 0
 			status.MessagesProcessed = 0
+			status.MessagesReceived = 0
+			status.MessagesDecoded = 0
+			status.MessagesFailed = 0
 			status.WhatsAppProgress = 0
 			status.CompletedAtMS = 0
 			status.StartedAtMS = time.Now().UnixMilli()
@@ -418,6 +474,52 @@ func (c *Client) beginInitialSync() {
 			status.Detail = "WhatsApp has not finished sending initial chat history"
 		})
 	}()
+}
+
+func (c *Client) scheduleCatchUpCompletion() {
+	current := c.SyncStatus()
+	if current.Phase != "catching_up" {
+		return
+	}
+	c.catchUpMu.Lock()
+	defer c.catchUpMu.Unlock()
+	if c.catchUpTimer == nil {
+		c.catchUpTimer = time.AfterFunc(3*time.Second, func() {
+			c.enqueue(c.finishCatchUp)
+		})
+		return
+	}
+	c.catchUpTimer.Reset(3 * time.Second)
+}
+
+func (c *Client) finishCatchUp() {
+	c.catchUpMu.Lock()
+	c.catchUpTimer = nil
+	c.catchUpMu.Unlock()
+	if !c.IsConnected() {
+		return
+	}
+	health, err := c.store.InboundJournalHealth(c.ctx)
+	if err != nil || health.Pending > 0 {
+		if err != nil {
+			c.reportInboundFailure("inspect inbound journal after reconnect", err)
+		}
+		c.scheduleCatchUpCompletion()
+		return
+	}
+	completedAt := time.Now()
+	if err = c.store.RecordReconciliation(c.ctx, completedAt); err != nil {
+		c.reportInboundFailure("record reconnect reconciliation", err)
+		c.scheduleCatchUpCompletion()
+		return
+	}
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		if status.Phase == "catching_up" {
+			status.Phase = "complete"
+			status.Detail = "Up to date"
+			status.CompletedAtMS = completedAt.UnixMilli()
+		}
+	})
 }
 
 func (c *Client) resetSyncTracking() {
@@ -3847,6 +3949,14 @@ func (c *Client) HistoryOverview(ctx context.Context) (store.HistoryOverview, er
 	return c.store.HistoryOverview(ctx)
 }
 
+func (c *Client) IntegrityStatus(ctx context.Context) (store.IntegrityStatus, error) {
+	return c.store.IntegrityStatus(ctx)
+}
+
+func (c *Client) RepairLocalCache(ctx context.Context) (store.IntegrityStatus, error) {
+	return c.store.RepairDerivedState(ctx)
+}
+
 func (c *Client) emitHistoryCoverage(coverage store.HistoryCoverage) {
 	c.sink(Event{Kind: "history_coverage", ChatJID: coverage.ChatID, HistoryCoverage: coverage})
 }
@@ -4251,10 +4361,17 @@ func retireDevice(device *wastore.Device) {
 
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
+		c.catchUpMu.Lock()
+		if c.catchUpTimer != nil {
+			c.catchUpTimer.Stop()
+			c.catchUpTimer = nil
+		}
+		c.catchUpMu.Unlock()
 		c.wa.Disconnect()
 		c.wa.RemoveEventHandler(c.handlerID)
 		close(c.reducerDone)
 		c.reducerWG.Wait()
+		c.maintenanceWG.Wait()
 		_ = c.sessions.Close()
 	})
 }
@@ -4340,11 +4457,13 @@ func (c *Client) handleEvent(source *whatsmeow.Client, sourceGeneration uint64, 
 	case *events.Connected:
 		c.sink(Event{Kind: "connection", Detail: "connected"})
 		syncStatus := c.SyncStatus()
-		if syncStatus.CompletedAtMS > 0 && syncStatus.WhatsAppProgress >= 100 {
+		if shouldCatchUpAfterConnect(syncStatus, c.historySyncComplete.Load()) {
 			c.updateSyncStatus(func(status *store.SyncStatus) {
-				status.Phase = "complete"
-				status.Detail = "Up to date"
+				status.Phase = "catching_up"
+				status.Detail = "Connected; catching up recent messages"
+				status.CompletedAtMS = 0
 			})
+			c.scheduleCatchUpCompletion()
 		} else {
 			c.beginInitialSync()
 		}
@@ -4381,6 +4500,7 @@ func (c *Client) handleEvent(source *whatsmeow.Client, sourceGeneration uint64, 
 	case *events.StreamReplaced:
 		c.sink(Event{Kind: "problem", Detail: "session replaced by another client"})
 	case *events.Message:
+		c.scheduleCatchUpCompletion()
 		c.enqueue(func() { c.reduceMessage(evt, true) })
 	case *events.ChatPresence:
 		c.enqueue(func() { c.reduceChatPresence(evt) })
@@ -4502,12 +4622,19 @@ func (c *Client) reconcileChatStateForGeneration(generation uint64, fetch func(c
 		})
 		return
 	}
+	reconciledAt := time.Now()
+	if c.historySyncComplete.Load() {
+		if err := c.store.RecordReconciliation(c.ctx, reconciledAt); err != nil {
+			c.reportInboundFailure("record initial reconciliation", err)
+			return
+		}
+	}
 	c.projectionComplete.Store(true)
 	c.updateSyncStatus(func(status *store.SyncStatus) {
 		if c.historySyncComplete.Load() {
 			status.Phase = "complete"
 			status.Detail = "Up to date"
-			status.CompletedAtMS = time.Now().UnixMilli()
+			status.CompletedAtMS = reconciledAt.UnixMilli()
 		} else if status.Phase != "complete" {
 			status.Phase = "app_state"
 			status.Detail = "Finishing local setup"
@@ -4599,13 +4726,8 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 			return
 		}
 		reaction.ChatJID = chatID
-		applied, err := c.store.ApplyReactionIfNewer(c.ctx, reaction)
-		if err != nil {
-			c.log.Error("persist reaction", "error", err)
+		if !c.persistInboundEvent("reaction", chatID, reaction.MessageID, journalReaction{Reaction: reaction, Publish: unread}) {
 			return
-		}
-		if unread && applied {
-			c.sink(Event{Kind: "reaction", Reaction: reaction})
 		}
 		if evt.UnavailableRequestID != "" {
 			matched, remaining, completeErr := c.store.CompleteLegacyReactionReplay(c.ctx, chatID, string(evt.Info.ID), string(evt.UnavailableRequestID), evt.Info.IsFromMe)
@@ -4634,14 +4756,8 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 			c.sink(Event{Kind: "problem", Detail: fmt.Sprintf("A poll vote referenced %d unknown option(s); refresh chat history to recover newer poll options", unknown)})
 			return
 		}
-		applied, changed, err := c.store.ApplyPollVote(c.ctx, domain.PollVote{ChatJID: chatID, PollMessageID: targetID, VoterJID: evt.Info.Sender.ToNonAD().String(), SelectedOptions: selected, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe})
-		if err != nil {
-			c.log.Error("persist poll vote", "error", err)
-			return
-		}
-		if changed {
-			c.sink(Event{Kind: "message", Message: applied})
-		}
+		voteEvent := domain.PollVote{ChatJID: chatID, PollMessageID: targetID, VoterJID: evt.Info.Sender.ToNonAD().String(), SelectedOptions: selected, Timestamp: evt.Info.Timestamp, FromMe: evt.Info.IsFromMe}
+		c.persistInboundEvent("poll_vote", chatID, targetID, journalPollVote{Vote: voteEvent})
 		return
 	}
 	if add := evt.Message.GetPollAddOptionMessage(); add != nil {
@@ -4650,28 +4766,19 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 			c.sink(Event{Kind: "problem", Detail: "WhatsApp sent an unsupported poll option update without a target or option name"})
 			return
 		}
-		applied, changed, err := c.store.AddPollOption(c.ctx, chatID, targetID, option)
-		if err != nil {
-			c.log.Error("persist poll option", "chat_id", chatID, "poll_message_id", targetID, "error", err)
-			return
-		}
-		if changed {
-			c.sink(Event{Kind: "message", Message: applied})
-		}
+		c.persistInboundEvent("poll_option", chatID, targetID, journalPollOption{ChatID: chatID, MessageID: targetID, Option: option})
 		return
 	}
 	if snapshot := messagePollResultSnapshot(evt.Message); snapshot != nil && snapshot.GetContextInfo().GetStanzaID() != "" {
 		targetID := snapshot.GetContextInfo().GetStanzaID()
-		applied, changed, err := c.store.ApplyPollSnapshot(c.ctx, chatID, targetID, domainPollSnapshot(snapshot), evt.Info.Timestamp)
-		if err == nil {
-			if !changed {
-				return
-			}
-			c.sink(Event{Kind: "message", Message: applied})
+		if _, err := c.store.Poll(c.ctx, chatID, targetID); err == nil {
+			poll := domainPollSnapshot(snapshot)
+			c.persistInboundEvent("poll_snapshot", chatID, targetID, journalPollSnapshot{
+				ChatID: chatID, MessageID: targetID, Poll: *poll, At: evt.Info.Timestamp,
+			})
 			return
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			c.log.Error("persist poll result snapshot", "chat_id", chatID, "poll_message_id", targetID, "error", err)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			c.log.Error("load poll for result snapshot", "chat_id", chatID, "poll_message_id", targetID, "error", err)
 			return
 		}
 		// If the original poll is outside local history, retain the snapshot as
@@ -4687,21 +4794,16 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 			if atMS <= 0 {
 				at = evt.Info.Timestamp
 			}
-			if err := c.store.SetMessagePinned(c.ctx, chatID, pin.GetKey().GetID(), "", at, pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL); err != nil {
-				c.log.Error("persist passive web pin metadata", "error", err)
-			} else {
-				c.sink(Event{Kind: "pins", ChatJID: chatID})
-			}
+			c.persistInboundEvent("pin", chatID, pin.GetKey().GetID(), journalPin{
+				ChatID: chatID, MessageID: pin.GetKey().GetID(), At: at,
+				Pinned: pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL,
+			})
 		}
 		return
 	}
 	m := domainMessage(evt, chatID, transportJID)
 	c.resolveMessageReplyChat(&m)
-	if err := c.store.ApplyMessage(c.ctx, m, unread); err != nil {
-		c.log.Error("persist message", "error", err)
-		return
-	}
-	pinsChanged := false
+	messagePersisted := c.persistInboundMessage(m, unread)
 	if pin := evt.SourceWebMsg.GetPinInChat(); pin != nil && pin.GetKey().GetID() != "" {
 		atMS := pin.GetSenderTimestampMS()
 		if atMS <= 0 {
@@ -4711,11 +4813,10 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 		if atMS <= 0 {
 			at = evt.Info.Timestamp
 		}
-		if err := c.store.SetMessagePinned(c.ctx, chatID, pin.GetKey().GetID(), "", at, pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL); err != nil {
-			c.log.Error("persist web pin metadata", "error", err)
-		} else {
-			pinsChanged = true
-		}
+		c.persistInboundEvent("pin", chatID, pin.GetKey().GetID(), journalPin{
+			ChatID: chatID, MessageID: pin.GetKey().GetID(), At: at,
+			Pinned: pin.GetType() == waWeb.PinInChat_PIN_FOR_ALL,
+		})
 	}
 	if pin := evt.Message.GetPinInChatMessage(); pin != nil && pin.GetKey().GetID() != "" {
 		pinned := pin.GetType() == waE2E.PinInChatMessage_PIN_FOR_ALL
@@ -4723,18 +4824,301 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 		if pin.GetSenderTimestampMS() <= 0 {
 			at = evt.Info.Timestamp
 		}
-		if err := c.store.SetMessagePinned(c.ctx, chatID, pin.GetKey().GetID(), evt.Info.Sender.ToNonAD().String(), at, pinned); err != nil {
-			c.log.Error("persist pin", "error", err)
-		} else {
-			pinsChanged = true
-		}
+		c.persistInboundEvent("pin", chatID, pin.GetKey().GetID(), journalPin{
+			ChatID: chatID, MessageID: pin.GetKey().GetID(), PinnedBy: evt.Info.Sender.ToNonAD().String(),
+			At: at, Pinned: pinned,
+		})
 	}
-	if pinsChanged {
-		c.sink(Event{Kind: "pins", ChatJID: chatID})
+	if !messagePersisted {
+		return
 	}
 	if unread {
 		c.sink(Event{Kind: "message", Message: m})
 		c.emitChat(m.ChatJID)
+	}
+}
+
+func inboundRetryDelay(attempt uint32) time.Duration {
+	if attempt > 6 {
+		attempt = 6
+	}
+	return time.Second * time.Duration(1<<attempt)
+}
+
+func (c *Client) wakeInboundReplay() {
+	if c.inboundRetryWake == nil {
+		return
+	}
+	select {
+	case c.inboundRetryWake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Client) runInboundReplay() {
+	defer c.maintenanceWG.Done()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.reducerDone:
+			return
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+		case <-c.inboundRetryWake:
+		}
+		c.enqueue(c.replayInboundMessages)
+	}
+}
+
+func (c *Client) retainInboundInMemory(message domain.Message, incrementUnread bool) {
+	c.inboundMemoryMu.Lock()
+	c.inboundMemory = append(c.inboundMemory, pendingInboundMessage{message: message, incrementUnread: incrementUnread})
+	pending := len(c.inboundMemory)
+	c.inboundMemoryMu.Unlock()
+	if pending > 10_000 && c.wa != nil && c.wa.IsConnected() {
+		// Stop accepting an unbounded stream when local storage is unavailable.
+		// WhatsApp can catch the session up after the journal becomes writable.
+		c.wa.Disconnect()
+	}
+}
+
+func (c *Client) reportInboundFailure(detail string, err error) {
+	c.log.Error(detail, "error", err)
+	c.updateSyncStatus(func(status *store.SyncStatus) {
+		status.Phase = "failed"
+		status.Detail = "Incoming messages could not be saved locally; retrying"
+		status.CompletedAtMS = 0
+	})
+	c.sink(Event{Kind: "problem", Detail: "Incoming messages could not be saved locally. Rust Meow will keep retrying."})
+	c.wakeInboundReplay()
+}
+
+func (c *Client) persistInboundMessage(message domain.Message, incrementUnread bool) bool {
+	journalID, err := c.store.JournalInboundMessage(c.ctx, message, incrementUnread)
+	if err != nil {
+		c.retainInboundInMemory(message, incrementUnread)
+		c.reportInboundFailure("journal inbound message", err)
+		return false
+	}
+	entry := store.InboundMessage{JournalID: journalID, Message: message, IncrementUnread: incrementUnread}
+	return c.applyJournaledInbound(entry, false)
+}
+
+func (c *Client) applyJournaledInbound(entry store.InboundMessage, replay bool) bool {
+	if err := c.store.ApplyMessage(c.ctx, entry.Message, entry.IncrementUnread); err != nil {
+		attempts := entry.Attempts + 1
+		retryAt := time.Now().Add(inboundRetryDelay(attempts))
+		if markErr := c.store.FailInboundMessage(c.ctx, entry.JournalID, attempts, retryAt, err); markErr != nil {
+			c.log.Error("record inbound retry", "journal_id", entry.JournalID, "error", markErr)
+		}
+		c.reportInboundFailure("persist inbound message", err)
+		return false
+	}
+	if err := c.store.CompleteInboundMessage(c.ctx, entry.JournalID); err != nil {
+		// The product row is already durable and idempotent. Leaving the journal
+		// row behind deliberately causes a safe replay after restart.
+		c.reportInboundFailure("complete inbound message journal", err)
+		return false
+	}
+	if replay {
+		c.sink(Event{Kind: "message", Message: entry.Message})
+		c.emitChat(entry.Message.ChatJID)
+	}
+	return true
+}
+
+type journalReaction struct {
+	Reaction domain.Reaction
+	Publish  bool
+}
+
+type journalPollVote struct {
+	Vote domain.PollVote
+}
+
+type journalPollSnapshot struct {
+	ChatID, MessageID string
+	Poll              domain.Poll
+	At                time.Time
+}
+
+type journalPollOption struct {
+	ChatID, MessageID, Option string
+}
+
+type journalPin struct {
+	ChatID, MessageID, PinnedBy string
+	At                          time.Time
+	Pinned                      bool
+}
+
+type journalReceipt struct {
+	ChatID     string
+	MessageIDs []string
+	Status     domain.MessageStatus
+	MarkRead   bool
+}
+
+func (c *Client) persistInboundEvent(kind, chatID, entityID string, payload any) bool {
+	journalID, err := c.store.JournalInboundEvent(c.ctx, kind, chatID, entityID, payload)
+	if err != nil {
+		// Unlike full messages, these normalized mutations are small and
+		// idempotent. Disconnecting forces WhatsApp to replay them when even the
+		// durable journal itself is unavailable.
+		c.reportInboundFailure("journal inbound "+kind, err)
+		if c.wa != nil && c.wa.IsConnected() {
+			c.wa.Disconnect()
+		}
+		return false
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		c.reportInboundFailure("encode journaled inbound "+kind, err)
+		return false
+	}
+	return c.applyJournaledInboundEvent(store.InboundEvent{
+		JournalID: journalID, Kind: kind, ChatJID: chatID, EntityID: entityID, Payload: encoded,
+	})
+}
+
+func (c *Client) applyJournaledInboundEvent(entry store.InboundEvent) bool {
+	var applyErr error
+	switch entry.Kind {
+	case "reaction":
+		var payload journalReaction
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			var applied bool
+			applied, applyErr = c.store.ApplyReactionIfNewer(c.ctx, payload.Reaction)
+			if applyErr == nil && applied && payload.Publish {
+				c.sink(Event{Kind: "reaction", Reaction: payload.Reaction})
+			}
+		}
+	case "poll_vote":
+		var payload journalPollVote
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			var message domain.Message
+			var changed bool
+			message, changed, applyErr = c.store.ApplyPollVote(c.ctx, payload.Vote)
+			if applyErr == nil && changed {
+				c.sink(Event{Kind: "message", Message: message})
+			}
+		}
+	case "poll_snapshot":
+		var payload journalPollSnapshot
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			var message domain.Message
+			var changed bool
+			message, changed, applyErr = c.store.ApplyPollSnapshot(c.ctx, payload.ChatID, payload.MessageID, &payload.Poll, payload.At)
+			if applyErr == nil && changed {
+				c.sink(Event{Kind: "message", Message: message})
+			}
+		}
+	case "poll_option":
+		var payload journalPollOption
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			var message domain.Message
+			var changed bool
+			message, changed, applyErr = c.store.AddPollOption(c.ctx, payload.ChatID, payload.MessageID, payload.Option)
+			if applyErr == nil && changed {
+				c.sink(Event{Kind: "message", Message: message})
+			}
+		}
+	case "pin":
+		var payload journalPin
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			applyErr = c.store.SetMessagePinned(c.ctx, payload.ChatID, payload.MessageID, payload.PinnedBy, payload.At, payload.Pinned)
+			if applyErr == nil {
+				c.sink(Event{Kind: "pins", ChatJID: payload.ChatID})
+			}
+		}
+	case "receipt":
+		var payload journalReceipt
+		if applyErr = json.Unmarshal(entry.Payload, &payload); applyErr == nil {
+			if payload.MarkRead {
+				applyErr = c.store.MarkReadIDs(c.ctx, payload.ChatID, payload.MessageIDs)
+				if applyErr == nil {
+					c.emitChat(payload.ChatID)
+				}
+			} else {
+				for _, messageID := range payload.MessageIDs {
+					if applyErr = c.store.UpdateReceipt(c.ctx, payload.ChatID, messageID, payload.Status); applyErr != nil {
+						break
+					}
+					c.sink(Event{Kind: "receipt", ChatJID: payload.ChatID, MessageID: messageID, Status: payload.Status})
+				}
+			}
+		}
+	default:
+		applyErr = fmt.Errorf("unsupported inbound journal event %q", entry.Kind)
+	}
+	if applyErr != nil {
+		attempts := entry.Attempts + 1
+		retryAt := time.Now().Add(inboundRetryDelay(attempts))
+		if markErr := c.store.FailInboundEvent(c.ctx, entry.JournalID, attempts, retryAt, applyErr); markErr != nil {
+			c.log.Error("record inbound event retry", "journal_id", entry.JournalID, "error", markErr)
+		}
+		c.reportInboundFailure("persist inbound "+entry.Kind, applyErr)
+		return false
+	}
+	if err := c.store.CompleteInboundEvent(c.ctx, entry.JournalID); err != nil {
+		c.reportInboundFailure("complete inbound event journal", err)
+		return false
+	}
+	return true
+}
+
+func (c *Client) replayInboundMessages() {
+	c.inboundMemoryMu.Lock()
+	memory := c.inboundMemory
+	c.inboundMemory = nil
+	c.inboundMemoryMu.Unlock()
+	for i, pending := range memory {
+		journalID, err := c.store.JournalInboundMessage(c.ctx, pending.message, pending.incrementUnread)
+		if err != nil {
+			c.inboundMemoryMu.Lock()
+			c.inboundMemory = append(memory[i:], c.inboundMemory...)
+			c.inboundMemoryMu.Unlock()
+			c.reportInboundFailure("retry inbound journal", err)
+			return
+		}
+		if !c.applyJournaledInbound(store.InboundMessage{JournalID: journalID, Message: pending.message, IncrementUnread: pending.incrementUnread}, true) {
+			return
+		}
+	}
+	entries, err := c.store.ReplayableInboundMessages(c.ctx, time.Now(), 100)
+	if err != nil {
+		c.reportInboundFailure("load inbound retry journal", err)
+		return
+	}
+	for _, entry := range entries {
+		if !c.applyJournaledInbound(entry, true) {
+			return
+		}
+	}
+	eventEntries, err := c.store.ReplayableInboundEvents(c.ctx, time.Now(), 100)
+	if err != nil {
+		c.reportInboundFailure("load inbound event retry journal", err)
+		return
+	}
+	for _, entry := range eventEntries {
+		if !c.applyJournaledInboundEvent(entry) {
+			return
+		}
+	}
+	health, err := c.store.InboundJournalHealth(c.ctx)
+	if err == nil && health.Pending == 0 {
+		current := c.SyncStatus()
+		if current.Phase == "failed" && strings.HasPrefix(current.Detail, "Incoming messages could not be saved") {
+			c.updateSyncStatus(func(status *store.SyncStatus) {
+				status.Phase = "catching_up"
+				status.Detail = "Recovered local message storage; reconciling with WhatsApp"
+			})
+		}
+	}
+	if len(entries) == 100 || len(eventEntries) == 100 {
+		c.wakeInboundReplay()
 	}
 }
 
@@ -5584,21 +5968,22 @@ func (c *Client) reduceReceipt(evt *events.Receipt) {
 		for i := range evt.MessageIDs {
 			ids[i] = string(evt.MessageIDs[i])
 		}
-		if err = c.store.MarkReadIDs(c.ctx, chatID, ids); err != nil {
-			c.log.Error("persist cross-device read receipt", "chat_id", chatID, "error", err)
-			return
-		}
-		c.emitChat(chatID)
+		c.persistInboundEvent("receipt", chatID, strings.Join(ids, ","), journalReceipt{
+			ChatID: chatID, MessageIDs: ids, MarkRead: true,
+		})
 		return
 	}
 	status := domain.StatusDelivered
 	if evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf {
 		status = domain.StatusRead
 	}
-	for _, id := range evt.MessageIDs {
-		_ = c.store.UpdateReceipt(c.ctx, chatID, string(id), status)
-		c.sink(Event{Kind: "receipt", ChatJID: chatID, MessageID: string(id), Status: status})
+	ids := make([]string, len(evt.MessageIDs))
+	for i := range evt.MessageIDs {
+		ids[i] = string(evt.MessageIDs[i])
 	}
+	c.persistInboundEvent("receipt", chatID, strings.Join(ids, ","), journalReceipt{
+		ChatID: chatID, MessageIDs: ids, Status: status,
+	})
 }
 
 func (c *Client) reduceMarkChatAsRead(evt *events.MarkChatAsRead) {
@@ -5630,8 +6015,16 @@ func (c *Client) reduceMarkChatAsRead(evt *events.MarkChatAsRead) {
 	c.emitChat(chatID)
 }
 
-func (c *Client) reduceHistory(evt *events.HistorySync) {
+type historyReductionStats struct {
+	Received uint64
+	Decoded  uint64
+	Stored   uint64
+	Failed   uint64
+}
+
+func (c *Client) reduceHistory(evt *events.HistorySync) historyReductionStats {
 	var chats, messages uint64
+	var stats historyReductionStats
 	historyPersistFailed := false
 	pushNames := make(map[types.JID]string)
 	syncType := evt.Data.GetSyncType()
@@ -5650,6 +6043,10 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 		chatID, transportJID, identityErr := c.resolveConversation(rawChatID)
 		if identityErr != nil {
 			c.log.Error("resolve history conversation", "chat_id", rawChatID, "error", identityErr)
+			failed := uint64(len(conversation.GetMessages()))
+			stats.Received += failed
+			stats.Failed += failed
+			historyPersistFailed = true
 			continue
 		}
 		if err := c.store.UpsertChatMetadata(c.ctx, chatID, conversation.GetName(), conversation.Archived); err != nil {
@@ -5659,6 +6056,11 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 		chats++
 		jid, err := types.ParseJID(rawChatID)
 		if err != nil {
+			failed := uint64(len(conversation.GetMessages()))
+			stats.Received += failed
+			stats.Failed += failed
+			historyPersistFailed = true
+			c.log.Error("parse history conversation JID", "chat_id", rawChatID, "error", err)
 			continue
 		}
 		batch := make([]domain.Message, 0, len(conversation.GetMessages()))
@@ -5686,10 +6088,15 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 		var historyPins []historyPin
 		reactions := make([]domain.Reaction, 0)
 		for _, raw := range conversation.GetMessages() {
+			stats.Received++
 			parsed, err := c.wa.ParseWebMessage(jid, raw.GetMessage())
 			if err != nil {
+				stats.Failed++
+				historyPersistFailed = true
+				c.log.Error("decode history message", "chat_id", chatID, "error", err)
 				continue
 			}
+			stats.Decoded++
 			if parsed.Info.PushName != "" && parsed.Info.PushName != "-" && parsed.Info.PushName != "username" && !parsed.Info.Sender.IsEmpty() {
 				pushNames[parsed.Info.Sender.ToNonAD()] = parsed.Info.PushName
 			}
@@ -5775,9 +6182,11 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 		if applyErr != nil {
 			err = applyErr
 			c.log.Error("persist history batch", "chat_id", chatID, "count", len(batch), "error", err)
+			stats.Failed += uint64(len(batch))
 			historyPersistFailed = true
 			continue
 		}
+		stats.Stored += uint64(len(batch))
 		if isReactionRepair && pendingHistory != nil && chatID == pendingHistory.chatID {
 			historyRequestMatched = true
 			coverage, coverageErr := c.store.HistoryCoverage(c.ctx, chatID)
@@ -5894,6 +6303,14 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 		c.clearContactCache()
 	}
 	progress := evt.Data.GetProgress()
+	reconciledAt := time.Now()
+	if contributesToInitialSync && terminalInitialHistory && progress >= 100 &&
+		!historyPersistFailed && c.projectionComplete.Load() {
+		if err := c.store.RecordReconciliation(c.ctx, reconciledAt); err != nil {
+			c.log.Error("record completed history reconciliation", "error", err)
+			historyPersistFailed = true
+		}
+	}
 	if contributesToInitialSync {
 		c.updateSyncStatus(func(status *store.SyncStatus) {
 			if status.StartedAtMS == 0 {
@@ -5903,12 +6320,15 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 			status.Detail = "Receiving WhatsApp history"
 			status.ChatsProcessed += chats
 			status.MessagesProcessed += messages
+			status.MessagesReceived += stats.Received
+			status.MessagesDecoded += stats.Decoded
+			status.MessagesFailed += stats.Failed
 			if progress > status.WhatsAppProgress {
 				status.WhatsAppProgress = progress
 			}
 			if historyPersistFailed {
 				status.Phase = "failed"
-				status.Detail = "Some chat history could not be saved locally"
+				status.Detail = fmt.Sprintf("Some chat history could not be decoded or saved locally (%d of %d messages failed)", stats.Failed, stats.Received)
 				status.CompletedAtMS = 0
 				return
 			}
@@ -5917,7 +6337,7 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 				if c.projectionComplete.Load() {
 					status.Phase = "complete"
 					status.Detail = "Up to date"
-					status.CompletedAtMS = time.Now().UnixMilli()
+					status.CompletedAtMS = reconciledAt.UnixMilli()
 				} else {
 					status.Phase = "app_state"
 					status.Detail = "Finishing local setup"
@@ -5925,5 +6345,6 @@ func (c *Client) reduceHistory(evt *events.HistorySync) {
 			}
 		})
 	}
-	c.sink(Event{Kind: "sync", ChatsProcessed: chats, MessagesProcessed: messages, Complete: terminalInitialHistory && progress >= 100})
+	c.sink(Event{Kind: "sync", ChatsProcessed: chats, MessagesProcessed: messages, Complete: terminalInitialHistory && progress >= 100 && !historyPersistFailed})
+	return stats
 }

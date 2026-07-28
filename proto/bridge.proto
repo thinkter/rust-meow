@@ -56,6 +56,9 @@ message RpcRequest {
     RequestOlderHistoryRequest request_older_history = 35;
     GetChatHistoryCoverageRequest get_chat_history_coverage = 36;
     GetHistoryOverviewRequest get_history_overview = 37;
+    ReconnectRequest reconnect = 38;
+    GetIntegrityStatusRequest get_integrity_status = 39;
+    RepairLocalCacheRequest repair_local_cache = 40;
   }
 }
 
@@ -100,6 +103,9 @@ message RpcResponse {
     RequestOlderHistoryResponse request_older_history = 44;
     GetChatHistoryCoverageResponse get_chat_history_coverage = 45;
     GetHistoryOverviewResponse get_history_overview = 46;
+    ReconnectResponse reconnect = 47;
+    GetIntegrityStatusResponse get_integrity_status = 48;
+    RepairLocalCacheResponse repair_local_cache = 49;
   }
 }
 
@@ -160,6 +166,14 @@ message AuthStateResponse {
 message StartPairingRequest {}
 
 message StartPairingResponse {
+  bool started = 1;
+}
+
+message ReconnectRequest {}
+
+message ReconnectResponse {
+  // False means the session is unpaired, already connected, or an attempt is
+  // already running. Reconnect is intentionally user-driven and never queued.
   bool started = 1;
 }
 
@@ -716,6 +730,9 @@ message SyncStatus {
   int64 started_at_ms = 6;
   int64 completed_at_ms = 7;
   string detail = 8;
+  uint64 messages_received = 9;
+  uint64 messages_decoded = 10;
+  uint64 messages_failed = 11;
 }
 
 message SyncStatusChanged { SyncStatus status = 1; }
@@ -760,6 +777,21 @@ message HistoryOverview {
 }
 message GetHistoryOverviewResponse { HistoryOverview overview = 1; }
 message HistoryCoverageChanged { HistoryCoverage coverage = 1; }
+
+message IntegrityStatus {
+  bool database_ok = 1;
+  string detail = 2;
+  uint64 pending_inbound = 3;
+  uint64 failed_inbound = 4;
+  int64 oldest_pending_at_ms = 5;
+  int64 last_message_persisted_at_ms = 6;
+  int64 last_reconciliation_at_ms = 7;
+  uint64 inconsistent_chats = 8;
+}
+message GetIntegrityStatusRequest {}
+message GetIntegrityStatusResponse { IntegrityStatus status = 1; }
+message RepairLocalCacheRequest {}
+message RepairLocalCacheResponse { IntegrityStatus status = 1; }
 
 message SyncProgress {
   uint64 chats_processed = 1;

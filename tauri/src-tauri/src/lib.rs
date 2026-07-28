@@ -10,6 +10,8 @@ mod paths;
 #[path = "../../../desktop/src/sticker.rs"]
 mod sticker;
 
+#[cfg(target_os = "linux")]
+use std::process::{Child, Command};
 use std::{
     collections::HashMap,
     io::Cursor,
@@ -20,8 +22,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-#[cfg(target_os = "linux")]
-use std::process::{Child, Command};
 
 use proto::{rpc_request, rpc_response};
 use serde::Serialize;
@@ -167,7 +167,9 @@ impl From<proto::BackendEvent> for Option<FrontendEvent> {
             Event::PairingQr(value) => FrontendEventKind::PairingQr(value),
             Event::SyncProgress(value) => FrontendEventKind::SyncProgress(value),
             Event::SyncStatusChanged(value) => FrontendEventKind::SyncStatusChanged(value),
-            Event::HistoryCoverageChanged(value) => FrontendEventKind::HistoryCoverageChanged(value),
+            Event::HistoryCoverageChanged(value) => {
+                FrontendEventKind::HistoryCoverageChanged(value)
+            }
             Event::ChatUpserted(value) => FrontendEventKind::ChatUpserted(value),
             Event::MessageUpserted(value) => FrontendEventKind::MessageUpserted(value),
             Event::ReceiptUpdated(value) => FrontendEventKind::ReceiptUpdated(value),
@@ -1497,6 +1499,10 @@ rpc_commands! {
         rpc_request::Request::StartPairing(proto::StartPairingRequest {}),
         WRITE_TIMEOUT => StartPairing
     }
+    reconnect() -> proto::ReconnectResponse {
+        rpc_request::Request::Reconnect(proto::ReconnectRequest {}),
+        CONTROL_TIMEOUT => Reconnect
+    }
     get_sync_status() -> proto::SyncStatusResponse {
         rpc_request::Request::GetSyncStatus(proto::GetSyncStatusRequest {}),
         CONTROL_TIMEOUT => SyncStatus
@@ -1512,6 +1518,14 @@ rpc_commands! {
     get_history_overview() -> proto::GetHistoryOverviewResponse {
         rpc_request::Request::GetHistoryOverview(proto::GetHistoryOverviewRequest {}),
         READ_TIMEOUT => GetHistoryOverview
+    }
+    get_integrity_status() -> proto::GetIntegrityStatusResponse {
+        rpc_request::Request::GetIntegrityStatus(proto::GetIntegrityStatusRequest {}),
+        READ_TIMEOUT => GetIntegrityStatus
+    }
+    repair_local_cache() -> proto::RepairLocalCacheResponse {
+        rpc_request::Request::RepairLocalCache(proto::RepairLocalCacheRequest {}),
+        WRITE_TIMEOUT => RepairLocalCache
     }
     list_chats(cursor: String, limit: u32) -> proto::ListChatsResponse {
         rpc_request::Request::ListChats(proto::ListChatsRequest { cursor, limit }),
@@ -1894,10 +1908,13 @@ pub fn run() {
             hello,
             get_auth_state,
             start_pairing,
+            reconnect,
             get_sync_status,
             request_older_history,
             get_chat_history_coverage,
             get_history_overview,
+            get_integrity_status,
+            repair_local_cache,
             list_chats,
             list_messages,
             open_message_window,

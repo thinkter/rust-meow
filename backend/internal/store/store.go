@@ -32,6 +32,9 @@ type SyncStatus struct {
 	Revision          uint64 `json:"revision"`
 	ChatsProcessed    uint64 `json:"chatsProcessed"`
 	MessagesProcessed uint64 `json:"messagesProcessed"`
+	MessagesReceived  uint64 `json:"messagesReceived"`
+	MessagesDecoded   uint64 `json:"messagesDecoded"`
+	MessagesFailed    uint64 `json:"messagesFailed"`
 	WhatsAppProgress  uint32 `json:"whatsAppProgress"`
 	StartedAtMS       int64  `json:"startedAtMs"`
 	CompletedAtMS     int64  `json:"completedAtMs"`
@@ -173,7 +176,7 @@ func (s *Store) OldestMessage(ctx context.Context, chatID string) (domain.Messag
 const (
 	reactionReplaySchemaVersion = 9
 	searchSchemaVersion         = 10
-	supportedSchemaVersion      = 15
+	supportedSchemaVersion      = 18
 )
 
 type ChatMerge struct {
@@ -238,7 +241,7 @@ func (s *Store) ClearAccountData(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{`DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM history_coverage`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM sticker_favorites`} {
+	for _, statement := range []string{`DELETE FROM inbound_events`, `DELETE FROM inbound_messages`, `DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM history_coverage`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM storage_health`, `DELETE FROM sticker_favorites`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("clear account data: %w", err)
 		}
@@ -394,6 +397,35 @@ CREATE TABLE IF NOT EXISTS pinned_messages(
   PRIMARY KEY(chat_jid,message_id), FOREIGN KEY(chat_jid) REFERENCES chats(jid) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS sync_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS storage_health(
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  last_message_persisted_at INTEGER NOT NULL DEFAULT 0,
+  last_reconciliation_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS inbound_messages(
+  journal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_jid TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  payload BLOB NOT NULL,
+  increment_unread INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS inbound_messages_retry_idx ON inbound_messages(next_attempt_at,journal_id);
+CREATE TABLE IF NOT EXISTS inbound_events(
+  journal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_kind TEXT NOT NULL,
+  chat_jid TEXT NOT NULL,
+  entity_id TEXT NOT NULL DEFAULT '',
+  payload BLOB NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS inbound_events_retry_idx ON inbound_events(next_attempt_at,journal_id);
 CREATE TABLE IF NOT EXISTS history_coverage(
   chat_jid TEXT PRIMARY KEY,
   state TEXT NOT NULL DEFAULT 'unknown',
@@ -664,7 +696,7 @@ END;`
 	}
 	if currentVersion < supportedSchemaVersion {
 		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=?`, supportedSchemaVersion); err != nil {
-			return fmt.Errorf("record schema v14: %w", err)
+			return fmt.Errorf("record schema v18: %w", err)
 		}
 	}
 	return tx.Commit()
@@ -1728,6 +1760,279 @@ func (s *Store) ApplyMessagesCount(ctx context.Context, messages []domain.Messag
 	return inserted, nil
 }
 
+// InboundMessage is a durable live-message event awaiting application to the
+// product tables. Journal rows are intentionally independent from chats: an
+// identity merge or account reset may happen between receipt and replay, and
+// the ordinary message reducer remains the authority for resolving aliases.
+type InboundMessage struct {
+	JournalID       int64
+	Message         domain.Message
+	IncrementUnread bool
+	Attempts        uint32
+}
+
+// JournalInboundMessage commits the live event before reduction. If the
+// process exits after this call, ReplayableInboundMessages will recover it on
+// the next startup.
+func (s *Store) JournalInboundMessage(ctx context.Context, message domain.Message, incrementUnread bool) (int64, error) {
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return 0, fmt.Errorf("encode inbound message: %w", err)
+	}
+	result, err := s.db.ExecContext(ctx, `INSERT INTO inbound_messages(chat_jid,message_id,payload,increment_unread,created_at)
+VALUES(?,?,?,?,?)`, message.ChatJID, message.ID, payload, incrementUnread, time.Now().UnixMilli())
+	if err != nil {
+		return 0, fmt.Errorf("journal inbound message: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("read inbound journal ID: %w", err)
+	}
+	return id, nil
+}
+
+// ReplayableInboundMessages returns due entries in receipt order. A bounded
+// page prevents a damaged or long-offline profile from monopolizing startup.
+func (s *Store) ReplayableInboundMessages(ctx context.Context, now time.Time, limit int) ([]InboundMessage, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT journal_id,payload,increment_unread,attempts
+FROM inbound_messages WHERE next_attempt_at<=? ORDER BY journal_id LIMIT ?`, now.UnixMilli(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	entries := make([]InboundMessage, 0, limit)
+	for rows.Next() {
+		var entry InboundMessage
+		var payload []byte
+		if err = rows.Scan(&entry.JournalID, &payload, &entry.IncrementUnread, &entry.Attempts); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(payload, &entry.Message); err != nil {
+			return nil, fmt.Errorf("decode inbound journal entry %d: %w", entry.JournalID, err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func (s *Store) CompleteInboundMessage(ctx context.Context, journalID int64) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM inbound_messages WHERE journal_id=?`, journalID)
+	if err != nil {
+		return err
+	}
+	if changed, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if changed != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) FailInboundMessage(ctx context.Context, journalID int64, attempts uint32, retryAt time.Time, failure error) error {
+	detail := "unknown inbound reduction failure"
+	if failure != nil {
+		detail = failure.Error()
+	}
+	if len(detail) > 1_000 {
+		detail = detail[:1_000]
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE inbound_messages SET attempts=?,next_attempt_at=?,last_error=? WHERE journal_id=?`,
+		attempts, retryAt.UnixMilli(), detail, journalID)
+	return err
+}
+
+type InboundJournalHealth struct {
+	Pending       uint64
+	Failed        uint64
+	OldestAtMS    int64
+	LastError     string
+	NextAttemptMS int64
+}
+
+func (s *Store) InboundJournalHealth(ctx context.Context) (InboundJournalHealth, error) {
+	var health InboundJournalHealth
+	var oldest, next sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*),coalesce(sum(failed),0),min(created_at),min(next_attempt_at) FROM (
+SELECT attempts>0 AS failed,created_at,next_attempt_at FROM inbound_messages
+UNION ALL SELECT attempts>0,created_at,next_attempt_at FROM inbound_events
+)`).Scan(&health.Pending, &health.Failed, &oldest, &next); err != nil {
+		return health, err
+	}
+	if oldest.Valid {
+		health.OldestAtMS = oldest.Int64
+	}
+	if next.Valid {
+		health.NextAttemptMS = next.Int64
+	}
+	_ = s.db.QueryRowContext(ctx, `SELECT last_error FROM (
+SELECT last_error,created_at FROM inbound_messages WHERE last_error<>''
+UNION ALL SELECT last_error,created_at FROM inbound_events WHERE last_error<>''
+) ORDER BY created_at DESC LIMIT 1`).Scan(&health.LastError)
+	return health, nil
+}
+
+type InboundEvent struct {
+	JournalID int64
+	Kind      string
+	ChatJID   string
+	EntityID  string
+	Payload   json.RawMessage
+	Attempts  uint32
+}
+
+func (s *Store) JournalInboundEvent(ctx context.Context, kind, chatID, entityID string, payload any) (int64, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return 0, fmt.Errorf("encode inbound %s event: %w", kind, err)
+	}
+	result, err := s.db.ExecContext(ctx, `INSERT INTO inbound_events(event_kind,chat_jid,entity_id,payload,created_at)
+VALUES(?,?,?,?,?)`, kind, chatID, entityID, encoded, time.Now().UnixMilli())
+	if err != nil {
+		return 0, fmt.Errorf("journal inbound %s event: %w", kind, err)
+	}
+	return result.LastInsertId()
+}
+
+func (s *Store) ReplayableInboundEvents(ctx context.Context, now time.Time, limit int) ([]InboundEvent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT journal_id,event_kind,chat_jid,entity_id,payload,attempts
+FROM inbound_events WHERE next_attempt_at<=? ORDER BY journal_id LIMIT ?`, now.UnixMilli(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	entries := make([]InboundEvent, 0, limit)
+	for rows.Next() {
+		var entry InboundEvent
+		if err = rows.Scan(&entry.JournalID, &entry.Kind, &entry.ChatJID, &entry.EntityID, &entry.Payload, &entry.Attempts); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func (s *Store) CompleteInboundEvent(ctx context.Context, journalID int64) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM inbound_events WHERE journal_id=?`, journalID)
+	if err != nil {
+		return err
+	}
+	if changed, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if changed != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) FailInboundEvent(ctx context.Context, journalID int64, attempts uint32, retryAt time.Time, failure error) error {
+	detail := "unknown inbound event reduction failure"
+	if failure != nil {
+		detail = failure.Error()
+	}
+	if len(detail) > 1_000 {
+		detail = detail[:1_000]
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE inbound_events SET attempts=?,next_attempt_at=?,last_error=? WHERE journal_id=?`,
+		attempts, retryAt.UnixMilli(), detail, journalID)
+	return err
+}
+
+// IntegrityStatus reports both physical SQLite health and inconsistencies in
+// derived chat rows. The message table remains the source of truth: chat
+// summaries and unread counters can always be rebuilt from it.
+type IntegrityStatus struct {
+	DatabaseOK               bool
+	Detail                   string
+	PendingInbound           uint64
+	FailedInbound            uint64
+	OldestPendingAtMS        int64
+	LastMessagePersistedAtMS int64
+	LastReconciliationAtMS   int64
+	InconsistentChats        uint64
+}
+
+func (s *Store) IntegrityStatus(ctx context.Context) (IntegrityStatus, error) {
+	var status IntegrityStatus
+	var quickCheck string
+	if err := s.db.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&quickCheck); err != nil {
+		return status, fmt.Errorf("check database integrity: %w", err)
+	}
+	status.DatabaseOK = quickCheck == "ok"
+	status.Detail = quickCheck
+	journal, err := s.InboundJournalHealth(ctx)
+	if err != nil {
+		return status, fmt.Errorf("inspect inbound journal: %w", err)
+	}
+	status.PendingInbound = journal.Pending
+	status.FailedInbound = journal.Failed
+	status.OldestPendingAtMS = journal.OldestAtMS
+	err = s.db.QueryRowContext(ctx, `SELECT last_message_persisted_at,last_reconciliation_at
+FROM storage_health WHERE singleton=1`).Scan(&status.LastMessagePersistedAtMS, &status.LastReconciliationAtMS)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = nil
+	}
+	if err != nil {
+		return status, fmt.Errorf("inspect storage timestamps: %w", err)
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM chats c WHERE
+c.last_message_id<>COALESCE((SELECT id FROM messages WHERE chat_jid=c.jid AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),'')
+OR c.last_message_text<>COALESCE((SELECT text FROM messages WHERE chat_jid=c.jid AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),'')
+OR c.last_message_at<>COALESCE((SELECT timestamp FROM messages WHERE chat_jid=c.jid AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),0)
+OR c.unread_count<>(SELECT count(*) FROM messages WHERE chat_jid=c.jid AND kind<>'reaction' AND unread=1)`).
+		Scan(&status.InconsistentChats); err != nil {
+		return status, fmt.Errorf("check derived chat state: %w", err)
+	}
+	if status.DatabaseOK && status.InconsistentChats == 0 {
+		status.Detail = "Local database and derived chat state are consistent"
+	} else if status.DatabaseOK {
+		status.Detail = fmt.Sprintf("%d chat summaries need repair", status.InconsistentChats)
+	}
+	return status, nil
+}
+
+// RecordReconciliation records a completed catch-up boundary after all due
+// journal entries have been reduced. It does not claim the remote account has
+// no more history; it records when local durable state was last reconciled.
+func (s *Store) RecordReconciliation(ctx context.Context, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO storage_health(singleton,last_reconciliation_at) VALUES(1,?)
+ON CONFLICT(singleton) DO UPDATE SET last_reconciliation_at=max(storage_health.last_reconciliation_at,excluded.last_reconciliation_at)`, at.UnixMilli())
+	return err
+}
+
+// RepairDerivedState safely rebuilds cacheable state from authoritative
+// message rows. It deliberately does not discard journal entries or messages.
+func (s *Store) RepairDerivedState(ctx context.Context) (IntegrityStatus, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return IntegrityStatus{}, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE chats SET
+last_message_id=COALESCE((SELECT id FROM messages WHERE chat_jid=chats.jid AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+last_message_text=COALESCE((SELECT text FROM messages WHERE chat_jid=chats.jid AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),''),
+last_message_at=COALESCE((SELECT timestamp FROM messages WHERE chat_jid=chats.jid AND kind<>'reaction' ORDER BY timestamp DESC,id DESC LIMIT 1),0),
+unread_count=(SELECT count(*) FROM messages WHERE chat_jid=chats.jid AND kind<>'reaction' AND unread=1)`); err != nil {
+		return IntegrityStatus{}, fmt.Errorf("rebuild chat summaries: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO message_search(message_search) VALUES('rebuild')`); err != nil {
+		return IntegrityStatus{}, fmt.Errorf("rebuild message search: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO storage_health(singleton,last_reconciliation_at) VALUES(1,?)
+ON CONFLICT(singleton) DO UPDATE SET last_reconciliation_at=excluded.last_reconciliation_at`, time.Now().UnixMilli()); err != nil {
+		return IntegrityStatus{}, fmt.Errorf("record cache repair: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return IntegrityStatus{}, fmt.Errorf("commit cache repair: %w", err)
+	}
+	return s.IntegrityStatus(ctx)
+}
+
 func applyMessageTx(ctx context.Context, tx *sql.Tx, message domain.Message, incrementUnread bool) error {
 	if message.Kind == "reaction" {
 		_, err := resolveOrCreateChatTx(ctx, tx, message.ChatJID)
@@ -1818,28 +2123,64 @@ image_animated,media_file_name,media_duration,media_voice,contacts_json,location
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_jid,id) DO UPDATE SET
 transport_jid=CASE WHEN excluded.transport_jid LIKE '%@lid' OR messages.transport_jid='' THEN excluded.transport_jid ELSE messages.transport_jid END,
-sender_jid=excluded.sender_jid,
-timestamp=excluded.timestamp,from_me=excluded.from_me,
+sender_jid=CASE WHEN messages.sender_jid='' THEN excluded.sender_jid ELSE messages.sender_jid END,
+timestamp=CASE WHEN messages.timestamp=0 THEN excluded.timestamp ELSE messages.timestamp END,from_me=messages.from_me,
 status=CASE WHEN excluded.status=5 AND messages.status<=1 THEN 5 WHEN excluded.status=5 THEN messages.status WHEN messages.status=5 THEN excluded.status ELSE max(messages.status,excluded.status) END,
-kind=excluded.kind,reply_to_id=excluded.reply_to_id,reply_to_chat_id=excluded.reply_to_chat_id,
-text=CASE WHEN excluded.edited_at>=messages.edited_at THEN excluded.text ELSE messages.text END,
+kind=CASE
+  WHEN messages.revoked THEN messages.kind
+  WHEN excluded.revoked THEN excluded.kind
+  WHEN excluded.edited_at>messages.edited_at THEN excluded.kind
+  WHEN excluded.edited_at=messages.edited_at AND excluded.kind<>'' THEN excluded.kind
+  ELSE messages.kind END,
+reply_to_id=CASE WHEN excluded.edited_at>messages.edited_at OR messages.reply_to_id='' THEN excluded.reply_to_id ELSE messages.reply_to_id END,
+reply_to_chat_id=CASE WHEN excluded.edited_at>messages.edited_at OR messages.reply_to_chat_id='' THEN excluded.reply_to_chat_id ELSE messages.reply_to_chat_id END,
+text=CASE
+  WHEN messages.revoked AND NOT excluded.revoked THEN messages.text
+  WHEN excluded.edited_at>messages.edited_at THEN excluded.text
+  WHEN excluded.edited_at=messages.edited_at AND excluded.text<>'' THEN excluded.text
+  ELSE messages.text END,
 edited_at=max(messages.edited_at,excluded.edited_at),revoked=(messages.revoked OR excluded.revoked),forwarding_score=max(messages.forwarding_score,excluded.forwarding_score),
-image_mime=excluded.image_mime,image_caption=excluded.image_caption,
+image_mime=CASE WHEN excluded.image_mime<>'' THEN excluded.image_mime ELSE messages.image_mime END,
+image_caption=CASE WHEN excluded.edited_at>messages.edited_at THEN excluded.image_caption WHEN excluded.image_caption<>'' THEN excluded.image_caption ELSE messages.image_caption END,
 image_local_path=CASE WHEN excluded.image_local_path<>'' THEN excluded.image_local_path ELSE messages.image_local_path END,
-image_direct_path=excluded.image_direct_path,image_media_key=excluded.image_media_key,
-image_file_sha256=excluded.image_file_sha256,image_file_enc_sha256=excluded.image_file_enc_sha256,
-image_width=excluded.image_width,image_height=excluded.image_height,image_size=excluded.image_size,
-image_animated=excluded.image_animated,media_file_name=excluded.media_file_name,media_duration=excluded.media_duration,media_voice=excluded.media_voice,
-contacts_json=excluded.contacts_json,location_lat=excluded.location_lat,location_lng=excluded.location_lng,
-location_name=excluded.location_name,location_address=excluded.location_address,location_url=excluded.location_url,location_live=excluded.location_live,
-link_preview_url=excluded.link_preview_url,link_preview_title=excluded.link_preview_title,link_preview_description=excluded.link_preview_description,
-link_preview_thumbnail=excluded.link_preview_thumbnail,link_preview_width=excluded.link_preview_width,link_preview_height=excluded.link_preview_height`,
+image_direct_path=CASE WHEN excluded.image_direct_path<>'' THEN excluded.image_direct_path ELSE messages.image_direct_path END,
+image_media_key=CASE WHEN length(excluded.image_media_key)>0 THEN excluded.image_media_key ELSE messages.image_media_key END,
+image_file_sha256=CASE WHEN length(excluded.image_file_sha256)>0 THEN excluded.image_file_sha256 ELSE messages.image_file_sha256 END,
+image_file_enc_sha256=CASE WHEN length(excluded.image_file_enc_sha256)>0 THEN excluded.image_file_enc_sha256 ELSE messages.image_file_enc_sha256 END,
+image_width=CASE WHEN excluded.image_width>0 THEN excluded.image_width ELSE messages.image_width END,
+image_height=CASE WHEN excluded.image_height>0 THEN excluded.image_height ELSE messages.image_height END,
+image_size=CASE WHEN excluded.image_size>0 THEN excluded.image_size ELSE messages.image_size END,
+image_animated=(messages.image_animated OR excluded.image_animated),
+media_file_name=CASE WHEN excluded.media_file_name<>'' THEN excluded.media_file_name ELSE messages.media_file_name END,
+media_duration=CASE WHEN excluded.media_duration>0 THEN excluded.media_duration ELSE messages.media_duration END,
+media_voice=(messages.media_voice OR excluded.media_voice),
+contacts_json=CASE WHEN excluded.contacts_json<>'' THEN excluded.contacts_json ELSE messages.contacts_json END,
+location_lat=CASE WHEN excluded.location_lat<>0 OR excluded.location_lng<>0 THEN excluded.location_lat ELSE messages.location_lat END,
+location_lng=CASE WHEN excluded.location_lat<>0 OR excluded.location_lng<>0 THEN excluded.location_lng ELSE messages.location_lng END,
+location_name=CASE WHEN excluded.location_name<>'' THEN excluded.location_name ELSE messages.location_name END,
+location_address=CASE WHEN excluded.location_address<>'' THEN excluded.location_address ELSE messages.location_address END,
+location_url=CASE WHEN excluded.location_url<>'' THEN excluded.location_url ELSE messages.location_url END,
+location_live=(messages.location_live OR excluded.location_live),
+link_preview_url=CASE WHEN excluded.link_preview_url<>'' THEN excluded.link_preview_url ELSE messages.link_preview_url END,
+link_preview_title=CASE WHEN excluded.link_preview_title<>'' THEN excluded.link_preview_title ELSE messages.link_preview_title END,
+link_preview_description=CASE WHEN excluded.link_preview_description<>'' THEN excluded.link_preview_description ELSE messages.link_preview_description END,
+link_preview_thumbnail=CASE WHEN length(excluded.link_preview_thumbnail)>0 THEN excluded.link_preview_thumbnail ELSE messages.link_preview_thumbnail END,
+link_preview_width=CASE WHEN excluded.link_preview_width>0 THEN excluded.link_preview_width ELSE messages.link_preview_width END,
+link_preview_height=CASE WHEN excluded.link_preview_height>0 THEN excluded.link_preview_height ELSE messages.link_preview_height END`,
 		message.ID, message.ChatJID, message.TransportJID, message.SenderJID, message.Text, ts, message.FromMe, message.Status, message.Kind, message.ReplyToID, message.ReplyToChatID, editedAt, message.Revoked, message.ForwardingScore, unreadValue,
 		image.MIMEType, image.Caption, image.LocalPath, image.DirectPath, image.MediaKey, image.FileSHA256, image.FileEncSHA256, image.Width, image.Height, image.FileSize,
 		image.Animated, fileName, duration, voice, contactsJSON, location.Latitude, location.Longitude, location.Name, location.Address, location.URL, location.Live,
 		preview.URL, preview.Title, preview.Description, preview.JPEGThumbnail, preview.ThumbnailWidth, preview.ThumbnailHeight)
 	if err != nil {
 		return err
+	}
+	// A mutation event carries its own event time, not the original message
+	// time. Read the authoritative row after the upsert so edits/revocations
+	// cannot move the chat summary or pagination cursor.
+	if existed {
+		if err = tx.QueryRowContext(ctx, `SELECT timestamp,text FROM messages WHERE chat_jid=? AND id=?`, message.ChatJID, message.ID).Scan(&ts, &message.Text); err != nil {
+			return err
+		}
 	}
 	if message.Poll != nil {
 		encoded, marshalErr := json.Marshal(message.Poll.Options)
@@ -1860,6 +2201,10 @@ ON CONFLICT(chat_jid,message_id) DO UPDATE SET question=excluded.question,select
 last_message_text=CASE WHEN last_message_id=? OR last_message_at<? OR (last_message_at=? AND last_message_id<?) THEN ? ELSE last_message_text END,last_message_at=max(last_message_at,?),
 unread_count=unread_count+? WHERE jid=?`, ts, ts, message.ID, message.ID, message.ID, ts, ts, message.ID, message.Text, ts, unread, message.ChatJID)
 	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO storage_health(singleton,last_message_persisted_at) VALUES(1,?)
+ON CONFLICT(singleton) DO UPDATE SET last_message_persisted_at=max(storage_health.last_message_persisted_at,excluded.last_message_persisted_at)`, time.Now().UnixMilli()); err != nil {
 		return err
 	}
 	return nil

@@ -57,6 +57,9 @@ func TestNewRestrictsWhatsMeowDatabaseMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	if !client.wa.EnableAutoReconnect || client.wa.AutoReconnectHook == nil {
+		t.Fatal("WhatsMeow must use bounded automatic reconnect")
+	}
 	var journalMode string
 	if err = client.db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
 		t.Fatal(err)
@@ -1422,6 +1425,59 @@ func TestBootstrapProgressAloneDoesNotClaimInitialSyncComplete(t *testing.T) {
 	}
 }
 
+func TestHistoryDecodeFailureCannotClaimSyncComplete(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	var emitted []Event
+	client, err := New(ctx, directory, productStore, func(event Event) { emitted = append(emitted, event) }, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.projectionComplete.Store(true)
+	bad := &waWeb.WebMessageInfo{
+		Key:              &waCommon.MessageKey{RemoteJID: proto.String("123@g.us"), ID: proto.String("bad")},
+		MessageTimestamp: proto.Uint64(123),
+		Message:          &waE2E.Message{Conversation: proto.String("cannot identify sender")},
+	}
+	stats := client.reduceHistory(&events.HistorySync{Data: &waHistorySync.HistorySync{
+		SyncType: waHistorySync.HistorySync_FULL.Enum(),
+		Conversations: []*waHistorySync.Conversation{{
+			ID: proto.String("123@g.us"), Messages: []*waHistorySync.HistorySyncMsg{{Message: bad}},
+		}},
+		Progress: proto.Uint32(100),
+	}})
+	if stats.Received != 1 || stats.Decoded != 0 || stats.Stored != 0 || stats.Failed != 1 {
+		t.Fatalf("history stats=%+v", stats)
+	}
+	status := client.SyncStatus()
+	if status.Phase != "failed" || status.CompletedAtMS != 0 || !strings.Contains(status.Detail, "1 of 1") {
+		t.Fatalf("sync status=%+v", status)
+	}
+	for _, event := range emitted {
+		if event.Kind == "sync" && event.Complete {
+			t.Fatalf("failed history emitted complete sync: %+v", event)
+		}
+	}
+}
+
+func TestReconnectDuringCatchUpDoesNotRestartInitialSync(t *testing.T) {
+	status := store.SyncStatus{
+		Phase: "offline", WhatsAppProgress: 100, CompletedAtMS: 0,
+	}
+	if !shouldCatchUpAfterConnect(status, true) {
+		t.Fatal("a second reconnect during catch-up must resume catch-up")
+	}
+	if shouldCatchUpAfterConnect(status, false) {
+		t.Fatal("progress alone must not claim initial history completed")
+	}
+}
+
 func TestHistorySyncReducesPollOptionsSnapshotsAndPins(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()
@@ -2343,6 +2399,66 @@ func TestPreparedStartupConnectDoesNotUseFreshClientAfterLogout(t *testing.T) {
 	}
 	if connectCalls != 0 {
 		t.Fatalf("stale prepared connect ran %d times", connectCalls)
+	}
+}
+
+func TestManualReconnectRunsOneAttemptAtATimeAndReturnsOfflineOnFailure(t *testing.T) {
+	id, _ := types.ParseJID("15550000000:1@s.whatsapp.net")
+	source := &whatsmeow.Client{Store: &wastore.Device{ID: &id}}
+	started := make(chan struct{}, 2)
+	release := make(chan struct{}, 2)
+	events := make(chan Event, 4)
+	c := &Client{
+		ctx:  context.Background(),
+		wa:   source,
+		sink: func(event Event) { events <- event },
+		log:  slog.Default(),
+		connectFn: func(context.Context, *whatsmeow.Client) error {
+			started <- struct{}{}
+			<-release
+			return errors.New("network unavailable")
+		},
+	}
+	c.accepting.Store(true)
+
+	if !c.Reconnect() {
+		t.Fatal("first manual reconnect did not start")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual reconnect did not reach the dial")
+	}
+	if c.Reconnect() {
+		t.Fatal("second manual reconnect started while one was already running")
+	}
+	release <- struct{}{}
+
+	var details []string
+	deadline := time.After(2 * time.Second)
+	for len(details) < 3 {
+		select {
+		case event := <-events:
+			details = append(details, event.Detail)
+		case <-deadline:
+			t.Fatalf("connection events=%v, want connecting, offline, and failure problem", details)
+		}
+	}
+	if details[0] != "connecting" || details[1] != "offline" || !strings.Contains(details[2], "Reconnect failed") {
+		t.Fatalf("connection events=%v", details)
+	}
+}
+
+func TestManualReconnectRequiresPairedSession(t *testing.T) {
+	c := &Client{
+		ctx:  context.Background(),
+		wa:   &whatsmeow.Client{Store: &wastore.Device{}},
+		sink: func(Event) {},
+		log:  slog.Default(),
+	}
+	c.accepting.Store(true)
+	if c.Reconnect() {
+		t.Fatal("manual reconnect started for an unpaired session")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -15,6 +16,24 @@ import (
 	"github.com/rust-meow/rust-meow/backend/internal/wa"
 	"google.golang.org/protobuf/proto"
 )
+
+type failingBridgeEndpoint struct {
+	closed bool
+}
+
+func (endpoint *failingBridgeEndpoint) Read([]byte) (int, error) {
+	if endpoint.closed {
+		return 0, io.EOF
+	}
+	return 0, errors.New("blocked test endpoint")
+}
+func (endpoint *failingBridgeEndpoint) Write([]byte) (int, error) {
+	return 0, errors.New("injected bridge write failure")
+}
+func (endpoint *failingBridgeEndpoint) Close() error {
+	endpoint.closed = true
+	return nil
+}
 
 func decodeEnvelopes(t *testing.T, data []byte) []*bridgev1.Envelope {
 	t.Helper()
@@ -93,6 +112,26 @@ func TestMediaCapacityDoesNotBlockNonMediaRequest(t *testing.T) {
 	}
 	if got := envelopes[0].GetResponse().GetError().GetCode(); got != "invalid_argument" {
 		t.Fatalf("error code=%q, want invalid_argument", got)
+	}
+}
+
+func TestEventWriteFailureTerminatesBridgeEpoch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	endpoint := &failingBridgeEndpoint{}
+	s := New(ctx, cancel, bridge.NewCodec(endpoint, endpoint), nil)
+	s.handshaken.Store(true)
+	s.Emit(wa.Event{Kind: "connection", Detail: "connected"})
+	if !s.bridgeFailed.Load() {
+		t.Fatal("bridge write failure did not mark the epoch failed")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("bridge write failure did not cancel the backend")
+	}
+	if !endpoint.closed {
+		t.Fatal("bridge write failure did not close the transport")
 	}
 }
 
@@ -453,6 +492,9 @@ func TestWireSyncStatusPreservesPersistentState(t *testing.T) {
 		Revision:          9,
 		ChatsProcessed:    12,
 		MessagesProcessed: 345,
+		MessagesReceived:  400,
+		MessagesDecoded:   390,
+		MessagesFailed:    10,
 		WhatsAppProgress:  64,
 		StartedAtMS:       100,
 		Detail:            "waiting for full history",
@@ -460,6 +502,9 @@ func TestWireSyncStatusPreservesPersistentState(t *testing.T) {
 	if got.GetPhase() != bridgev1.SyncPhase_SYNC_PHASE_PARTIAL ||
 		got.GetRevision() != 9 ||
 		got.GetMessagesProcessed() != 345 ||
+		got.GetMessagesReceived() != 400 ||
+		got.GetMessagesDecoded() != 390 ||
+		got.GetMessagesFailed() != 10 ||
 		got.GetWhatsappProgress() != 64 {
 		t.Fatalf("wire sync status=%+v", got)
 	}

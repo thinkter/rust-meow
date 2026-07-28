@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -60,6 +61,86 @@ func TestSyncStatusPersistsAcrossStoreRestartAndClearsWithAccount(t *testing.T) 
 	}
 	if got.Phase != "not_started" || got.Revision != 0 {
 		t.Fatalf("cleared sync status=%+v", got)
+	}
+}
+
+func TestIntegrityStatusDetectsAndRepairsDerivedState(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chatID := "15551234567@s.whatsapp.net"
+	if err = s.ApplyMessage(ctx, domain.Message{
+		ID: "message-1", ChatJID: chatID, TransportJID: chatID,
+		Text: "authoritative", Timestamp: time.UnixMilli(100), Kind: "text",
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `UPDATE chats SET last_message_id='wrong',last_message_text='wrong',last_message_at=999,unread_count=42`); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.IntegrityStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.DatabaseOK || status.InconsistentChats != 1 || status.LastMessagePersistedAtMS == 0 {
+		t.Fatalf("corrupt derived status = %+v", status)
+	}
+	status, err = s.RepairDerivedState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.DatabaseOK || status.InconsistentChats != 0 || status.LastReconciliationAtMS == 0 {
+		t.Fatalf("repaired status = %+v", status)
+	}
+	chat, err := s.Chat(ctx, chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.LastMessageID != "message-1" || chat.LastMessageText != "authoritative" ||
+		chat.LastMessageAt.UnixMilli() != 100 || chat.UnreadCount != 1 {
+		t.Fatalf("repaired chat = %+v", chat)
+	}
+}
+
+func TestInboundMutationJournalSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "client.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := domain.Reaction{
+		ChatJID: "chat@s.whatsapp.net", MessageID: "message-1",
+		SenderJID: "sender@s.whatsapp.net", Emoji: "👍", Timestamp: time.UnixMilli(123),
+	}
+	journalID, err := s.JournalInboundEvent(ctx, "reaction", want.ChatJID, want.MessageID, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	entries, err := s.ReplayableInboundEvents(ctx, time.Now(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].JournalID != journalID || entries[0].Kind != "reaction" {
+		t.Fatalf("entries = %+v", entries)
+	}
+	var got domain.Reaction
+	if err = json.Unmarshal(entries[0].Payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Emoji != want.Emoji || got.MessageID != want.MessageID {
+		t.Fatalf("reaction = %+v, want %+v", got, want)
 	}
 }
 
@@ -302,6 +383,119 @@ func TestMessageSearchIndexesUpdatesAndStructuredMetadata(t *testing.T) {
 	}
 }
 
+func TestMessageMutationPreservesOriginalTimestampAndTimelinePosition(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	originalAt := time.UnixMilli(1_000)
+	original := domain.Message{
+		ID: "original", ChatJID: "chat@g.us", SenderJID: "sender@s.whatsapp.net",
+		Text: "before", Kind: "text", Timestamp: originalAt, Status: domain.StatusDelivered,
+	}
+	newer := domain.Message{
+		ID: "newer", ChatJID: original.ChatJID, SenderJID: original.SenderJID,
+		Text: "newer", Kind: "text", Timestamp: originalAt.Add(time.Second), Status: domain.StatusDelivered,
+	}
+	if err = s.ApplyMessages(ctx, []domain.Message{original, newer}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	edited := original
+	edited.Text = "after"
+	edited.Timestamp = originalAt.Add(10 * time.Minute)
+	edited.EditedAt = edited.Timestamp
+	if err = s.ApplyMessage(ctx, edited, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Message(ctx, original.ChatJID, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Timestamp.Equal(originalAt) || got.Text != "after" || !got.EditedAt.Equal(edited.EditedAt) {
+		t.Fatalf("edited message=%+v", got)
+	}
+	chat, err := s.Chat(ctx, original.ChatJID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.LastMessageID != newer.ID || !chat.LastMessageAt.Equal(newer.Timestamp) {
+		t.Fatalf("edit moved chat summary: %+v", chat)
+	}
+
+	revoked := edited
+	revoked.Timestamp = originalAt.Add(20 * time.Minute)
+	revoked.EditedAt = revoked.Timestamp
+	revoked.Text = "Message deleted"
+	revoked.Kind = "revoked"
+	revoked.Revoked = true
+	if err = s.ApplyMessage(ctx, revoked, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Message(ctx, original.ChatJID, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Timestamp.Equal(originalAt) || !got.Revoked || got.Kind != "revoked" {
+		t.Fatalf("revoked message=%+v", got)
+	}
+	chat, err = s.Chat(ctx, original.ChatJID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.LastMessageID != newer.ID || !chat.LastMessageAt.Equal(newer.Timestamp) {
+		t.Fatalf("revoke moved chat summary: %+v", chat)
+	}
+}
+
+func TestStaleHistoryCannotDowngradeMessageMutationOrMediaDescriptor(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	originalAt := time.UnixMilli(1_000)
+	current := domain.Message{
+		ID: "media", ChatJID: "chat@g.us", SenderJID: "sender@s.whatsapp.net",
+		Text: "new caption", Kind: "image", Timestamp: originalAt,
+		Status: domain.StatusRead, EditedAt: originalAt.Add(time.Minute),
+		Image: &domain.Image{
+			Caption: "caption", MIMEType: "image/jpeg", LocalPath: "/cache/media.jpg",
+			DirectPath: "/direct", MediaKey: []byte{1}, FileSHA256: []byte{2},
+			FileEncSHA256: []byte{3}, Width: 640, Height: 480, FileSize: 123,
+		},
+	}
+	if err = s.ApplyMessage(ctx, current, false); err != nil {
+		t.Fatal(err)
+	}
+	stale := domain.Message{
+		ID: current.ID, ChatJID: current.ChatJID, SenderJID: current.SenderJID,
+		Text: "old caption", Kind: "image", Timestamp: originalAt.Add(5 * time.Minute),
+		Status: domain.StatusDelivered,
+		Image:  &domain.Image{},
+	}
+	if err = s.ApplyMessage(ctx, stale, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Message(ctx, current.ChatJID, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Timestamp.Equal(originalAt) || got.Revoked || got.Kind != "image" ||
+		got.Text != "new caption" || got.Status != domain.StatusRead {
+		t.Fatalf("stale history downgraded message: %+v", got)
+	}
+	if got.Image == nil || got.Image.LocalPath != current.Image.LocalPath ||
+		got.Image.DirectPath != current.Image.DirectPath ||
+		string(got.Image.MediaKey) != string(current.Image.MediaKey) ||
+		got.Image.Width != current.Image.Width || got.Image.Height != current.Image.Height {
+		t.Fatalf("stale history erased media descriptor: %+v", got.Image)
+	}
+}
+
 func TestMessagesAroundReturnsCenteredOrderedWindow(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "around.db"))
@@ -521,6 +715,70 @@ func TestApplyMessagesBatchesLargeConversation(t *testing.T) {
 	}
 }
 
+func TestInboundMessageJournalSurvivesRestartAndTracksRetry(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "client.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := domain.Message{
+		ID: "incoming", ChatJID: "chat@g.us", SenderJID: "sender@s.whatsapp.net",
+		Text: "durable", Kind: "text", Timestamp: time.UnixMilli(1234),
+	}
+	journalID, err := s.JournalInboundMessage(ctx, message, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	entries, err := s.ReplayableInboundMessages(ctx, time.Now(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].JournalID != journalID ||
+		entries[0].Message.Text != message.Text || !entries[0].IncrementUnread {
+		t.Fatalf("journal entries=%+v", entries)
+	}
+	retryAt := time.Now().Add(time.Minute)
+	if err = s.FailInboundMessage(ctx, journalID, 1, retryAt, errors.New("injected failure")); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err = s.ReplayableInboundMessages(ctx, time.Now(), 100); err != nil || len(entries) != 0 {
+		t.Fatalf("early replay entries=%+v err=%v", entries, err)
+	}
+	health, err := s.InboundJournalHealth(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.Pending != 1 || health.Failed != 1 || !strings.Contains(health.LastError, "injected failure") {
+		t.Fatalf("journal health=%+v", health)
+	}
+	if entries, err = s.ReplayableInboundMessages(ctx, retryAt.Add(time.Millisecond), 100); err != nil || len(entries) != 1 || entries[0].Attempts != 1 {
+		t.Fatalf("due replay entries=%+v err=%v", entries, err)
+	}
+	if err = s.ApplyMessage(ctx, entries[0].Message, entries[0].IncrementUnread); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.CompleteInboundMessage(ctx, journalID); err != nil {
+		t.Fatal(err)
+	}
+	if health, err = s.InboundJournalHealth(ctx); err != nil || health.Pending != 0 {
+		t.Fatalf("completed journal health=%+v err=%v", health, err)
+	}
+	stored, err := s.Message(ctx, message.ChatJID, message.ID)
+	if err != nil || stored.Text != message.Text {
+		t.Fatalf("stored message=%+v err=%v", stored, err)
+	}
+}
+
 func TestClearAccountDataRemovesAllPriorAccountRows(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "client.db")
@@ -539,6 +797,14 @@ func TestClearAccountDataRemovesAllPriorAccountRows(t *testing.T) {
 	if err = s.ApplyMessage(ctx, incoming, true); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = s.JournalInboundMessage(ctx, incoming, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.JournalInboundEvent(ctx, "reaction", incoming.ChatJID, incoming.ID, domain.Reaction{
+		ChatJID: incoming.ChatJID, MessageID: incoming.ID, SenderJID: pending.SenderJID, Emoji: "👍",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err = s.ReserveOutgoingReaction(ctx, "reaction-id", domain.Reaction{ChatJID: incoming.ChatJID, MessageID: incoming.ID, SenderJID: pending.SenderJID, Emoji: "👍", FromMe: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +821,7 @@ func TestClearAccountDataRemovesAllPriorAccountRows(t *testing.T) {
 	if err = s.ClearAccountData(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"legacy_reaction_replays", "reaction_repair_jobs", "outgoing_reactions", "outgoing_requests", "reactions", "messages", "chats", "sync_state"} {
+	for _, table := range []string{"inbound_events", "inbound_messages", "legacy_reaction_replays", "reaction_repair_jobs", "outgoing_reactions", "outgoing_requests", "reactions", "messages", "chats", "sync_state", "storage_health"} {
 		var count int
 		if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&count); err != nil {
 			t.Fatal(err)

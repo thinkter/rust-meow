@@ -26,25 +26,26 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 18
+const ProtocolVersion uint32 = 20
 const maxTextBytes = 65_536
 const maxConcurrentMediaJobs = 4
 const maxMediaJobsInFlight = 32
 
 type Server struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	codec      *bridge.Codec
-	store      *store.Store
-	wa         *wa.Client
-	sequence   atomic.Uint64
-	shutdown   atomic.Bool
-	handshaken atomic.Bool
-	eventMu    sync.Mutex
-	mediaSlots chan struct{}
-	mediaJobs  chan struct{}
-	mediaWG    sync.WaitGroup
-	logoutFn   func(context.Context) error
+	ctx          context.Context
+	cancel       context.CancelFunc
+	codec        *bridge.Codec
+	store        *store.Store
+	wa           *wa.Client
+	sequence     atomic.Uint64
+	shutdown     atomic.Bool
+	handshaken   atomic.Bool
+	eventMu      sync.Mutex
+	mediaSlots   chan struct{}
+	mediaJobs    chan struct{}
+	mediaWG      sync.WaitGroup
+	logoutFn     func(context.Context) error
+	bridgeFailed atomic.Bool
 }
 type rpcFailure struct {
 	code, message string
@@ -156,12 +157,15 @@ func (s *Server) Run() error {
 				}
 				defer func() { <-s.mediaSlots }()
 				response, _ := s.handle(envelope)
-				_ = s.codec.Write(&bridgev1.Envelope{ProtocolVersion: ProtocolVersion, RequestId: envelope.GetRequestId(), Body: &bridgev1.Envelope_Response{Response: response}})
+				if writeErr := s.codec.Write(&bridgev1.Envelope{ProtocolVersion: ProtocolVersion, RequestId: envelope.GetRequestId(), Body: &bridgev1.Envelope_Response{Response: response}}); writeErr != nil {
+					s.failBridge()
+				}
 			}(envelope)
 			continue
 		}
 		response, terminate := s.handle(envelope)
 		if err = s.codec.Write(&bridgev1.Envelope{ProtocolVersion: ProtocolVersion, RequestId: envelope.GetRequestId(), Body: &bridgev1.Envelope_Response{Response: response}}); err != nil {
+			s.failBridge()
 			return err
 		}
 		// Events become eligible only after the correlated Hello response is fully written.
@@ -227,7 +231,19 @@ func (s *Server) Emit(event wa.Event) {
 		return
 	}
 	body.Sequence = s.sequence.Add(1)
-	_ = s.codec.Write(&bridgev1.Envelope{ProtocolVersion: ProtocolVersion, Body: &bridgev1.Envelope_Event{Event: body}})
+	if err := s.codec.Write(&bridgev1.Envelope{ProtocolVersion: ProtocolVersion, Body: &bridgev1.Envelope_Event{Event: body}}); err != nil {
+		s.failBridge()
+	}
+}
+
+func (s *Server) failBridge() {
+	if !s.bridgeFailed.CompareAndSwap(false, true) {
+		return
+	}
+	s.cancel()
+	if s.codec != nil {
+		_ = s.codec.Close()
+	}
 }
 
 func (s *Server) handle(envelope *bridgev1.Envelope) (*bridgev1.RpcResponse, bool) {
@@ -273,6 +289,8 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		return &bridgev1.RpcResponse_Hello{Hello: &bridgev1.HelloResponse{BackendVersion: "0.1.0", ProtocolVersion: ProtocolVersion}}, nil
 	case *bridgev1.RpcRequest_GetAuthState:
 		return &bridgev1.RpcResponse_AuthState{AuthState: &bridgev1.AuthStateResponse{Paired: s.wa.IsPaired(), LoggedIn: s.wa.IsConnected(), OwnUserId: s.wa.OwnID(), ConnectionState: authConnectionState(s.wa)}}, nil
+	case *bridgev1.RpcRequest_Reconnect:
+		return &bridgev1.RpcResponse_Reconnect{Reconnect: &bridgev1.ReconnectResponse{Started: s.wa.Reconnect()}}, nil
 	case *bridgev1.RpcRequest_StartPairing:
 		if s.wa.IsPaired() {
 			return &bridgev1.RpcResponse_StartPairing{StartPairing: &bridgev1.StartPairingResponse{Started: false}}, nil
@@ -302,6 +320,18 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			LocalMessageCount: overview.LocalMessageCount, ChatsWithMessages: overview.ChatsWithMessages,
 			ChatsChecked: overview.ChatsChecked, ChatsUnknown: overview.ChatsUnknown, ChatsWithoutAnchor: overview.ChatsWithoutAnchor,
 		}}}, nil
+	case *bridgev1.RpcRequest_GetIntegrityStatus:
+		status, err := s.wa.IntegrityStatus(s.ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_GetIntegrityStatus{GetIntegrityStatus: &bridgev1.GetIntegrityStatusResponse{Status: wireIntegrityStatus(status)}}, nil
+	case *bridgev1.RpcRequest_RepairLocalCache:
+		status, err := s.wa.RepairLocalCache(s.ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &bridgev1.RpcResponse_RepairLocalCache{RepairLocalCache: &bridgev1.RepairLocalCacheResponse{Status: wireIntegrityStatus(status)}}, nil
 	case *bridgev1.RpcRequest_RequestOlderHistory:
 		if req.RequestOlderHistory.GetChatId() == "" {
 			return nil, fail("invalid_argument", "chat_id is required", false)
@@ -934,6 +964,12 @@ func success(result any) *bridgev1.RpcResponse {
 		response.Result = value
 	case *bridgev1.RpcResponse_GetHistoryOverview:
 		response.Result = value
+	case *bridgev1.RpcResponse_Reconnect:
+		response.Result = value
+	case *bridgev1.RpcResponse_GetIntegrityStatus:
+		response.Result = value
+	case *bridgev1.RpcResponse_RepairLocalCache:
+		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageImage:
 		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageAttachment:
@@ -1317,7 +1353,26 @@ func wireSyncStatus(status store.SyncStatus) *bridgev1.SyncStatus {
 	case "offline":
 		phase = bridgev1.SyncPhase_SYNC_PHASE_OFFLINE
 	}
-	return &bridgev1.SyncStatus{Phase: phase, Revision: status.Revision, ChatsProcessed: status.ChatsProcessed, MessagesProcessed: status.MessagesProcessed, WhatsappProgress: status.WhatsAppProgress, StartedAtMs: status.StartedAtMS, CompletedAtMs: status.CompletedAtMS, Detail: status.Detail}
+	return &bridgev1.SyncStatus{
+		Phase: phase, Revision: status.Revision, ChatsProcessed: status.ChatsProcessed,
+		MessagesProcessed: status.MessagesProcessed, MessagesReceived: status.MessagesReceived,
+		MessagesDecoded: status.MessagesDecoded, MessagesFailed: status.MessagesFailed,
+		WhatsappProgress: status.WhatsAppProgress, StartedAtMs: status.StartedAtMS,
+		CompletedAtMs: status.CompletedAtMS, Detail: status.Detail,
+	}
+}
+
+func wireIntegrityStatus(status store.IntegrityStatus) *bridgev1.IntegrityStatus {
+	return &bridgev1.IntegrityStatus{
+		DatabaseOk:               status.DatabaseOK,
+		Detail:                   status.Detail,
+		PendingInbound:           status.PendingInbound,
+		FailedInbound:            status.FailedInbound,
+		OldestPendingAtMs:        status.OldestPendingAtMS,
+		LastMessagePersistedAtMs: status.LastMessagePersistedAtMS,
+		LastReconciliationAtMs:   status.LastReconciliationAtMS,
+		InconsistentChats:        status.InconsistentChats,
+	}
 }
 
 func wireHistoryCoverage(coverage store.HistoryCoverage) *bridgev1.HistoryCoverage {

@@ -14,9 +14,10 @@ import (
 const MaxFrameSize = 8 << 20
 
 type Codec struct {
-	reader  io.Reader
-	writer  io.Writer
-	writeMu sync.Mutex
+	reader    io.Reader
+	writer    io.Writer
+	writeMu   sync.Mutex
+	closeOnce sync.Once
 }
 
 func NewCodec(reader io.Reader, writer io.Writer) *Codec {
@@ -63,4 +64,20 @@ func (c *Codec) Write(envelope *bridgev1.Envelope) error {
 	}
 	_, err = c.writer.Write(data)
 	return err
+}
+
+// Close interrupts blocked bridge I/O after a terminal framing/write failure.
+// The production codec owns only the sidecar's stdin/stdout handles; buffers
+// used by tests do not implement io.Closer and are left untouched.
+func (c *Codec) Close() error {
+	var result error
+	c.closeOnce.Do(func() {
+		if closer, ok := c.reader.(io.Closer); ok {
+			result = errors.Join(result, closer.Close())
+		}
+		if closer, ok := c.writer.(io.Closer); ok {
+			result = errors.Join(result, closer.Close())
+		}
+	})
+	return result
 }
