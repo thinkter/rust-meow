@@ -83,6 +83,11 @@ export interface MultiFilePickerOptions extends BaseFilePickerOptions {
 
 export type FilePickerOptions = SingleFilePickerOptions | MultiFilePickerOptions;
 
+export type FileDropEvent =
+  | { type: "enter"; paths: string[] }
+  | { type: "drop"; paths: string[] }
+  | { type: "leave" };
+
 export interface DesktopApplication {
   id: string;
   name: string;
@@ -219,6 +224,60 @@ export async function openFile(options: FilePickerOptions): Promise<string | str
   const result = await open(options);
   if (options.multiple) return Array.isArray(result) ? result : typeof result === "string" ? [result] : null;
   return typeof result === "string" ? result : null;
+}
+
+/**
+ * Listen through Tauri's native file-drop API on desktop. The browser-dev
+ * fallback uses standard DataTransfer files so the same flow remains testable.
+ */
+export async function listenForFileDrops(
+  handler: (event: FileDropEvent) => void,
+): Promise<() => void> {
+  if (!browserMockEnabled) {
+    const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+    return getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (payload.type === "enter") handler({ type: "enter", paths: payload.paths });
+      else if (payload.type === "drop") handler({ type: "drop", paths: payload.paths });
+      else if (payload.type === "leave") handler({ type: "leave" });
+    });
+  }
+
+  let dragDepth = 0;
+  const containsFiles = (event: DragEvent) =>
+    [...(event.dataTransfer?.types ?? [])].includes("Files");
+  const onDragEnter = (event: DragEvent) => {
+    if (!containsFiles(event)) return;
+    event.preventDefault();
+    dragDepth++;
+    handler({ type: "enter", paths: [] });
+  };
+  const onDragOver = (event: DragEvent) => {
+    if (!containsFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  };
+  const onDragLeave = (event: DragEvent) => {
+    if (!containsFiles(event)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) handler({ type: "leave" });
+  };
+  const onDrop = (event: DragEvent) => {
+    if (!containsFiles(event)) return;
+    event.preventDefault();
+    dragDepth = 0;
+    const paths = [...(event.dataTransfer?.files ?? [])].map(stageBrowserFile);
+    handler(paths.length > 0 ? { type: "drop", paths } : { type: "leave" });
+  };
+  window.addEventListener("dragenter", onDragEnter);
+  window.addEventListener("dragover", onDragOver);
+  window.addEventListener("dragleave", onDragLeave);
+  window.addEventListener("drop", onDrop);
+  return () => {
+    window.removeEventListener("dragenter", onDragEnter);
+    window.removeEventListener("dragover", onDragOver);
+    window.removeEventListener("dragleave", onDragLeave);
+    window.removeEventListener("drop", onDrop);
+  };
 }
 
 /** A safe display label for a selected local path without exposing its parent directories. */
