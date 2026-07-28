@@ -338,6 +338,9 @@ export function FileSendDialog(props: { model: AppModel }) {
               <For each={value().paths}>
                 {(path) => (
                   <div class="file-send-row" role="listitem">
+                    <Show when={value().mode === "image"}>
+                      <img class="file-send-preview" src={assetUrl(path)} alt="" />
+                    </Show>
                     <ThemeIcon icon={Files} name="storage" size={17} />
                     <span title={localFileName(path)}>{localFileName(path)}</span>
                   </div>

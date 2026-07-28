@@ -1,6 +1,6 @@
 import { batch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
-import { bridge, normalizeBridgeError, openFile, openUrl, revealMediaPath } from "../lib/bridge";
+import { bridge, discardStagedImage, normalizeBridgeError, openFile, openUrl, revealMediaPath } from "../lib/bridge";
 import { messageText } from "../lib/format";
 import { BoundedSet, boundWindowAround } from "../lib/performance";
 import {
@@ -122,6 +122,7 @@ export interface FileSendConfirmationState {
   mode: FileSendMode;
   attachmentKind: AttachmentKind;
   voiceNote: boolean;
+  temporaryPaths?: string[];
 }
 
 export interface TypingPresence {
@@ -1544,20 +1545,25 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     attachmentKind: AttachmentKind = AttachmentKind.Document,
     voiceNote = false,
     chatId = state.selectedChatId,
-  ) {
+    temporaryPaths: string[] = [],
+  ): boolean {
     const selectedPaths = paths.filter(Boolean);
-    if (!chatId || selectedPaths.length === 0 || state.sending) return;
+    if (!chatId || selectedPaths.length === 0 || state.sending || state.fileSendConfirmation) return false;
     setState("fileSendConfirmation", {
       chatId,
       paths: selectedPaths,
       mode,
       attachmentKind,
       voiceNote,
+      temporaryPaths: temporaryPaths.filter((path) => selectedPaths.includes(path)),
     });
+    return true;
   }
 
   function cancelFileSend() {
+    const temporaryPaths = [...(state.fileSendConfirmation?.temporaryPaths ?? [])];
     setState("fileSendConfirmation", null);
+    discardTemporaryFiles(temporaryPaths);
   }
 
   async function confirmFileSend() {
@@ -1595,7 +1601,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   }
 
   async function sendFileBatch(request: FileSendConfirmationState) {
-    const { chatId, paths, mode, attachmentKind, voiceNote } = request;
+    const { chatId, paths, mode, attachmentKind, voiceNote, temporaryPaths = [] } = request;
     const draft = state.drafts[chatId] ?? emptyDraft();
     if (!chatId || paths.length === 0 || state.sending) return;
     const previous = cloneDraft(draft);
@@ -1668,6 +1674,15 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       }
     } finally {
       setState("sending", false);
+      discardTemporaryFiles(temporaryPaths);
+    }
+  }
+
+  function discardTemporaryFiles(paths: string[]) {
+    for (const path of paths) {
+      void discardStagedImage(path).catch((error) => {
+        console.warn("Could not remove temporary attachment", error);
+      });
     }
   }
 

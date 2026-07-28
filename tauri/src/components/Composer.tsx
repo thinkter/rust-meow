@@ -467,7 +467,15 @@ export function Composer(props: { model: AppModel; chatId: string }) {
     let stagedPath = "";
     try {
       stagedPath = await stageClipboardImage();
-      await actions.sendImage(stagedPath, props.chatId);
+      const accepted = actions.requestFileSend(
+        [stagedPath],
+        "image",
+        AttachmentKind.Document,
+        false,
+        props.chatId,
+        [stagedPath],
+      );
+      if (accepted) stagedPath = "";
       return;
     } catch (error) {
       const clipboardError = normalizeBridgeError(error);

@@ -3143,6 +3143,46 @@ html[data-appearance="light"] .message-sender {
   white-space: nowrap;
 }
 
+.file-send-preview {
+  width: 56px;
+  height: 56px;
+  flex: none;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--bg-overlay);
+}
+
+.file-drop-overlay {
+  position: fixed;
+  z-index: 1200;
+  inset: 12px;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  border: 2px dashed var(--accent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-overlay) 82%, transparent);
+  backdrop-filter: blur(4px);
+}
+
+.file-drop-card {
+  display: grid;
+  max-width: 360px;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--fg);
+}
+
+.file-drop-card svg {
+  color: var(--accent);
+}
+
+.file-drop-card span {
+  color: var(--fg-muted);
+}
+
 .file-send-note {
   margin-top: 12px !important;
   font-size: 12px;
