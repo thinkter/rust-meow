@@ -59,13 +59,40 @@ func TestLiveAppServerHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	threadID, err := server.StartThread(ctx, t.TempDir(), "")
+	workspace := t.TempDir()
+	var profiles struct {
+		Data []struct {
+			ID          string `json:"id"`
+			Allowed     bool   `json:"allowed"`
+			Description string `json:"description"`
+		} `json:"data"`
+	}
+	if err = server.Call(ctx, "permissionProfile/list", map[string]any{"cwd": workspace}, &profiles); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("permission profiles: %+v", profiles.Data)
+	hasWorkspaceProfile := false
+	for _, profile := range profiles.Data {
+		hasWorkspaceProfile = hasWorkspaceProfile || profile.ID == ":workspace" && profile.Allowed
+	}
+	if !hasWorkspaceProfile {
+		t.Fatal("Codex does not allow the :workspace permission profile")
+	}
+	threadID, err := server.StartThread(ctx, workspace, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if threadID == "" {
 		t.Fatal("empty thread id")
 	}
+	turnID, err := server.StartTurn(ctx, threadID, workspace, "Reply with exactly: ready", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turnID == "" {
+		t.Fatal("empty turn id")
+	}
+	_ = server.Interrupt(ctx, threadID, turnID)
 	_ = server.Call(ctx, "thread/delete", map[string]string{"threadId": threadID}, nil)
 	server.Close()
 }
