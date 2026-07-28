@@ -949,6 +949,18 @@ func (c *Client) identityJIDs(ctx context.Context, rawJIDs ...string) []types.JI
 	return candidates
 }
 
+// IdentityAliases returns every currently known PN/LID address for the same
+// WhatsApp principal. Agent Control uses the complete set for RBAC so a
+// transport-address migration cannot create a new security identity.
+func (c *Client) IdentityAliases(ctx context.Context, rawJIDs ...string) []string {
+	jids := c.identityJIDs(ctx, rawJIDs...)
+	aliases := make([]string, 0, len(jids))
+	for _, jid := range jids {
+		aliases = append(aliases, jid.ToNonAD().String())
+	}
+	return aliases
+}
+
 func explicitIdentityJIDs(rawJIDs ...string) []types.JID {
 	candidates := make([]types.JID, 0, len(rawJIDs))
 	seen := make(map[string]bool, len(rawJIDs))

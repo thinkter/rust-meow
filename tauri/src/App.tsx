@@ -5,6 +5,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Bot,
 } from "lucide-solid";
 import { createAppModel } from "./state/app";
 import { Sidebar } from "./components/Sidebar";
@@ -27,6 +28,7 @@ import {
 } from "./components/Screens";
 import { IconButton } from "./components/Primitives";
 import { ThemeIcon } from "./components/ThemeIcon";
+import { AgentControlPanel } from "./components/AgentControlPanel";
 import { listenForFileDrops } from "./lib/bridge";
 import { classifyDroppedFiles } from "./lib/file-drop";
 
@@ -43,6 +45,7 @@ export default function App() {
   let searchInput: HTMLInputElement | undefined;
   const [spotlightOpen, setSpotlightOpen] = createSignal(false);
   const [fileDropActive, setFileDropActive] = createSignal(false);
+  const [agentControlOpen, setAgentControlOpen] = createSignal(false);
   let unlistenFileDrops: (() => void) | undefined;
   let disposed = false;
 
@@ -108,8 +111,8 @@ export default function App() {
       <Show when={state.screen === "chats"}>
         <main
           class={`app-shell ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""}`}
-          inert={Boolean(spotlightOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
-          aria-hidden={spotlightOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
+          inert={Boolean(spotlightOpen() || agentControlOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
+          aria-hidden={spotlightOpen() || agentControlOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
         >
           <TitleBar model={model} />
           <nav class="nav-rail" aria-label="Primary navigation">
@@ -122,6 +125,9 @@ export default function App() {
               onClick={() => prefActions.update("sidebarCollapsed", !preferences.sidebarCollapsed)}
             >
               <ThemeIcon icon={MessageCircle} name="chat" size={21} />
+            </IconButton>
+            <IconButton label="Agent Control" active={agentControlOpen()} onClick={() => setAgentControlOpen(true)}>
+              <ThemeIcon icon={Bot} name="chat" size={20} />
             </IconButton>
             <IconButton label="Quick search (Ctrl+K)" onClick={toggleSpotlight}>
               <ThemeIcon icon={Search} name="search" size={20} />
@@ -162,6 +168,7 @@ export default function App() {
           </div>
         </main>
       </Show>
+      <Show when={agentControlOpen()}><AgentControlPanel model={model} onClose={() => setAgentControlOpen(false)} /></Show>
       <ChatSwitcher model={model} />
       <SpotlightSearch model={model} open={spotlightOpen()} onClose={() => setSpotlightOpen(false)} />
       <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
@@ -200,6 +207,13 @@ export default function App() {
     if (spotlightOpen()) {
       if (event.key === "Escape") {
         setSpotlightOpen(false);
+        event.preventDefault();
+      }
+      return;
+    }
+    if (agentControlOpen()) {
+      if (event.key === "Escape") {
+        setAgentControlOpen(false);
         event.preventDefault();
       }
       return;

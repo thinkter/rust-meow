@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rivo/uniseg"
 	bridgev1 "github.com/rust-meow/rust-meow/backend/gen/bridgev1"
+	"github.com/rust-meow/rust-meow/backend/internal/agentcontrol"
 	"github.com/rust-meow/rust-meow/backend/internal/bridge"
 	"github.com/rust-meow/rust-meow/backend/internal/domain"
 	searchutil "github.com/rust-meow/rust-meow/backend/internal/search"
@@ -26,7 +27,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 20
+const ProtocolVersion uint32 = 21
 const maxTextBytes = 65_536
 const maxConcurrentMediaJobs = 4
 const maxMediaJobsInFlight = 32
@@ -46,6 +47,7 @@ type Server struct {
 	mediaWG      sync.WaitGroup
 	logoutFn     func(context.Context) error
 	bridgeFailed atomic.Bool
+	agent        *agentcontrol.Controller
 }
 type rpcFailure struct {
 	code, message string
@@ -89,6 +91,12 @@ func New(ctx context.Context, cancel context.CancelFunc, codec *bridge.Codec, st
 func (s *Server) SetWhatsApp(client *wa.Client) {
 	s.wa = client
 	s.logoutFn = client.Logout
+	s.agent = agentcontrol.New(s.ctx, s.store,
+		func(ctx context.Context, chatID, text, replyToID string) (domain.Message, error) {
+			return client.SendText(ctx, "agent-"+uuid.NewString(), chatID, text, replyToID, chatID, nil)
+		},
+		client.IdentityAliases, client.OwnID, s.emitAgentControlChanged,
+	)
 }
 
 func usesMediaSlot(request *bridgev1.RpcRequest) bool {
@@ -127,6 +135,11 @@ func (s *Server) waitForMediaJobs(ctx context.Context) error {
 }
 
 func (s *Server) Run() error {
+	defer func() {
+		if s.agent != nil {
+			s.agent.Close()
+		}
+	}()
 	for {
 		envelope, err := s.codec.Read()
 		if err != nil {
@@ -234,6 +247,10 @@ func (s *Server) Emit(event wa.Event) {
 	if err := s.codec.Write(&bridgev1.Envelope{ProtocolVersion: ProtocolVersion, Body: &bridgev1.Envelope_Event{Event: body}}); err != nil {
 		s.failBridge()
 	}
+	if event.Kind == "message" && s.agent != nil {
+		message := event.Message
+		go s.agent.HandleMessage(message)
+	}
 }
 
 func (s *Server) failBridge() {
@@ -332,6 +349,85 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 			return nil, err
 		}
 		return &bridgev1.RpcResponse_RepairLocalCache{RepairLocalCache: &bridgev1.RepairLocalCacheResponse{Status: wireIntegrityStatus(status)}}, nil
+	case *bridgev1.RpcRequest_GetAgentControlState:
+		state, err := s.agentControlState()
+		return &bridgev1.RpcResponse_AgentControlState{AgentControlState: &bridgev1.GetAgentControlStateResponse{State: state}}, err
+	case *bridgev1.RpcRequest_SaveAgentSettings:
+		_, err := s.store.SaveAgentSettings(s.ctx, store.AgentSettings{
+			Enabled: req.SaveAgentSettings.GetEnabled(), Alias: req.SaveAgentSettings.GetAlias(), CodexPath: req.SaveAgentSettings.GetCodexPath(),
+		})
+		if err != nil {
+			return nil, fail("invalid_argument", err.Error(), false)
+		}
+		state, err := s.agentControlState()
+		return &bridgev1.RpcResponse_SaveAgentSettings{SaveAgentSettings: &bridgev1.SaveAgentSettingsResponse{State: state}}, err
+	case *bridgev1.RpcRequest_SaveAgentWorkspace:
+		item := req.SaveAgentWorkspace.GetWorkspace()
+		if item == nil {
+			return nil, fail("invalid_argument", "workspace is required", false)
+		}
+		if _, err := s.store.SaveAgentWorkspace(s.ctx, store.AgentWorkspace{ID: item.GetId(), Alias: item.GetAlias(), Path: item.GetPath(), IsDefault: item.GetIsDefault()}); err != nil {
+			return nil, fail("invalid_argument", err.Error(), false)
+		}
+		state, err := s.agentControlState()
+		return &bridgev1.RpcResponse_SaveAgentWorkspace{SaveAgentWorkspace: &bridgev1.SaveAgentWorkspaceResponse{State: state}}, err
+	case *bridgev1.RpcRequest_DeleteAgentWorkspace:
+		if err := s.store.DeleteAgentWorkspace(s.ctx, req.DeleteAgentWorkspace.GetWorkspaceId()); err != nil {
+			return nil, fail("invalid_argument", err.Error(), false)
+		}
+		state, err := s.agentControlState()
+		return &bridgev1.RpcResponse_DeleteAgentWorkspace{DeleteAgentWorkspace: &bridgev1.DeleteAgentWorkspaceResponse{State: state}}, err
+	case *bridgev1.RpcRequest_SetAgentControlChat:
+		chatID := req.SetAgentControlChat.GetChatId()
+		if _, err := s.store.Chat(s.ctx, chatID); err != nil {
+			return nil, fail("invalid_argument", "control chat was not found", false)
+		}
+		if err := s.store.SetAgentControlChat(s.ctx, chatID, req.SetAgentControlChat.GetEnabled()); err != nil {
+			return nil, err
+		}
+		state, err := s.agentControlState()
+		return &bridgev1.RpcResponse_SetAgentControlChat{SetAgentControlChat: &bridgev1.SetAgentControlChatResponse{State: state}}, err
+	case *bridgev1.RpcRequest_SaveAgentGrant:
+		item := req.SaveAgentGrant.GetGrant()
+		if item == nil {
+			return nil, fail("invalid_argument", "grant is required", false)
+		}
+		addresses := make([]string, 0, len(item.GetAddresses())*2)
+		for _, address := range item.GetAddresses() {
+			addresses = append(addresses, s.wa.IdentityAliases(s.ctx, address)...)
+		}
+		if _, err := s.store.SaveAgentGrant(s.ctx, store.AgentGrant{
+			ID: item.GetId(), DisplayName: item.GetDisplayName(), Role: item.GetRole(),
+			Addresses: addresses, WorkspaceIDs: item.GetWorkspaceIds(),
+		}); err != nil {
+			return nil, fail("invalid_argument", err.Error(), false)
+		}
+		state, err := s.agentControlState()
+		return &bridgev1.RpcResponse_SaveAgentGrant{SaveAgentGrant: &bridgev1.SaveAgentGrantResponse{State: state}}, err
+	case *bridgev1.RpcRequest_DeleteAgentGrant:
+		if err := s.store.DeleteAgentGrant(s.ctx, req.DeleteAgentGrant.GetGrantId()); err != nil {
+			return nil, err
+		}
+		state, err := s.agentControlState()
+		return &bridgev1.RpcResponse_DeleteAgentGrant{DeleteAgentGrant: &bridgev1.DeleteAgentGrantResponse{State: state}}, err
+	case *bridgev1.RpcRequest_InterruptAgentRun:
+		if s.agent == nil {
+			return nil, fail("agent_unavailable", "Agent Control is unavailable", true)
+		}
+		if err := s.agent.Interrupt(req.InterruptAgentRun.GetRunId(), s.wa.OwnID()); err != nil {
+			return nil, fail("invalid_argument", err.Error(), false)
+		}
+		state, err := s.agentControlState()
+		return &bridgev1.RpcResponse_InterruptAgentRun{InterruptAgentRun: &bridgev1.InterruptAgentRunResponse{State: state}}, err
+	case *bridgev1.RpcRequest_ResolveAgentApproval:
+		if s.agent == nil {
+			return nil, fail("agent_unavailable", "Agent Control is unavailable", true)
+		}
+		if err := s.agent.ResolveApproval(req.ResolveAgentApproval.GetOwnerCode(), req.ResolveAgentApproval.GetApprove(), s.wa.OwnID()); err != nil {
+			return nil, fail("invalid_argument", err.Error(), false)
+		}
+		state, err := s.agentControlState()
+		return &bridgev1.RpcResponse_ResolveAgentApproval{ResolveAgentApproval: &bridgev1.ResolveAgentApprovalResponse{State: state}}, err
 	case *bridgev1.RpcRequest_RequestOlderHistory:
 		if req.RequestOlderHistory.GetChatId() == "" {
 			return nil, fail("invalid_argument", "chat_id is required", false)

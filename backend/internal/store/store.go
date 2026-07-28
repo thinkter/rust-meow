@@ -176,7 +176,7 @@ func (s *Store) OldestMessage(ctx context.Context, chatID string) (domain.Messag
 const (
 	reactionReplaySchemaVersion = 9
 	searchSchemaVersion         = 10
-	supportedSchemaVersion      = 18
+	supportedSchemaVersion      = 19
 )
 
 type ChatMerge struct {
@@ -241,7 +241,7 @@ func (s *Store) ClearAccountData(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{`DELETE FROM inbound_events`, `DELETE FROM inbound_messages`, `DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM history_coverage`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM storage_health`, `DELETE FROM sticker_favorites`} {
+	for _, statement := range []string{`DELETE FROM agent_audit`, `DELETE FROM agent_message_links`, `DELETE FROM agent_approvals`, `DELETE FROM agent_runs`, `DELETE FROM agent_grants`, `DELETE FROM agent_control_chats`, `DELETE FROM agent_workspaces`, `DELETE FROM agent_settings`, `DELETE FROM inbound_events`, `DELETE FROM inbound_messages`, `DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM history_coverage`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM storage_health`, `DELETE FROM sticker_favorites`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("clear account data: %w", err)
 		}
@@ -496,6 +496,81 @@ CREATE TABLE IF NOT EXISTS sticker_favorites(
   updated_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS sticker_favorites_updated_idx ON sticker_favorites(updated_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS agent_settings(
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  enabled INTEGER NOT NULL DEFAULT 0,
+  alias TEXT NOT NULL DEFAULT 'meow',
+  codex_path TEXT NOT NULL DEFAULT 'codex',
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS agent_workspaces(
+  id TEXT PRIMARY KEY,
+  alias TEXT NOT NULL UNIQUE,
+  path TEXT NOT NULL UNIQUE,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_control_chats(
+  chat_id TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(chat_id) REFERENCES chats(jid) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS agent_grants(
+  id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL,
+  addresses_json TEXT NOT NULL,
+  workspace_ids_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_runs(
+  id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  source_message_id TEXT NOT NULL,
+  principal_address TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  codex_thread_id TEXT NOT NULL DEFAULT '',
+  codex_turn_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  prompt_preview TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(chat_id,source_message_id)
+);
+CREATE INDEX IF NOT EXISTS agent_runs_recent_idx ON agent_runs(updated_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS agent_approvals(
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  owner_code TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  preview TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  request_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS agent_message_links(
+  chat_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  generated INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(chat_id,message_id),
+  FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS agent_audit(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL DEFAULT '',
+  actor_address TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_audit_recent_idx ON agent_audit(created_at DESC,id DESC);
 `
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -698,7 +773,7 @@ END;`
 	}
 	if currentVersion < supportedSchemaVersion {
 		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=?`, supportedSchemaVersion); err != nil {
-			return fmt.Errorf("record schema v18: %w", err)
+			return fmt.Errorf("record schema v19: %w", err)
 		}
 	}
 	return tx.Commit()

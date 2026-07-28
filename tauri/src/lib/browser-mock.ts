@@ -7,6 +7,7 @@ import {
   MessageStatus,
   type AttachmentContent, type Chat, type ChatInfo, type ChatParticipant,
   type FrontendEventPayload, type Message, type MessageContent, type Reaction, type PinnedMessage,
+  type AgentControlState, type AgentWorkspace, type AgentGrant,
 } from "./types";
 import type {
   BackendEventHandler, BackendSubscription, BridgeApi, FilePickerOptions,
@@ -14,7 +15,7 @@ import type {
 } from "./bridge";
 
 const OWN_USER_ID = "919900001111@s.whatsapp.net";
-const PROTOCOL_VERSION = 20;
+const PROTOCOL_VERSION = 21;
 const STARTED_AT = Date.now();
 const MINUTE = 60_000;
 const DAY = 86_400_000;
@@ -144,6 +145,10 @@ class BrowserMockBridge implements BridgeApi {
   private liveIndex = 0;
   private messageSequence = 0;
   private eventSequence = 0;
+  private agentControl: AgentControlState = {
+    settings: { enabled: false, alias: "meow", codexPath: "codex", codexRunning: false },
+    workspaces: [], controlChatIds: [], grants: [], runs: [], approvals: [], audit: [],
+  };
 
   constructor() {
     const fixture = buildFixture();
@@ -220,6 +225,45 @@ class BrowserMockBridge implements BridgeApi {
 
   async repairLocalCache() {
     return this.getIntegrityStatus();
+  }
+
+  async getAgentControlState() { return { state: copy(this.agentControl) }; }
+  async saveAgentSettings(enabled: boolean, alias: string, codexPath: string) {
+    this.agentControl.settings = { enabled, alias, codexPath, codexRunning: false };
+    return this.getAgentControlState();
+  }
+  async saveAgentWorkspace(workspace: AgentWorkspace) {
+    const item = { ...workspace, id: workspace.id || `ws-${Date.now()}` };
+    this.agentControl.workspaces = [...this.agentControl.workspaces.filter((entry) => entry.id !== item.id), item];
+    return this.getAgentControlState();
+  }
+  async deleteAgentWorkspace(workspaceId: string) {
+    this.agentControl.workspaces = this.agentControl.workspaces.filter((entry) => entry.id !== workspaceId);
+    return this.getAgentControlState();
+  }
+  async setAgentControlChat(chatId: string, enabled: boolean) {
+    this.agentControl.controlChatIds = enabled
+      ? [...new Set([...this.agentControl.controlChatIds, chatId])]
+      : this.agentControl.controlChatIds.filter((id) => id !== chatId);
+    return this.getAgentControlState();
+  }
+  async saveAgentGrant(grant: AgentGrant) {
+    const item = { ...grant, id: grant.id || `grant-${Date.now()}` };
+    this.agentControl.grants = [...this.agentControl.grants.filter((entry) => entry.id !== item.id), item];
+    return this.getAgentControlState();
+  }
+  async deleteAgentGrant(grantId: string) {
+    this.agentControl.grants = this.agentControl.grants.filter((entry) => entry.id !== grantId);
+    return this.getAgentControlState();
+  }
+  async interruptAgentRun(runId: string) {
+    this.agentControl.runs = this.agentControl.runs.map((run) => run.id === runId ? { ...run, status: "interrupted" } : run);
+    return this.getAgentControlState();
+  }
+  async resolveAgentApproval(ownerCode: string, approve: boolean) {
+    this.agentControl.approvals = this.agentControl.approvals.map((approval) =>
+      approval.ownerCode === ownerCode ? { ...approval, status: approve ? "approved" : "denied" } : approval);
+    return this.getAgentControlState();
   }
 
   async startPairing() {

@@ -15,7 +15,7 @@ use prost::Message as _;
 
 use crate::proto::{self, envelope, rpc_request, rpc_response};
 
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -336,6 +336,18 @@ fn fake_integrity_status() -> proto::IntegrityStatus {
         last_message_persisted_at_ms: 1_700_000_000_000,
         last_reconciliation_at_ms: 1_700_000_000_000,
         inconsistent_chats: 0,
+    }
+}
+
+fn fake_agent_control_state() -> proto::AgentControlState {
+    proto::AgentControlState {
+        settings: Some(proto::AgentSettings {
+            enabled: false,
+            alias: "meow".into(),
+            codex_path: "codex".into(),
+            codex_running: false,
+        }),
+        ..Default::default()
     }
 }
 
@@ -919,6 +931,51 @@ fn fake_loop(
             }
             Some(rpc_request::Request::Reconnect(_)) => {
                 rpc_response::Result::Reconnect(proto::ReconnectResponse { started: true })
+            }
+            Some(rpc_request::Request::GetAgentControlState(_)) => {
+                rpc_response::Result::AgentControlState(proto::GetAgentControlStateResponse {
+                    state: Some(fake_agent_control_state()),
+                })
+            }
+            Some(rpc_request::Request::SaveAgentSettings(_)) => {
+                rpc_response::Result::SaveAgentSettings(proto::SaveAgentSettingsResponse {
+                    state: Some(fake_agent_control_state()),
+                })
+            }
+            Some(rpc_request::Request::SaveAgentWorkspace(_)) => {
+                rpc_response::Result::SaveAgentWorkspace(proto::SaveAgentWorkspaceResponse {
+                    state: Some(fake_agent_control_state()),
+                })
+            }
+            Some(rpc_request::Request::DeleteAgentWorkspace(_)) => {
+                rpc_response::Result::DeleteAgentWorkspace(proto::DeleteAgentWorkspaceResponse {
+                    state: Some(fake_agent_control_state()),
+                })
+            }
+            Some(rpc_request::Request::SetAgentControlChat(_)) => {
+                rpc_response::Result::SetAgentControlChat(proto::SetAgentControlChatResponse {
+                    state: Some(fake_agent_control_state()),
+                })
+            }
+            Some(rpc_request::Request::SaveAgentGrant(_)) => {
+                rpc_response::Result::SaveAgentGrant(proto::SaveAgentGrantResponse {
+                    state: Some(fake_agent_control_state()),
+                })
+            }
+            Some(rpc_request::Request::DeleteAgentGrant(_)) => {
+                rpc_response::Result::DeleteAgentGrant(proto::DeleteAgentGrantResponse {
+                    state: Some(fake_agent_control_state()),
+                })
+            }
+            Some(rpc_request::Request::InterruptAgentRun(_)) => {
+                rpc_response::Result::InterruptAgentRun(proto::InterruptAgentRunResponse {
+                    state: Some(fake_agent_control_state()),
+                })
+            }
+            Some(rpc_request::Request::ResolveAgentApproval(_)) => {
+                rpc_response::Result::ResolveAgentApproval(proto::ResolveAgentApprovalResponse {
+                    state: Some(fake_agent_control_state()),
+                })
             }
             Some(rpc_request::Request::Shutdown(_)) => {
                 rpc_response::Result::Shutdown(proto::ShutdownResponse {})

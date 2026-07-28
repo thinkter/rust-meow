@@ -59,6 +59,15 @@ message RpcRequest {
     ReconnectRequest reconnect = 38;
     GetIntegrityStatusRequest get_integrity_status = 39;
     RepairLocalCacheRequest repair_local_cache = 40;
+    GetAgentControlStateRequest get_agent_control_state = 41;
+    SaveAgentSettingsRequest save_agent_settings = 42;
+    SaveAgentWorkspaceRequest save_agent_workspace = 43;
+    DeleteAgentWorkspaceRequest delete_agent_workspace = 44;
+    SetAgentControlChatRequest set_agent_control_chat = 45;
+    SaveAgentGrantRequest save_agent_grant = 46;
+    DeleteAgentGrantRequest delete_agent_grant = 47;
+    InterruptAgentRunRequest interrupt_agent_run = 48;
+    ResolveAgentApprovalRequest resolve_agent_approval = 49;
   }
 }
 
@@ -106,6 +115,15 @@ message RpcResponse {
     ReconnectResponse reconnect = 47;
     GetIntegrityStatusResponse get_integrity_status = 48;
     RepairLocalCacheResponse repair_local_cache = 49;
+    GetAgentControlStateResponse agent_control_state = 50;
+    SaveAgentSettingsResponse save_agent_settings = 51;
+    SaveAgentWorkspaceResponse save_agent_workspace = 52;
+    DeleteAgentWorkspaceResponse delete_agent_workspace = 53;
+    SetAgentControlChatResponse set_agent_control_chat = 54;
+    SaveAgentGrantResponse save_agent_grant = 55;
+    DeleteAgentGrantResponse delete_agent_grant = 56;
+    InterruptAgentRunResponse interrupt_agent_run = 57;
+    ResolveAgentApprovalResponse resolve_agent_approval = 58;
   }
 }
 
@@ -130,8 +148,98 @@ message BackendEvent {
     PinnedMessagesChanged pinned_messages_changed = 22;
     SyncStatusChanged sync_status_changed = 23;
     HistoryCoverageChanged history_coverage_changed = 24;
+    AgentControlChanged agent_control_changed = 25;
   }
 }
+
+message GetAgentControlStateRequest {}
+message SaveAgentSettingsRequest {
+  bool enabled = 1;
+  string alias = 2;
+  string codex_path = 3;
+}
+message SaveAgentWorkspaceRequest { AgentWorkspace workspace = 1; }
+message DeleteAgentWorkspaceRequest { string workspace_id = 1; }
+message SetAgentControlChatRequest {
+  string chat_id = 1;
+  bool enabled = 2;
+}
+message SaveAgentGrantRequest { AgentGrant grant = 1; }
+message DeleteAgentGrantRequest { string grant_id = 1; }
+message InterruptAgentRunRequest { string run_id = 1; }
+message ResolveAgentApprovalRequest {
+  string owner_code = 1;
+  bool approve = 2;
+}
+
+message AgentSettings {
+  bool enabled = 1;
+  string alias = 2;
+  string codex_path = 3;
+  bool codex_running = 4;
+}
+message AgentWorkspace {
+  string id = 1;
+  string alias = 2;
+  string path = 3;
+  bool is_default = 4;
+}
+message AgentGrant {
+  string id = 1;
+  string display_name = 2;
+  string role = 3;
+  repeated string addresses = 4;
+  repeated string workspace_ids = 5;
+}
+message AgentRun {
+  string id = 1;
+  string chat_id = 2;
+  string source_message_id = 3;
+  string principal_address = 4;
+  string workspace_id = 5;
+  string status = 6;
+  string prompt_preview = 7;
+  string summary = 8;
+  string error = 9;
+  int64 created_at_ms = 10;
+  int64 updated_at_ms = 11;
+}
+message AgentApproval {
+  string id = 1;
+  string run_id = 2;
+  string owner_code = 3;
+  string kind = 4;
+  string preview = 5;
+  string status = 6;
+  int64 expires_at_ms = 7;
+}
+message AgentAuditEvent {
+  int64 id = 1;
+  string run_id = 2;
+  string actor_address = 3;
+  string action = 4;
+  string detail = 5;
+  int64 created_at_ms = 6;
+}
+message AgentControlState {
+  AgentSettings settings = 1;
+  repeated AgentWorkspace workspaces = 2;
+  repeated string control_chat_ids = 3;
+  repeated AgentGrant grants = 4;
+  repeated AgentRun runs = 5;
+  repeated AgentApproval approvals = 6;
+  repeated AgentAuditEvent audit = 7;
+}
+message GetAgentControlStateResponse { AgentControlState state = 1; }
+message SaveAgentSettingsResponse { AgentControlState state = 1; }
+message SaveAgentWorkspaceResponse { AgentControlState state = 1; }
+message DeleteAgentWorkspaceResponse { AgentControlState state = 1; }
+message SetAgentControlChatResponse { AgentControlState state = 1; }
+message SaveAgentGrantResponse { AgentControlState state = 1; }
+message DeleteAgentGrantResponse { AgentControlState state = 1; }
+message InterruptAgentRunResponse { AgentControlState state = 1; }
+message ResolveAgentApprovalResponse { AgentControlState state = 1; }
+message AgentControlChanged {}
 
 message RpcError {
   string code = 1;

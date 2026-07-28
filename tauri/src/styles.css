@@ -3011,6 +3011,340 @@ html[data-appearance="light"] .message-sender {
   color: #fff;
 }
 
+/* ── Agent Control ── */
+
+.agent-control-backdrop {
+  padding: clamp(12px, 3vw, 32px);
+}
+
+.agent-control-panel {
+  width: min(1040px, 100%);
+  height: min(760px, 100%);
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-lg);
+}
+
+.agent-control-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-control-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 3px 0 0;
+  font-size: 20px;
+}
+
+.agent-kicker {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.agent-control-tabs {
+  display: flex;
+  gap: 3px;
+  padding: 8px 14px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-control-tabs button,
+.agent-primary,
+.agent-secondary,
+.agent-danger,
+.agent-path-field button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.agent-control-tabs button:hover,
+.agent-control-tabs button.active,
+.agent-secondary:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.agent-control-tabs button.active {
+  border-color: var(--border-focus);
+  color: var(--accent);
+}
+
+.agent-control-body {
+  min-height: 0;
+  padding: 18px;
+  overflow-y: auto;
+}
+
+.agent-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.agent-stat,
+.agent-card,
+.agent-list-row,
+.agent-run-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.agent-stat {
+  padding: 14px;
+}
+
+.agent-stat span,
+.agent-list-row span,
+.agent-run-row small {
+  display: block;
+  color: var(--fg-subtle);
+  font-size: 12px;
+}
+
+.agent-stat strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 18px;
+}
+
+.agent-card {
+  padding: 16px;
+  margin-bottom: 14px;
+}
+
+.agent-card h3 {
+  margin: 0 0 13px;
+  font-size: 14px;
+}
+
+.agent-card label {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 11px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.agent-card input,
+.agent-card select {
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  background: var(--bg-input);
+  color: var(--fg);
+}
+
+.agent-card input:focus,
+.agent-card select:focus {
+  border-color: var(--border-focus);
+}
+
+.agent-inline-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.agent-path-field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+}
+
+.agent-path-field input {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.agent-path-field button {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.agent-actions,
+.agent-list-row > div:last-child,
+.agent-run-title {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.agent-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.agent-danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
+}
+
+.agent-primary:disabled,
+.agent-secondary:disabled {
+  cursor: not-allowed;
+  opacity: .48;
+}
+
+.agent-warning,
+.agent-control-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.agent-control-error {
+  margin: 10px 18px 0;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+.agent-list {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-contact-results {
+  display: grid;
+  gap: 5px;
+  margin: -3px 0 12px;
+}
+
+.agent-contact-results button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-contact-results button:hover {
+  border-color: var(--border-focus);
+  background: var(--bg-hover);
+}
+
+.agent-contact-results span {
+  color: var(--fg-subtle);
+  font-size: 11px;
+}
+
+.agent-list-row,
+.agent-run-row {
+  padding: 12px 14px;
+}
+
+.agent-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.agent-list-row > div:first-child {
+  min-width: 0;
+}
+
+.agent-list-row span {
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-list-row em {
+  color: var(--success);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.agent-empty,
+.agent-control-loading {
+  padding: 36px;
+  color: var(--fg-subtle);
+  text-align: center;
+}
+
+.agent-run-row p {
+  margin: 9px 0;
+  color: var(--fg-muted);
+}
+
+.agent-run-title {
+  justify-content: space-between;
+}
+
+.agent-status {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--bg-active);
+  color: var(--fg-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.agent-status.running,
+.agent-status.starting {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.agent-status.completed {
+  color: var(--success);
+}
+
+.agent-approval {
+  border-color: var(--warning);
+}
+
+@media (max-width: 760px) {
+  .agent-overview-grid,
+  .agent-inline-fields {
+    grid-template-columns: 1fr;
+  }
+  .agent-control-panel {
+    height: 100%;
+  }
+  .agent-list-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .dialog-card,
 .dialog {
   width: min(430px, 100%);

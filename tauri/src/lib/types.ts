@@ -126,6 +126,74 @@ export interface IntegrityStatus {
 export interface GetIntegrityStatusResponse { status: IntegrityStatus | null; }
 export interface RepairLocalCacheResponse { status: IntegrityStatus | null; }
 
+export interface AgentSettings {
+  enabled: boolean;
+  alias: string;
+  codexPath: string;
+  codexRunning: boolean;
+}
+export interface AgentWorkspace {
+  id: string;
+  alias: string;
+  path: string;
+  isDefault: boolean;
+}
+export interface AgentGrant {
+  id: string;
+  displayName: string;
+  role: "operator" | "viewer" | string;
+  addresses: string[];
+  workspaceIds: string[];
+}
+export interface AgentRun {
+  id: string;
+  chatId: string;
+  sourceMessageId: string;
+  principalAddress: string;
+  workspaceId: string;
+  status: string;
+  promptPreview: string;
+  summary: string;
+  error: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+export interface AgentApproval {
+  id: string;
+  runId: string;
+  ownerCode: string;
+  kind: string;
+  preview: string;
+  status: string;
+  expiresAtMs: number;
+}
+export interface AgentAuditEvent {
+  id: number;
+  runId: string;
+  actorAddress: string;
+  action: string;
+  detail: string;
+  createdAtMs: number;
+}
+export interface AgentControlState {
+  settings: AgentSettings | null;
+  workspaces: AgentWorkspace[];
+  controlChatIds: string[];
+  grants: AgentGrant[];
+  runs: AgentRun[];
+  approvals: AgentApproval[];
+  audit: AgentAuditEvent[];
+}
+export interface GetAgentControlStateResponse { state: AgentControlState | null; }
+export interface SaveAgentSettingsResponse { state: AgentControlState | null; }
+export interface SaveAgentWorkspaceResponse { state: AgentControlState | null; }
+export interface DeleteAgentWorkspaceResponse { state: AgentControlState | null; }
+export interface SetAgentControlChatResponse { state: AgentControlState | null; }
+export interface SaveAgentGrantResponse { state: AgentControlState | null; }
+export interface DeleteAgentGrantResponse { state: AgentControlState | null; }
+export interface InterruptAgentRunResponse { state: AgentControlState | null; }
+export interface ResolveAgentApprovalResponse { state: AgentControlState | null; }
+
 export interface StartPairingResponse {
   started: boolean;
 }
@@ -480,6 +548,7 @@ export interface TypingChanged {
   recording: boolean;
 }
 export interface PinnedMessagesChanged { chatId: string; }
+export interface AgentControlChanged {}
 
 export interface BridgeLifecycle {
   epoch: number;
@@ -505,6 +574,7 @@ export type FrontendEventPayload =
   | { type: "chatMerged"; payload: ChatMerged }
   | { type: "typingChanged"; payload: TypingChanged }
   | { type: "pinnedMessagesChanged"; payload: PinnedMessagesChanged }
+  | { type: "agentControlChanged"; payload: AgentControlChanged }
   | { type: "bridgeLifecycle"; payload: BridgeLifecycle };
 
 /** Backend sequences are monotonic and nonzero; shell-local events use zero. */

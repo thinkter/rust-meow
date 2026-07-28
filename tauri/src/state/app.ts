@@ -2242,6 +2242,9 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       case "pinnedMessagesChanged":
         void loadPinnedMessages(event.payload.chatId);
         break;
+      case "agentControlChanged":
+        window.dispatchEvent(new Event("rust-meow-agent-control-changed"));
+        break;
       case "problem":
         if (event.payload.fatal) fatal(event.payload.message);
         else {
