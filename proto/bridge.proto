@@ -641,6 +641,8 @@ message ImageContent {
   bool animated = 9;
   // A bounded rendering asset; local_path remains the full-resolution original.
   string thumbnail_path = 10;
+  // WhatsApp's embedded preview, available before the full media is downloaded.
+  bytes jpeg_thumbnail = 11;
 }
 
 message AttachmentContent {

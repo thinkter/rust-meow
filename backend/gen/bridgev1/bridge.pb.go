@@ -6853,6 +6853,8 @@ type ImageContent struct {
 	Animated     bool   `protobuf:"varint,9,opt,name=animated,proto3" json:"animated,omitempty"`
 	// A bounded rendering asset; local_path remains the full-resolution original.
 	ThumbnailPath string `protobuf:"bytes,10,opt,name=thumbnail_path,json=thumbnailPath,proto3" json:"thumbnail_path,omitempty"`
+	// WhatsApp's embedded preview, available before the full media is downloaded.
+	JpegThumbnail []byte `protobuf:"bytes,11,opt,name=jpeg_thumbnail,json=jpegThumbnail,proto3" json:"jpeg_thumbnail,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6955,6 +6957,13 @@ func (x *ImageContent) GetThumbnailPath() string {
 		return x.ThumbnailPath
 	}
 	return ""
+}
+
+func (x *ImageContent) GetJpegThumbnail() []byte {
+	if x != nil {
+		return x.JpegThumbnail
+	}
+	return nil
 }
 
 type AttachmentContent struct {
@@ -10080,7 +10089,7 @@ const file_proto_bridge_proto_rawDesc = "" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12%\n" +
 	"\x0ejpeg_thumbnail\x18\x04 \x01(\fR\rjpegThumbnail\x12'\n" +
 	"\x0fthumbnail_width\x18\x05 \x01(\rR\x0ethumbnailWidth\x12)\n" +
-	"\x10thumbnail_height\x18\x06 \x01(\rR\x0fthumbnailHeight\"\xb0\x02\n" +
+	"\x10thumbnail_height\x18\x06 \x01(\rR\x0fthumbnailHeight\"\xd7\x02\n" +
 	"\fImageContent\x12\x18\n" +
 	"\acaption\x18\x01 \x01(\tR\acaption\x12\x1b\n" +
 	"\tmime_type\x18\x02 \x01(\tR\bmimeType\x12\x1d\n" +
@@ -10093,7 +10102,8 @@ const file_proto_bridge_proto_rawDesc = "" +
 	"\asticker\x18\b \x01(\bR\asticker\x12\x1a\n" +
 	"\banimated\x18\t \x01(\bR\banimated\x12%\n" +
 	"\x0ethumbnail_path\x18\n" +
-	" \x01(\tR\rthumbnailPath\"\xef\x02\n" +
+	" \x01(\tR\rthumbnailPath\x12%\n" +
+	"\x0ejpeg_thumbnail\x18\v \x01(\fR\rjpegThumbnail\"\xef\x02\n" +
 	"\x11AttachmentContent\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x18\n" +
 	"\acaption\x18\x02 \x01(\tR\acaption\x12\x1b\n" +

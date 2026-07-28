@@ -177,6 +177,7 @@ export interface ImageContent {
   sticker: boolean;
   animated: boolean;
   thumbnailPath: string;
+  jpegThumbnail: number[];
 }
 
 export interface AttachmentContent {

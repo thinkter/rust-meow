@@ -340,6 +340,25 @@ func TestDomainMessagePreservesExtendedTextLinkPreview(t *testing.T) {
 	}
 }
 
+func TestDomainMessagePreservesImageThumbnailBeforeDownload(t *testing.T) {
+	chat, _ := types.ParseJID("123@g.us")
+	sender, _ := types.ParseJID("456@s.whatsapp.net")
+	evt := &events.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender}, ID: "photo-1", Timestamp: time.UnixMilli(1234)},
+		Message: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			Mimetype:      proto.String("image/jpeg"),
+			Caption:       proto.String("cat"),
+			JPEGThumbnail: []byte{0xff, 0xd8, 0xff, 0xd9},
+			Width:         proto.Uint32(1200),
+			Height:        proto.Uint32(800),
+		}},
+	}
+	got := domainMessage(evt, chat.String(), chat.String())
+	if got.Image == nil || got.Image.Caption != "cat" || string(got.Image.JPEGThumbnail) != "\xff\xd8\xff\xd9" {
+		t.Fatalf("image=%+v", got.Image)
+	}
+}
+
 func TestMessageContextInfoSupportsMediaReplies(t *testing.T) {
 	message := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
 		ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("photo-target")},
@@ -968,6 +987,17 @@ func TestImageCacheCreatesBoundedThumbnailPair(t *testing.T) {
 	if thumbnail.Width != 512 || thumbnail.Height != 384 {
 		t.Fatalf("thumbnail=%dx%d, want 512x384", thumbnail.Width, thumbnail.Height)
 	}
+	embedded, err := embeddedJPEGThumbnail(thumbnailPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embeddedConfig, format, err := image.DecodeConfig(bytes.NewReader(embedded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != "jpeg" || embeddedConfig.Width != 512 || embeddedConfig.Height != 384 {
+		t.Fatalf("embedded thumbnail=%s %dx%d", format, embeddedConfig.Width, embeddedConfig.Height)
+	}
 
 	if err = os.Remove(thumbnailPath); err != nil {
 		t.Fatal(err)
@@ -1169,7 +1199,7 @@ func TestForwardedContentKeepsPayloadAndNativeForwardMetadata(t *testing.T) {
 		Image: &domain.Image{
 			Caption: "photo", MIMEType: "image/jpeg", DirectPath: "/encrypted",
 			MediaKey: []byte{1}, FileSHA256: []byte{2}, FileEncSHA256: []byte{3},
-			Width: 640, Height: 480, FileSize: 99,
+			JPEGThumbnail: []byte{4, 5}, Width: 640, Height: 480, FileSize: 99,
 		},
 	}, contextInfo)
 	if err != nil {
@@ -1177,7 +1207,7 @@ func TestForwardedContentKeepsPayloadAndNativeForwardMetadata(t *testing.T) {
 	}
 	image := outgoing.GetImageMessage()
 	if image == nil || image.GetCaption() != "photo" || image.GetDirectPath() != "/encrypted" ||
-		!image.GetContextInfo().GetIsForwarded() || image.GetContextInfo().GetForwardingScore() != 4 {
+		string(image.GetJPEGThumbnail()) != "\x04\x05" || !image.GetContextInfo().GetIsForwarded() || image.GetContextInfo().GetForwardingScore() != 4 {
 		t.Fatalf("forwarded image=%+v", image)
 	}
 	if _, err = forwardedContent(domain.Message{Kind: "poll"}, contextInfo); !errors.Is(err, ErrForwardUnsupported) {

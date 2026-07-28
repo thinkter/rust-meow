@@ -83,6 +83,10 @@ function preserveLocalMedia(message: Message, previous: Message | undefined): Me
           localPath: message.content.image.localPath || previous.content.image.localPath,
           thumbnailPath:
             message.content.image.thumbnailPath || previous.content.image.thumbnailPath,
+          jpegThumbnail:
+            message.content.image.jpegThumbnail.length > 0
+              ? message.content.image.jpegThumbnail
+              : previous.content.image.jpegThumbnail,
         },
       },
     };

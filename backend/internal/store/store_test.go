@@ -278,7 +278,7 @@ func TestRichMessageContentRoundTrips(t *testing.T) {
 	now := time.UnixMilli(1234)
 	messages := []domain.Message{
 		{ID: "sticker", ChatJID: "123@g.us", Timestamp: now, Kind: "sticker", Text: "Sticker", Image: &domain.Image{
-			MIMEType: "image/webp", DirectPath: "/sticker", MediaKey: []byte{1}, FileSHA256: []byte{2}, FileEncSHA256: []byte{3}, Width: 512, Height: 512, FileSize: 99, Animated: true,
+			MIMEType: "image/webp", JPEGThumbnail: []byte{10, 11}, DirectPath: "/sticker", MediaKey: []byte{1}, FileSHA256: []byte{2}, FileEncSHA256: []byte{3}, Width: 512, Height: 512, FileSize: 99, Animated: true,
 		}},
 		{ID: "audio", ChatJID: "123@g.us", Timestamp: now.Add(time.Millisecond), Kind: "audio", Text: "Voice message", Attachment: &domain.Attachment{
 			MIMEType: "audio/ogg", DirectPath: "/audio", MediaKey: []byte{4}, FileSHA256: []byte{5}, FileEncSHA256: []byte{6}, FileSize: 100, DurationSeconds: 7, VoiceNote: true,
@@ -321,7 +321,7 @@ func TestRichMessageContentRoundTrips(t *testing.T) {
 	for _, message := range page.Items {
 		byID[message.ID] = message
 	}
-	if got := byID["sticker"].Image; got == nil || got.MIMEType != "image/webp" || !got.Animated || got.Width != 512 || string(got.MediaKey) != "\x01" {
+	if got := byID["sticker"].Image; got == nil || got.MIMEType != "image/webp" || !got.Animated || got.Width != 512 || string(got.MediaKey) != "\x01" || string(got.JPEGThumbnail) != "\x0a\x0b" {
 		t.Fatalf("sticker=%+v", got)
 	}
 	if got := byID["audio"].Attachment; got == nil || !got.VoiceNote || got.DurationSeconds != 7 || got.DirectPath != "/audio" {
@@ -542,7 +542,7 @@ func TestV8CacheMigratesInPlaceToRichContentSchema(t *testing.T) {
 	if _, err = db.ExecContext(ctx, `DROP TRIGGER message_search_ai; DROP TRIGGER message_search_ad; DROP TRIGGER message_search_au; DROP TABLE message_search`); err != nil {
 		t.Fatal(err)
 	}
-	for _, column := range []string{"image_animated", "media_file_name", "media_duration", "media_voice", "contacts_json", "location_lat", "location_lng", "location_name", "location_address", "location_url", "location_live", "link_preview_url", "link_preview_title", "link_preview_description", "link_preview_thumbnail", "link_preview_width", "link_preview_height"} {
+	for _, column := range []string{"image_thumbnail", "image_animated", "media_file_name", "media_duration", "media_voice", "contacts_json", "location_lat", "location_lng", "location_name", "location_address", "location_url", "location_live", "link_preview_url", "link_preview_title", "link_preview_description", "link_preview_thumbnail", "link_preview_width", "link_preview_height"} {
 		if _, err = db.ExecContext(ctx, `ALTER TABLE messages DROP COLUMN `+column); err != nil {
 			t.Fatalf("drop %s: %v", column, err)
 		}

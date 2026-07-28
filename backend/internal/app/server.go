@@ -1065,7 +1065,8 @@ func wireMessage(m domain.Message) *bridgev1.Message {
 	message := &bridgev1.Message{Id: m.ID, ChatId: m.ChatJID, SenderId: m.SenderJID, FromMe: m.FromMe, TimestampMs: m.Timestamp.UnixMilli(), Status: wireStatus(m.Status), Edited: !m.EditedAt.IsZero(), Revoked: m.Revoked, ReplyToMessageId: m.ReplyToID, ReplyToChatId: m.ReplyToChatID, ForwardingScore: m.ForwardingScore}
 	if m.Image != nil {
 		message.Content = &bridgev1.Message_Image{Image: &bridgev1.ImageContent{Caption: m.Image.Caption, MimeType: m.Image.MIMEType, LocalPath: m.Image.LocalPath,
-			Width: m.Image.Width, Height: m.Image.Height, FileSize: m.Image.FileSize, Downloadable: !m.Revoked, Sticker: m.Kind == "sticker", Animated: m.Image.Animated}}
+			Width: m.Image.Width, Height: m.Image.Height, FileSize: m.Image.FileSize, Downloadable: !m.Revoked, Sticker: m.Kind == "sticker", Animated: m.Image.Animated,
+			JpegThumbnail: m.Image.JPEGThumbnail}}
 	} else if m.Attachment != nil {
 		attachment := m.Attachment
 		message.Content = &bridgev1.Message_Attachment{Attachment: &bridgev1.AttachmentContent{Kind: m.Kind, Caption: attachment.Caption, MimeType: attachment.MIMEType,

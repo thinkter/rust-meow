@@ -563,6 +563,11 @@ fn preserve_local_image_path(incoming: &mut proto::Message, existing: &proto::Me
                 .thumbnail_path
                 .clone_from(&existing_image.thumbnail_path);
         }
+        if incoming_image.jpeg_thumbnail.is_empty() {
+            incoming_image
+                .jpeg_thumbnail
+                .clone_from(&existing_image.jpeg_thumbnail);
+        }
     }
 }
 

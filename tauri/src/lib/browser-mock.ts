@@ -18,6 +18,12 @@ const PROTOCOL_VERSION = 20;
 const STARTED_AT = Date.now();
 const MINUTE = 60_000;
 const DAY = 86_400_000;
+const MOCK_EMBEDDED_IMAGE_THUMBNAIL = Array.from(
+  Uint8Array.from(
+    atob("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA4KCw0LCQ4NDA0QDw4RFiQXFhQUFiwgIRokNC43NjMuMjI6QVNGOj1OPjIySGJJTlZYXV5dOEVmbWVabFNbXVn/2wBDAQ8QEBYTFioXFypZOzI7WVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVn/wAARCAAIAAgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAeEAABAwQDAAAAAAAAAAAAAAABAAIRAwQFIRIxcf/EABUBAQEAAAAAAAAAAAAAAAAAAAID/8QAGBEAAgMAAAAAAAAAAAAAAAAAAAIREmH/2gAMAwEAAhEDEQA/AJI1rEYkUwxpuY2eO5nufEREySLWdP/Z"),
+    (value) => value.charCodeAt(0),
+  ),
+);
 
 interface BrowserFileMetadata { fileName: string; mimeType: string; fileSize: number }
 
@@ -665,6 +671,7 @@ class BrowserMockBridge implements BridgeApi {
         sticker,
         animated: false,
         thumbnailPath: imagePath || fallbackPath,
+        jpegThumbnail: [],
       },
     }, replyToMessageId, replyToChatId);
   }
@@ -918,7 +925,7 @@ function priyaMessages(): Message[] {
     makeMessage({ id: "priya-02", chatId, timestampMs: STARTED_AT - 6 * 60 * MINUTE, fromMe: true, senderId: OWN_USER_ID, senderName: "You", content: { text: textContent("Yep! Thanks for checking.") }, status: MessageStatus.Read }),
     makeMessage({ id: "priya-03", chatId, timestampMs: STARTED_AT - 47 * MINUTE, fromMe: false, senderId: priya, senderName: "Priya Nair", senderPhoneNumber: "+91 98765 41020", content: { attachment: { ...attachmentContent("audio", "voice-note.ogg", "audio/ogg", "", 32_400), durationSeconds: 18, voiceNote: true } }, status: MessageStatus.Read }),
     makeMessage({ id: "priya-04", chatId, timestampMs: STARTED_AT - 31 * MINUTE, fromMe: true, senderId: OWN_USER_ID, senderName: "You", content: { text: textContent("I’ll send the album tonight.") }, status: MessageStatus.Delivered }),
-    makeMessage({ id: "priya-05", chatId, timestampMs: STARTED_AT - 8 * MINUTE, fromMe: false, senderId: priya, senderName: "Priya Nair", senderPhoneNumber: "+91 98765 41020", content: { image: { ...imageContent("The photos came out so well!", mockPhoto("Night market")), downloadable: false } }, status: MessageStatus.Read }),
+    makeMessage({ id: "priya-05", chatId, timestampMs: STARTED_AT - 8 * MINUTE, fromMe: false, senderId: priya, senderName: "Priya Nair", senderPhoneNumber: "+91 98765 41020", content: { image: { ...imageContent("The photos came out so well!", ""), downloadable: false, jpegThumbnail: MOCK_EMBEDDED_IMAGE_THUMBNAIL } }, status: MessageStatus.Read }),
   ];
 }
 
@@ -1029,7 +1036,7 @@ function imageContent(caption: string, localPath: string) {
     caption, mimeType: "image/jpeg", localPath,
     width: 1280, height: 853, fileSize: 342_000,
     downloadable: !localPath, sticker: false, animated: false,
-    thumbnailPath: "",
+    thumbnailPath: "", jpegThumbnail: [],
   };
 }
 

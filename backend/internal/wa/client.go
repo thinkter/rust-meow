@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"image"
 	_ "image/gif"
-	_ "image/jpeg"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"log/slog"
@@ -1970,6 +1970,7 @@ func forwardedContent(message domain.Message, contextInfo *waE2E.ContextInfo) (*
 			Height: proto.Uint32(media.Height), Width: proto.Uint32(media.Width),
 			MediaKey: append([]byte(nil), media.MediaKey...), FileEncSHA256: append([]byte(nil), media.FileEncSHA256...),
 			DirectPath: proto.String(media.DirectPath), ContextInfo: contextInfo,
+			JPEGThumbnail: append([]byte(nil), media.JPEGThumbnail...),
 		}}, nil
 	case "sticker":
 		if message.Image == nil {
@@ -2746,6 +2747,25 @@ func (c *Client) writeThumbnail(originalPath, thumbnailPath string) error {
 	return nil
 }
 
+func embeddedJPEGThumbnail(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	thumbnail, _, err := image.Decode(file)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return nil, fmt.Errorf("decode embedded thumbnail: %w", err)
+	}
+	var encoded bytes.Buffer
+	if err = jpeg.Encode(&encoded, thumbnail, &jpeg.Options{Quality: 72}); err != nil {
+		return nil, fmt.Errorf("encode embedded thumbnail: %w", err)
+	}
+	return encoded.Bytes(), nil
+}
+
 // cachedImagePaths returns an all-or-nothing cache pair. Legacy originals only
 // get upgraded from the asynchronous media path so listing messages never
 // performs image decodes on the main request loop.
@@ -2884,8 +2904,14 @@ func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, ca
 	if err != nil {
 		return domain.Message{}, err
 	}
+	jpegThumbnail, err := embeddedJPEGThumbnail(thumbnailPath)
+	if err != nil {
+		_ = os.Remove(localPath)
+		_ = os.Remove(thumbnailPath)
+		return domain.Message{}, err
+	}
 	pending := domain.Message{ID: waID, ChatJID: chatID, TransportJID: chat.String(), SenderJID: c.OwnID(), Text: caption, Timestamp: time.Now(), FromMe: true, Status: domain.StatusPending, Kind: "image", ReplyToID: replyToID, ReplyToChatID: replyToChatID,
-		Image: &domain.Image{Caption: caption, MIMEType: mimeType, LocalPath: localPath, Width: width, Height: height, FileSize: uint64(len(data))}}
+		Image: &domain.Image{Caption: caption, MIMEType: mimeType, LocalPath: localPath, JPEGThumbnail: jpegThumbnail, Width: width, Height: height, FileSize: uint64(len(data))}}
 	if pending.Text == "" {
 		pending.Text = "📷 Photo"
 	}
@@ -2917,7 +2943,7 @@ func (c *Client) SendImage(ctx context.Context, clientID, chatID, sourcePath, ca
 	imageMessage := &waE2E.ImageMessage{
 		Caption: proto.String(caption), Mimetype: proto.String(mimeType), Width: proto.Uint32(width), Height: proto.Uint32(height),
 		URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256,
-		FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, ContextInfo: replyContext,
+		FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, ContextInfo: replyContext, JPEGThumbnail: jpegThumbnail,
 	}
 	sendCtx, cancelSend := context.WithTimeout(ctx, 30*time.Second)
 	response, err := c.wa.SendMessage(sendCtx, chat, &waE2E.Message{ImageMessage: imageMessage}, whatsmeow.SendRequestExtra{ID: types.MessageID(waID)})
@@ -5277,7 +5303,8 @@ func extractMessageContent(message *waE2E.Message, infoType string) messageConte
 		}
 		imageInfo = &domain.Image{Caption: imageMessage.GetCaption(), MIMEType: imageMessage.GetMimetype(), DirectPath: imageMessage.GetDirectPath(),
 			MediaKey: imageMessage.GetMediaKey(), FileSHA256: imageMessage.GetFileSHA256(), FileEncSHA256: imageMessage.GetFileEncSHA256(),
-			Width: imageMessage.GetWidth(), Height: imageMessage.GetHeight(), FileSize: imageMessage.GetFileLength()}
+			Width: imageMessage.GetWidth(), Height: imageMessage.GetHeight(), FileSize: imageMessage.GetFileLength(),
+			JPEGThumbnail: append([]byte(nil), imageMessage.GetJPEGThumbnail()...)}
 	} else if sticker := message.GetStickerMessage(); sticker != nil {
 		kind, text = "sticker", "Sticker"
 		imageInfo = &domain.Image{MIMEType: sticker.GetMimetype(), DirectPath: sticker.GetDirectPath(), MediaKey: sticker.GetMediaKey(),

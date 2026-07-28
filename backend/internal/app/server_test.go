@@ -394,6 +394,15 @@ func TestWireLegacyImageCanRequestDescriptorRepair(t *testing.T) {
 	}
 }
 
+func TestWireImageIncludesPreDownloadThumbnail(t *testing.T) {
+	image := wireMessage(domain.Message{Kind: "image", Image: &domain.Image{
+		MIMEType: "image/jpeg", JPEGThumbnail: []byte{0xff, 0xd8, 0xff, 0xd9},
+	}}).GetImage()
+	if image == nil || string(image.GetJpegThumbnail()) != "\xff\xd8\xff\xd9" {
+		t.Fatalf("image=%+v", image)
+	}
+}
+
 func TestWireRichMessageContent(t *testing.T) {
 	sticker := wireMessage(domain.Message{Kind: "sticker", Image: &domain.Image{MIMEType: "image/webp", Animated: true}}).GetImage()
 	if sticker == nil || !sticker.GetSticker() || !sticker.GetAnimated() {

@@ -103,6 +103,7 @@ type Image struct {
 	Caption       string
 	MIMEType      string
 	LocalPath     string
+	JPEGThumbnail []byte
 	DirectPath    string
 	MediaKey      []byte
 	FileSHA256    []byte

@@ -336,6 +336,7 @@ CREATE TABLE IF NOT EXISTS messages(
   unread INTEGER NOT NULL DEFAULT 0,
   image_mime TEXT NOT NULL DEFAULT '',
   image_caption TEXT NOT NULL DEFAULT '',
+  image_thumbnail BLOB NOT NULL DEFAULT X'',
   image_local_path TEXT NOT NULL DEFAULT '',
   image_direct_path TEXT NOT NULL DEFAULT '',
   image_media_key BLOB NOT NULL DEFAULT X'',
@@ -533,6 +534,7 @@ CREATE INDEX IF NOT EXISTS sticker_favorites_updated_idx ON sticker_favorites(up
 		{"forwarding_score", "INTEGER NOT NULL DEFAULT 0"},
 		{"image_mime", "TEXT NOT NULL DEFAULT ''"},
 		{"image_caption", "TEXT NOT NULL DEFAULT ''"},
+		{"image_thumbnail", "BLOB NOT NULL DEFAULT X''"},
 		{"image_local_path", "TEXT NOT NULL DEFAULT ''"},
 		{"image_direct_path", "TEXT NOT NULL DEFAULT ''"},
 		{"image_media_key", "BLOB NOT NULL DEFAULT X''"},
@@ -1008,11 +1010,11 @@ func mergeChatsTx(ctx context.Context, tx *sql.Tx, loser, winner string) error {
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO messages(id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,unread,
-image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
+image_mime,image_caption,image_thumbnail,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height)
 SELECT id,?,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,unread,
-image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
+image_mime,image_caption,image_thumbnail,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
 FROM messages WHERE chat_jid=? AND true
@@ -1025,6 +1027,7 @@ text=CASE WHEN excluded.edited_at>=messages.edited_at THEN excluded.text ELSE me
 edited_at=max(messages.edited_at,excluded.edited_at),revoked=(messages.revoked OR excluded.revoked),forwarding_score=max(messages.forwarding_score,excluded.forwarding_score),unread=(messages.unread OR excluded.unread),
 image_mime=CASE WHEN excluded.image_mime<>'' THEN excluded.image_mime ELSE messages.image_mime END,
 image_caption=CASE WHEN excluded.image_caption<>'' THEN excluded.image_caption ELSE messages.image_caption END,
+image_thumbnail=CASE WHEN length(excluded.image_thumbnail)>0 THEN excluded.image_thumbnail ELSE messages.image_thumbnail END,
 image_local_path=CASE WHEN excluded.image_local_path<>'' THEN excluded.image_local_path ELSE messages.image_local_path END,
 image_direct_path=CASE WHEN excluded.image_direct_path<>'' THEN excluded.image_direct_path ELSE messages.image_direct_path END,
 image_media_key=CASE WHEN length(excluded.image_media_key)>0 THEN excluded.image_media_key ELSE messages.image_media_key END,
@@ -1503,7 +1506,7 @@ func (s *Store) Messages(ctx context.Context, chatJID, cursor string, limit int)
 	}
 	limit = clampLimit(limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,
-image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
+image_mime,image_caption,image_thumbnail,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
 FROM messages WHERE chat_jid=? AND kind<>'reaction' AND (timestamp < ? OR (timestamp=? AND id < ?)) ORDER BY timestamp DESC,id DESC LIMIT ?`, chatJID, ts, ts, id, limit+1)
@@ -1634,7 +1637,7 @@ func (s *Store) messagesRelative(ctx context.Context, chatID string, timestamp i
 		operator, direction = "<", "DESC"
 	}
 	query := `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,
-image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
+image_mime,image_caption,image_thumbnail,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
 FROM messages WHERE chat_jid=? AND kind<>'reaction' AND (timestamp ` + operator + ` ? OR (timestamp=? AND id ` + operator + ` ?))
@@ -1677,7 +1680,7 @@ func scanStoredMessage(scanner messageScanner) (domain.Message, int64, error) {
 	var preview domain.LinkPreview
 	var previewWidth, previewHeight int64
 	err := scanner.Scan(&m.ID, &m.ChatJID, &m.TransportJID, &m.SenderJID, &m.Text, &timestamp, &m.FromMe, &m.Status, &m.Kind, &m.ReplyToID, &m.ReplyToChatID, &edited, &m.Revoked, &forwardingScore,
-		&media.MIMEType, &media.Caption, &media.LocalPath, &media.DirectPath, &media.MediaKey, &media.FileSHA256, &media.FileEncSHA256, &width, &height, &size,
+		&media.MIMEType, &media.Caption, &media.JPEGThumbnail, &media.LocalPath, &media.DirectPath, &media.MediaKey, &media.FileSHA256, &media.FileEncSHA256, &width, &height, &size,
 		&animated, &fileName, &duration, &voice, &contactsJSON, &location.Latitude, &location.Longitude, &location.Name, &location.Address, &location.URL, &locationLive,
 		&preview.URL, &preview.Title, &preview.Description, &preview.JPEGThumbnail, &previewWidth, &previewHeight)
 	if err != nil {
@@ -2072,6 +2075,7 @@ func applyMessageTx(ctx context.Context, tx *sql.Tx, message domain.Message, inc
 		MediaKey:      []byte{},
 		FileSHA256:    []byte{},
 		FileEncSHA256: []byte{},
+		JPEGThumbnail: []byte{},
 	}
 	if message.Image != nil {
 		image = *message.Image
@@ -2098,6 +2102,9 @@ func applyMessageTx(ctx context.Context, tx *sql.Tx, message domain.Message, inc
 	if image.FileEncSHA256 == nil {
 		image.FileEncSHA256 = []byte{}
 	}
+	if image.JPEGThumbnail == nil {
+		image.JPEGThumbnail = []byte{}
+	}
 	contactsJSON := ""
 	if len(message.Contacts) > 0 {
 		encoded, marshalErr := json.Marshal(message.Contacts)
@@ -2118,10 +2125,10 @@ func applyMessageTx(ctx context.Context, tx *sql.Tx, message domain.Message, inc
 		}
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO messages(id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,unread,
-image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
+image_mime,image_caption,image_thumbnail,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_jid,id) DO UPDATE SET
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_jid,id) DO UPDATE SET
 transport_jid=CASE WHEN excluded.transport_jid LIKE '%@lid' OR messages.transport_jid='' THEN excluded.transport_jid ELSE messages.transport_jid END,
 sender_jid=CASE WHEN messages.sender_jid='' THEN excluded.sender_jid ELSE messages.sender_jid END,
 timestamp=CASE WHEN messages.timestamp=0 THEN excluded.timestamp ELSE messages.timestamp END,from_me=messages.from_me,
@@ -2142,6 +2149,7 @@ text=CASE
 edited_at=max(messages.edited_at,excluded.edited_at),revoked=(messages.revoked OR excluded.revoked),forwarding_score=max(messages.forwarding_score,excluded.forwarding_score),
 image_mime=CASE WHEN excluded.image_mime<>'' THEN excluded.image_mime ELSE messages.image_mime END,
 image_caption=CASE WHEN excluded.edited_at>messages.edited_at THEN excluded.image_caption WHEN excluded.image_caption<>'' THEN excluded.image_caption ELSE messages.image_caption END,
+image_thumbnail=CASE WHEN length(excluded.image_thumbnail)>0 THEN excluded.image_thumbnail ELSE messages.image_thumbnail END,
 image_local_path=CASE WHEN excluded.image_local_path<>'' THEN excluded.image_local_path ELSE messages.image_local_path END,
 image_direct_path=CASE WHEN excluded.image_direct_path<>'' THEN excluded.image_direct_path ELSE messages.image_direct_path END,
 image_media_key=CASE WHEN length(excluded.image_media_key)>0 THEN excluded.image_media_key ELSE messages.image_media_key END,
@@ -2168,7 +2176,7 @@ link_preview_thumbnail=CASE WHEN length(excluded.link_preview_thumbnail)>0 THEN 
 link_preview_width=CASE WHEN excluded.link_preview_width>0 THEN excluded.link_preview_width ELSE messages.link_preview_width END,
 link_preview_height=CASE WHEN excluded.link_preview_height>0 THEN excluded.link_preview_height ELSE messages.link_preview_height END`,
 		message.ID, message.ChatJID, message.TransportJID, message.SenderJID, message.Text, ts, message.FromMe, message.Status, message.Kind, message.ReplyToID, message.ReplyToChatID, editedAt, message.Revoked, message.ForwardingScore, unreadValue,
-		image.MIMEType, image.Caption, image.LocalPath, image.DirectPath, image.MediaKey, image.FileSHA256, image.FileEncSHA256, image.Width, image.Height, image.FileSize,
+		image.MIMEType, image.Caption, image.JPEGThumbnail, image.LocalPath, image.DirectPath, image.MediaKey, image.FileSHA256, image.FileEncSHA256, image.Width, image.Height, image.FileSize,
 		image.Animated, fileName, duration, voice, contactsJSON, location.Latitude, location.Longitude, location.Name, location.Address, location.URL, location.Live,
 		preview.URL, preview.Title, preview.Description, preview.JPEGThumbnail, preview.ThumbnailWidth, preview.ThumbnailHeight)
 	if err != nil {
@@ -2228,7 +2236,7 @@ func (s *Store) Message(ctx context.Context, chatJID, messageID string) (domain.
 	}
 	chatJID = resolved
 	row := s.db.QueryRowContext(ctx, `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,
-image_mime,image_caption,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
+image_mime,image_caption,image_thumbnail,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
 image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
 link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
 FROM messages WHERE chat_jid=? AND id=? AND kind<>'reaction'`, chatJID, messageID)

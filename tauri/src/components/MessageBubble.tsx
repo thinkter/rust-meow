@@ -612,7 +612,7 @@ function ImageMessage(props: { message: Message; model: AppModel; chatId: string
     return content && "image" in content ? content.image : undefined;
   };
   const path = () => image()?.thumbnailPath || image()?.localPath || "";
-  const source = () => assetUrl(path());
+  const source = () => assetUrl(path()) || jpegDataUrl(image()?.jpegThumbnail ?? []);
   const error = () => props.model.state.imageFailures[`${props.chatId}\u0000${props.message.id}`];
   return (
     <>

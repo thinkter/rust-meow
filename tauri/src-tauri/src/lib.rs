@@ -82,7 +82,7 @@ enum FrontendEventKind {
     SyncStatusChanged(proto::SyncStatusChanged),
     HistoryCoverageChanged(proto::HistoryCoverageChanged),
     ChatUpserted(proto::ChatUpserted),
-    MessageUpserted(proto::MessageUpserted),
+    MessageUpserted(Box<proto::MessageUpserted>),
     ReceiptUpdated(proto::ReceiptUpdated),
     Problem(proto::BackendProblem),
     ReactionUpdated(proto::ReactionUpdated),
@@ -171,7 +171,7 @@ impl From<proto::BackendEvent> for Option<FrontendEvent> {
                 FrontendEventKind::HistoryCoverageChanged(value)
             }
             Event::ChatUpserted(value) => FrontendEventKind::ChatUpserted(value),
-            Event::MessageUpserted(value) => FrontendEventKind::MessageUpserted(value),
+            Event::MessageUpserted(value) => FrontendEventKind::MessageUpserted(Box::new(value)),
             Event::ReceiptUpdated(value) => FrontendEventKind::ReceiptUpdated(value),
             Event::Problem(value) => FrontendEventKind::Problem(value),
             Event::ReactionUpdated(value) => FrontendEventKind::ReactionUpdated(value),
