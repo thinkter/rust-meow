@@ -1,0 +1,21 @@
+{
+  "name": "rust-meow-control",
+  "version": "0.1.0",
+  "description": "Safe, concise Codex sessions controlled through allowlisted WhatsApp chats.",
+  "author": {
+    "name": "Rust Meow"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Rust Meow Control",
+    "shortDescription": "Run scoped Codex sessions from WhatsApp.",
+    "longDescription": "Adds the remote-session behavior used by Rust Meow while the desktop app enforces WhatsApp identity, workspace grants, approvals, and audit.",
+    "developerName": "Rust Meow",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Explain the Rust Meow remote-session safety model.",
+      "Summarize this run for a WhatsApp update."
+    ]
+  }
+}
