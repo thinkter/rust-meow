@@ -325,7 +325,7 @@ func (s *Store) AgentRun(ctx context.Context, id string) (AgentRun, error) {
 
 func (s *Store) ActiveAgentRunCounts(ctx context.Context, workspaceID string) (workspace, total int, err error) {
 	err = s.db.QueryRowContext(ctx, `SELECT
-sum(CASE WHEN workspace_id=? THEN 1 ELSE 0 END),count(*)
+COALESCE(sum(CASE WHEN workspace_id=? THEN 1 ELSE 0 END),0),count(*)
 FROM agent_runs WHERE status IN ('starting','running','waiting_approval')`, workspaceID).Scan(&workspace, &total)
 	return
 }

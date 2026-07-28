@@ -111,3 +111,16 @@ func TestAgentOwnerMessagesBetweenOnlyReturnsNewControlChatMessages(t *testing.T
 		t.Fatalf("messages=%+v", messages)
 	}
 }
+
+func TestActiveAgentRunCountsReturnsZeroForEmptyTable(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	workspace, total, err := s.ActiveAgentRunCounts(ctx, "missing")
+	if err != nil || workspace != 0 || total != 0 {
+		t.Fatalf("workspace=%d total=%d err=%v", workspace, total, err)
+	}
+}
