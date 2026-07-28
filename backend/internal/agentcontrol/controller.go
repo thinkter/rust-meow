@@ -26,8 +26,10 @@ import (
 var remoteSessionSkill []byte
 
 const (
-	maxPromptRunes  = 4000
-	maxWhatsAppPart = 3500
+	maxPromptRunes        = 4000
+	maxWhatsAppPart       = 3500
+	maxFinalResultRunes   = 700
+	maxFailureResultRunes = 400
 )
 
 func isActiveStatus(status string) bool {
@@ -48,13 +50,12 @@ type Controller struct {
 	statusSink StatusSink
 	skillPath  string
 
-	mu            sync.Mutex
-	app           *AppServer
-	threadRuns    map[string]string
-	active        map[string]context.CancelFunc
-	approvalIDs   map[string]json.RawMessage
-	planMilestone map[string]bool
-	seenMessages  map[string]struct{}
+	mu           sync.Mutex
+	app          *AppServer
+	threadRuns   map[string]string
+	active       map[string]context.CancelFunc
+	approvalIDs  map[string]json.RawMessage
+	seenMessages map[string]struct{}
 }
 
 type ParsedCommand struct {
@@ -110,7 +111,7 @@ func New(ctx context.Context, productStore *store.Store, send Sender, aliases Id
 		ctx: controllerCtx, cancel: cancel, store: productStore, send: send, aliases: aliases, ownID: ownID,
 		statusSink: statusSink, skillPath: skillPath,
 		threadRuns: make(map[string]string), active: make(map[string]context.CancelFunc),
-		approvalIDs: make(map[string]json.RawMessage), planMilestone: make(map[string]bool),
+		approvalIDs:  make(map[string]json.RawMessage),
 		seenMessages: make(map[string]struct{}),
 	}
 	go controller.watchOwnerMessages(time.Now().UnixMilli())
@@ -267,7 +268,7 @@ func (c *Controller) HandleMessage(message domain.Message) {
 	}
 	switch command.Action {
 	case "help":
-		c.reply("", message, fmt.Sprintf("Agent %s\nStart: !meow %s @workspace <task>\nCommands: status, stop <run>, approve <code>, deny <code>\nReplies continue the referenced run.", settings.Alias, settings.Alias))
+		c.reply("", message, fmt.Sprintf("Agent %s\nStart: !meow %s @workspace <task>\nCommands: status, stop <run>\nReply to continue a run.", settings.Alias, settings.Alias))
 	case "status":
 		c.sendStatus(message, role, workspaceIDs, command.RunID)
 	case "stop":
@@ -400,7 +401,7 @@ func (c *Controller) startRun(message domain.Message, settings store.AgentSettin
 	}
 	_ = c.store.LinkAgentMessage(c.ctx, message.ChatJID, message.ID, run.ID, false)
 	_ = c.store.AddAgentAudit(c.ctx, run.ID, message.SenderJID, "run_started", workspace.Alias)
-	c.reply(run.ID, message, fmt.Sprintf("Accepted %s in @%s. Codex is starting with workspace-only access and network disabled.", shortRunID(run.ID), workspace.Alias))
+	c.reply(run.ID, message, fmt.Sprintf("Started %s in @%s.", shortRunID(run.ID), workspace.Alias))
 	runCtx, cancel := context.WithCancel(c.ctx)
 	c.mu.Lock()
 	c.active[run.ID] = cancel
@@ -479,7 +480,7 @@ func (c *Controller) execute(ctx context.Context, run store.AgentRun, workspace 
 	if !resume || run.CodexThreadID == "" {
 		run.CodexThreadID, err = app.StartThread(ctx, workspace.Path, c.skillPath)
 		if err != nil {
-			c.failRun(&run, "Codex rejected the workspace-restricted session: "+safeError(err))
+			c.failRun(&run, "Codex rejected the trusted-host session: "+safeError(err))
 			return
 		}
 		c.mu.Lock()
@@ -572,17 +573,7 @@ func (c *Controller) handleAppEvent(app *AppServer, event appEvent) {
 	}
 	switch event.Method {
 	case "turn/plan/updated":
-		c.mu.Lock()
-		already := c.planMilestone[runID]
-		c.planMilestone[runID] = true
-		c.mu.Unlock()
-		if !already && len(envelope.Plan) > 0 {
-			steps := make([]string, 0, min(3, len(envelope.Plan)))
-			for _, step := range envelope.Plan[:min(3, len(envelope.Plan))] {
-				steps = append(steps, "• "+step.Step)
-			}
-			c.sendRun(run, "Plan for "+shortRunID(run.ID)+":\n"+strings.Join(steps, "\n"))
-		}
+		// Plans stay in Codex. WhatsApp receives only start and final status.
 	case "item/completed":
 		if envelope.Item.Type == "agentMessage" && strings.TrimSpace(envelope.Item.Text) != "" {
 			run.Summary = envelope.Item.Text
@@ -601,7 +592,7 @@ func (c *Controller) handleAppEvent(app *AppServer, event appEvent) {
 		}
 		_ = c.store.UpdateAgentRun(c.ctx, run)
 		if run.Summary != "" {
-			c.sendRun(run, fmt.Sprintf("%s completed:\n%s", shortRunID(run.ID), run.Summary))
+			c.sendRun(run, fmt.Sprintf("%s done: %s", shortRunID(run.ID), conciseResult(run.Summary, maxFinalResultRunes)))
 		} else {
 			c.sendRun(run, fmt.Sprintf("%s finished with status %s.", shortRunID(run.ID), run.Status))
 		}
@@ -614,33 +605,9 @@ func (c *Controller) handleAppEvent(app *AppServer, event appEvent) {
 		c.mu.Unlock()
 		c.changed()
 	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
-		code := approvalCode()
-		preview := envelope.Reason
-		if len(envelope.Command) > 0 {
-			preview = strings.Join(envelope.Command, " ")
-		}
-		if preview == "" {
-			preview = "Codex requested a protected action."
-		}
-		kind := "file change"
-		if strings.Contains(event.Method, "commandExecution") {
-			kind = "command"
-		}
-		requestID := string(event.ID)
-		approval, createErr := c.store.CreateAgentApproval(c.ctx, store.AgentApproval{
-			RunID: run.ID, OwnerCode: code, Kind: kind, Preview: preview, RequestID: requestID,
-		})
-		if createErr != nil {
-			_ = app.Respond(event.ID, map[string]any{"decision": "decline"})
-			return
-		}
-		c.mu.Lock()
-		c.approvalIDs[approval.OwnerCode] = event.ID
-		c.mu.Unlock()
-		run.Status = "waiting_approval"
-		_ = c.store.UpdateAgentRun(c.ctx, run)
-		settings, _ := c.store.AgentSettings(c.ctx)
-		c.sendRun(run, fmt.Sprintf("Owner approval needed for %s (%s):\n%s\nReply `!meow %s approve %s` or `!meow %s deny %s` within 5 minutes.", shortRunID(run.ID), kind, preview, settings.Alias, code, settings.Alias, code))
+		// Trusted-host runs should never request approval. Decline silently if the
+		// app-server emits one unexpectedly instead of prompting the group.
+		_ = app.Respond(event.ID, map[string]any{"decision": "decline"})
 	case "item/permissions/requestApproval", "item/tool/requestUserInput", "mcpServer/elicitation/request":
 		_ = app.Respond(event.ID, map[string]any{"decision": "decline"})
 	}
@@ -723,7 +690,7 @@ func (c *Controller) failRun(run *store.AgentRun, message string) {
 	run.Status, run.Error = "failed", message
 	_ = c.store.UpdateAgentRun(c.ctx, *run)
 	_ = c.store.AddAgentAudit(c.ctx, run.ID, "", "run_failed", message)
-	c.sendRun(*run, shortRunID(run.ID)+" failed: "+message)
+	c.sendRun(*run, shortRunID(run.ID)+" failed: "+conciseResult(message, maxFailureResultRunes))
 	c.mu.Lock()
 	if cancel := c.active[run.ID]; cancel != nil {
 		cancel()
@@ -779,6 +746,15 @@ func splitMessage(text string, max int) []string {
 		parts[i] = fmt.Sprintf("(%d/%d) %s", i+1, len(parts), parts[i])
 	}
 	return parts
+}
+
+func conciseResult(text string, maxRunes int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return strings.TrimSpace(string(runes[:maxRunes-1])) + "…"
 }
 
 func shortRunID(id string) string {

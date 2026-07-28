@@ -71,12 +71,12 @@ func TestLiveAppServerHandshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("permission profiles: %+v", profiles.Data)
-	hasWorkspaceProfile := false
+	hasDangerProfile := false
 	for _, profile := range profiles.Data {
-		hasWorkspaceProfile = hasWorkspaceProfile || profile.ID == ":workspace" && profile.Allowed
+		hasDangerProfile = hasDangerProfile || profile.ID == ":danger-full-access" && profile.Allowed
 	}
-	if !hasWorkspaceProfile {
-		t.Fatal("Codex does not allow the :workspace permission profile")
+	if !hasDangerProfile {
+		t.Fatal("Codex does not allow the :danger-full-access permission profile")
 	}
 	threadID, err := server.StartThread(ctx, workspace, "")
 	if err != nil {
@@ -113,6 +113,16 @@ func TestSplitMessageBoundsPartsAndLabelsChunks(t *testing.T) {
 func TestShortRunIDIsPhoneFriendly(t *testing.T) {
 	if got := shortRunID("run_12345678-abcd"); got != "12345678" {
 		t.Fatalf("short id=%q", got)
+	}
+}
+
+func TestConciseResultCollapsesWhitespaceAndCapsRunes(t *testing.T) {
+	if got := conciseResult("done\n\nwith   tests", 50); got != "done with tests" {
+		t.Fatalf("concise result=%q", got)
+	}
+	got := conciseResult(strings.Repeat("🐈", 20), 10)
+	if len([]rune(got)) != 10 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("truncated result=%q runes=%d", got, len([]rune(got)))
 	}
 }
 

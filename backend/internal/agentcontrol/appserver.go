@@ -181,8 +181,8 @@ func (s *AppServer) StartThread(ctx context.Context, cwd, skillPath string) (str
 		} `json:"thread"`
 	}
 	if err := s.Call(ctx, "thread/start", map[string]any{
-		"cwd": cwd, "approvalPolicy": "on-request", "permissions": ":workspace",
-		"runtimeWorkspaceRoots": []string{cwd}, "serviceName": "rust-meow-whatsapp",
+		"cwd": cwd, "approvalPolicy": "never", "permissions": ":danger-full-access",
+		"serviceName": "rust-meow-whatsapp",
 	}, &response); err != nil {
 		return "", err
 	}
@@ -203,12 +203,11 @@ func (s *AppServer) StartTurn(ctx context.Context, threadID, cwd, prompt, skillP
 		} `json:"turn"`
 	}
 	params := map[string]any{
-		"threadId":              threadID,
-		"input":                 input,
-		"cwd":                   cwd,
-		"approvalPolicy":        "on-request",
-		"permissions":           ":workspace",
-		"runtimeWorkspaceRoots": []string{cwd},
+		"threadId":       threadID,
+		"input":          input,
+		"cwd":            cwd,
+		"approvalPolicy": "never",
+		"permissions":    ":danger-full-access",
 	}
 	turnCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
