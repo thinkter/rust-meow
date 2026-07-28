@@ -1066,6 +1066,24 @@ func success(result any) *bridgev1.RpcResponse {
 		response.Result = value
 	case *bridgev1.RpcResponse_RepairLocalCache:
 		response.Result = value
+	case *bridgev1.RpcResponse_AgentControlState:
+		response.Result = value
+	case *bridgev1.RpcResponse_SaveAgentSettings:
+		response.Result = value
+	case *bridgev1.RpcResponse_SaveAgentWorkspace:
+		response.Result = value
+	case *bridgev1.RpcResponse_DeleteAgentWorkspace:
+		response.Result = value
+	case *bridgev1.RpcResponse_SetAgentControlChat:
+		response.Result = value
+	case *bridgev1.RpcResponse_SaveAgentGrant:
+		response.Result = value
+	case *bridgev1.RpcResponse_DeleteAgentGrant:
+		response.Result = value
+	case *bridgev1.RpcResponse_InterruptAgentRun:
+		response.Result = value
+	case *bridgev1.RpcResponse_ResolveAgentApproval:
+		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageImage:
 		response.Result = value
 	case *bridgev1.RpcResponse_GetMessageAttachment:

@@ -158,7 +158,7 @@ func TestMediaJobAdmissionIsBounded(t *testing.T) {
 	}
 }
 
-func TestSuccessWrapsPollAndPinResponses(t *testing.T) {
+func TestSuccessWrapsExtendedResponses(t *testing.T) {
 	tests := []struct {
 		name   string
 		result any
@@ -167,6 +167,15 @@ func TestSuccessWrapsPollAndPinResponses(t *testing.T) {
 		{"vote poll", &bridgev1.RpcResponse_VotePoll{VotePoll: &bridgev1.VotePollResponse{}}},
 		{"set message pin", &bridgev1.RpcResponse_SetMessagePin{SetMessagePin: &bridgev1.SetMessagePinResponse{}}},
 		{"list pinned messages", &bridgev1.RpcResponse_ListPinnedMessages{ListPinnedMessages: &bridgev1.ListPinnedMessagesResponse{}}},
+		{"agent control state", &bridgev1.RpcResponse_AgentControlState{AgentControlState: &bridgev1.GetAgentControlStateResponse{}}},
+		{"save agent settings", &bridgev1.RpcResponse_SaveAgentSettings{SaveAgentSettings: &bridgev1.SaveAgentSettingsResponse{}}},
+		{"save agent workspace", &bridgev1.RpcResponse_SaveAgentWorkspace{SaveAgentWorkspace: &bridgev1.SaveAgentWorkspaceResponse{}}},
+		{"delete agent workspace", &bridgev1.RpcResponse_DeleteAgentWorkspace{DeleteAgentWorkspace: &bridgev1.DeleteAgentWorkspaceResponse{}}},
+		{"set agent control chat", &bridgev1.RpcResponse_SetAgentControlChat{SetAgentControlChat: &bridgev1.SetAgentControlChatResponse{}}},
+		{"save agent grant", &bridgev1.RpcResponse_SaveAgentGrant{SaveAgentGrant: &bridgev1.SaveAgentGrantResponse{}}},
+		{"delete agent grant", &bridgev1.RpcResponse_DeleteAgentGrant{DeleteAgentGrant: &bridgev1.DeleteAgentGrantResponse{}}},
+		{"interrupt agent run", &bridgev1.RpcResponse_InterruptAgentRun{InterruptAgentRun: &bridgev1.InterruptAgentRunResponse{}}},
+		{"resolve agent approval", &bridgev1.RpcResponse_ResolveAgentApproval{ResolveAgentApproval: &bridgev1.ResolveAgentApprovalResponse{}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
