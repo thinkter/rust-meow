@@ -1,5 +1,6 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
+  Files,
   MessageCircle,
   Search,
   Settings,
@@ -26,6 +27,8 @@ import {
 } from "./components/Screens";
 import { IconButton } from "./components/Primitives";
 import { ThemeIcon } from "./components/ThemeIcon";
+import { listenForFileDrops } from "./lib/bridge";
+import { classifyDroppedFiles } from "./lib/file-drop";
 
 export default function App() {
   const model = createAppModel();
@@ -39,6 +42,9 @@ export default function App() {
   }
   let searchInput: HTMLInputElement | undefined;
   const [spotlightOpen, setSpotlightOpen] = createSignal(false);
+  const [fileDropActive, setFileDropActive] = createSignal(false);
+  let unlistenFileDrops: (() => void) | undefined;
+  let disposed = false;
 
   onMount(() => {
     void actions.bootstrap();
@@ -52,8 +58,33 @@ export default function App() {
     // search input had focus, so this cannot be a component-scoped handler.
     window.addEventListener("keyup", handleGlobalKeyUp, true);
     window.addEventListener("blur", handleBlur);
+    void listenForFileDrops((event) => {
+      if (event.type === "enter") {
+        setFileDropActive(state.screen === "chats" && Boolean(state.selectedChatId));
+        return;
+      }
+      setFileDropActive(false);
+      if (event.type !== "drop" || state.screen !== "chats" || event.paths.length === 0) return;
+      if (!state.selectedChatId) {
+        actions.notifyError(new Error("Select a chat before dropping files."));
+        return;
+      }
+      const batch = classifyDroppedFiles(event.paths);
+      actions.requestFileSend(
+        event.paths,
+        batch.mode,
+        batch.attachmentKind,
+        false,
+        state.selectedChatId,
+      );
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenFileDrops = unlisten;
+    }).catch(actions.notifyError);
   });
   onCleanup(() => {
+    disposed = true;
+    unlistenFileDrops?.();
     actions.dispose();
     window.removeEventListener("keydown", handleGlobalKeyDown, true);
     window.removeEventListener("keyup", handleGlobalKeyUp, true);
@@ -139,6 +170,18 @@ export default function App() {
       <ImageViewer model={model} />
       <ForwardDialog model={model} />
       <FileSendDialog model={model} />
+      <Show when={fileDropActive()}>
+        <div class="file-drop-overlay" role="status" aria-live="polite">
+          <div class="file-drop-card">
+            <Files size={32} />
+            <strong>Drop files to review</strong>
+            <span>
+              Nothing will be sent until you confirm
+              {actions.selectedChat()?.title ? ` for ${actions.selectedChat()!.title}` : ""}.
+            </span>
+          </div>
+        </div>
+      </Show>
       <LogoutDialog model={model} />
       <Toasts model={model} />
     </>
