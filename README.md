@@ -6,6 +6,9 @@ owns presentation and virtualized lists; the Tauri Rust core owns the typed
 desktop boundary; the Go sidecar remains the sole owner of WhatsApp state,
 history reduction, media, and the durable databases.
 
+<img width="1912" height="1160" alt="rust-meow-showcase-redacted" src="https://github.com/user-attachments/assets/dfd4818f-f273-443c-a701-8c7873359ce0" />
+
+
 The Tauri app under `tauri/` is the primary desktop on this branch. The GPUI
 implementation under `desktop/` remains available as the behavioral reference
 during migration. This is still a private-testing build, not a production-ready
