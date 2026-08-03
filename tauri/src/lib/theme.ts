@@ -167,6 +167,40 @@ const emerald: ThemeTokens = {
   "quote-bar": "#00b884",
 };
 
+const rustRed: ThemeTokens = {
+  ...vercelDark,
+  "bg-app": "#12090b",
+  "bg-panel": "#190c0f",
+  "bg-elevated": "#211014",
+  "bg-hover": "#2b151a",
+  "bg-active": "#381b21",
+  "bg-input": "#160a0d",
+  "bg-overlay": "rgba(18, 5, 8, 0.78)",
+  border: "#3c1c23",
+  "border-strong": "#61303a",
+  "border-focus": "#ff5a65",
+  fg: "#f7edef",
+  "fg-muted": "#caaeb3",
+  "fg-subtle": "#96777d",
+  "fg-inverted": "#1a090c",
+  accent: "#e5484d",
+  "accent-hover": "#ff5a65",
+  "accent-fg": "#ffffff",
+  "accent-soft": "rgba(229, 72, 77, 0.18)",
+  "bubble-in-bg": "#281318",
+  "bubble-in-fg": "#f7edef",
+  "bubble-out-bg": "#9f1239",
+  "bubble-out-fg": "#ffffff",
+  "quote-bar": "#ff5a65",
+  success: "#45d483",
+  warning: "#f7b955",
+  danger: "#ff7a82",
+  info: "#79b8ff",
+  "shadow-sm": "0 1px 2px rgba(8, 0, 2, 0.52)",
+  "shadow-md": "0 4px 16px rgba(8, 0, 2, 0.58)",
+  "shadow-lg": "0 16px 48px rgba(8, 0, 2, 0.68)",
+};
+
 const throwbackGraphite: ThemeTokens = {
   "bg-app": "#292929",
   "bg-panel": "#3b3b3b",
@@ -241,6 +275,7 @@ export const BUILTIN_THEMES: readonly Theme[] = [
   { id: "vercel-mono", name: "Vercel Mono", appearance: "dark", visualStyle: "modern", builtin: true, tokens: vercelMono },
   { id: "midnight", name: "Midnight", appearance: "dark", visualStyle: "modern", builtin: true, tokens: midnight },
   { id: "emerald", name: "Emerald", appearance: "dark", visualStyle: "modern", builtin: true, tokens: emerald },
+  { id: "rust-red", name: "Rust Red", appearance: "dark", visualStyle: "modern", builtin: true, tokens: rustRed },
 ];
 
 export const DEFAULT_THEME_ID = "vercel-dark";
