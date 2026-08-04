@@ -71,13 +71,11 @@ import {
   writeRecentChats,
 } from "./app-helpers";
 import {
-  closeNewTabInWorkspace,
   closeTabInWorkspace,
   conversationsToEvict,
   cycleSwitcher as cycleSwitcherHighlight,
   emptyPane,
   moveTabBetweenPanes,
-  openNewTab as openNewWorkspaceTab,
   openSwitcher as buildSwitcher,
   openTab,
   paneContainingChat,
@@ -1033,7 +1031,6 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     setState("panes", (candidate) => candidate.id === paneId, {
       tabChatIds: pane.tabChatIds,
       activeChatId: pane.activeChatId,
-      newTabOpen: pane.newTabOpen,
     });
   }
 
@@ -1050,12 +1047,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
    * replaces the active slot so sidebar clicks do not pile up tabs — use
    * `openInNewTab` to open deliberately alongside the current tab.
    */
-  async function selectChat(
-    chatId: string,
-    aroundMessageId = "",
-    paneId = state.focusedPaneId,
-    replaceNewTab = true,
-  ) {
+  async function selectChat(chatId: string, aroundMessageId = "", paneId = state.focusedPaneId) {
     // Message windows are chat-scoped while scroll restoration is pane-scoped.
     // Focus an existing owner pane instead of duplicating a chat and letting an
     // exact pin/search target replace both panes' shared window.
@@ -1066,7 +1058,7 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     const alreadyHydrated = Boolean(state.conversations[chatId]);
     stopTyping();
     batch(() => {
-      writePane(targetPaneId, replaceNewTab ? selectTab(pane, chatId) : openTab(pane, chatId));
+      writePane(targetPaneId, selectTab(pane, chatId));
       setState("focusedPaneId", targetPaneId);
       syncSelectedChatId();
       setState("chatInfoOpen", false);
@@ -1107,42 +1099,6 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
   function closeChat(paneId = state.focusedPaneId) {
     const pane = state.panes.find((candidate) => candidate.id === paneId);
     if (pane?.activeChatId) closeTab(pane.activeChatId, paneId);
-    else if (pane?.newTabOpen) closeNewTab(paneId);
-  }
-
-  /** Create and focus the pane-local person/group picker tab. */
-  function openNewTab(paneId = state.focusedPaneId) {
-    const pane = state.panes.find((candidate) => candidate.id === paneId);
-    if (!pane) return;
-    clearSearch();
-    batch(() => {
-      writePane(paneId, openNewWorkspaceTab(pane));
-      setState("focusedPaneId", paneId);
-      syncSelectedChatId();
-      setState("chatInfoOpen", false);
-      setState("chatInfo", null);
-      setState("settingsOpen", false);
-    });
-    announceTabAction("New chat tab opened");
-    persistWorkspace();
-  }
-
-  /** Close a pane's person/group picker tab. */
-  function closeNewTab(paneId = state.focusedPaneId) {
-    const pane = state.panes.find((candidate) => candidate.id === paneId);
-    if (!pane?.newTabOpen) return;
-    const pickerWasActive = !pane.activeChatId;
-    const result = closeNewTabInWorkspace(state.panes, paneId);
-    if (pickerWasActive) clearSearch();
-    batch(() => {
-      setState("panes", reconcile(result.panes, { key: "id" }));
-      if (result.removedPaneId && state.focusedPaneId === result.removedPaneId) {
-        setState("focusedPaneId", state.panes[0]?.id ?? "");
-      }
-      syncSelectedChatId();
-    });
-    announceTabAction("New chat tab closed");
-    persistWorkspace();
   }
 
   async function openInNewTab(chatId: string, paneId = state.focusedPaneId) {
@@ -1319,16 +1275,23 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     });
   }
 
-  async function openContact(result: ContactSearchResult, paneId = state.focusedPaneId) {
+  async function openContact(
+    result: ContactSearchResult,
+    paneId = state.focusedPaneId,
+    openAsNewTab = false,
+  ) {
+    const openChat = (chatId: string) => openAsNewTab
+      ? openInNewTab(chatId, paneId)
+      : selectChat(chatId, "", paneId);
     if (result.chatId) {
-      await selectChat(result.chatId, "", paneId);
+      await openChat(result.chatId);
       return;
     }
     try {
       const response = await bridge.openContact(result.contactJid);
       if (!response.chat) throw new Error("The contact did not produce a chat");
       upsertChat(response.chat);
-      await selectChat(response.chat.id, "", paneId);
+      await openChat(response.chat.id);
     } catch (error) {
       toast(normalizeBridgeError(error).message);
     }
@@ -2739,8 +2702,6 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
       conversation,
       selectChat,
       closeChat,
-      openNewTab,
-      closeNewTab,
       openInNewTab,
       closeTab,
       moveTab,

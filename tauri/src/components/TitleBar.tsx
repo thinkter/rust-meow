@@ -48,7 +48,7 @@ const RESIZE_HANDLES: ReadonlyArray<{ cls: string; direction: ResizeDirection }>
  * two strips sit side by side, so neither pane's navigation disappears just
  * because focus moved across the divider.
  */
-export function TitleBar(props: { model: AppModel }) {
+export function TitleBar(props: { model: AppModel; onNewTab?: (paneId: string) => void }) {
   const { state, actions, prefActions } = props.model;
   const [maximized, setMaximized] = createSignal(false);
   let resizeFrame: number | undefined;
@@ -161,7 +161,15 @@ export function TitleBar(props: { model: AppModel }) {
         <div class="titlebar-main">
           <Show when={state.screen === "chats"}>
             <div class="titlebar-tabs">
-              <For each={state.panes}>{(pane) => <Tabs model={props.model} pane={pane} />}</For>
+              <For each={state.panes}>
+                {(pane) => (
+                  <Tabs
+                    model={props.model}
+                    pane={pane}
+                    onNewTab={() => props.onNewTab?.(pane.id)}
+                  />
+                )}
+              </For>
             </div>
           </Show>
           <div

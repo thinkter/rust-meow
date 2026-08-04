@@ -23,7 +23,7 @@ export function ChatSwitcher(props: { model: AppModel }) {
   }
 
   function commit(chatId: string) {
-    void actions.selectChat(chatId, "", state.focusedPaneId, false);
+    void actions.selectChat(chatId);
     actions.cancelSwitcher();
   }
 
