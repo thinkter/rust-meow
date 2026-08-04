@@ -1,6 +1,6 @@
 [package]
 name = "rust-meow-tauri"
-version = "0.1.0"
+version = "1.0.0"
 description = "A small, fast WhatsApp desktop client"
 authors = ["Rust Meow contributors"]
 edition = "2024"

@@ -161,7 +161,7 @@ class BrowserMockBridge implements BridgeApi {
   }
 
   async hello() {
-    return { backendVersion: "browser-mock 0.1.0", protocolVersion: PROTOCOL_VERSION };
+    return { backendVersion: "browser-mock 1.0.0", protocolVersion: PROTOCOL_VERSION };
   }
 
   async getAuthState() {
