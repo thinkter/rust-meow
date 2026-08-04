@@ -42,6 +42,7 @@ export default function App() {
   }
   let searchInput: HTMLInputElement | undefined;
   const [spotlightOpen, setSpotlightOpen] = createSignal(false);
+  const [newTabPaneId, setNewTabPaneId] = createSignal<string>();
   const [fileDropActive, setFileDropActive] = createSignal(false);
   let unlistenFileDrops: (() => void) | undefined;
   let disposed = false;
@@ -111,7 +112,7 @@ export default function App() {
           inert={Boolean(spotlightOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
           aria-hidden={spotlightOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
         >
-          <TitleBar model={model} />
+          <TitleBar model={model} onNewTab={openNewTabSpotlight} />
           <nav class="nav-rail" aria-label="Primary navigation">
             <div class="brand-mark" aria-label="Rust Meow">
               <ThemeIcon icon={MessageCircle} name="chat" size={22} />
@@ -163,7 +164,12 @@ export default function App() {
         </main>
       </Show>
       <ChatSwitcher model={model} />
-      <SpotlightSearch model={model} open={spotlightOpen()} onClose={() => setSpotlightOpen(false)} />
+      <SpotlightSearch
+        model={model}
+        open={spotlightOpen()}
+        newTabPaneId={newTabPaneId()}
+        onClose={closeSpotlight}
+      />
       <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {state.tabAnnouncement}
       </p>
@@ -199,7 +205,7 @@ export default function App() {
     }
     if (spotlightOpen()) {
       if (event.key === "Escape") {
-        setSpotlightOpen(false);
+        closeSpotlight();
         event.preventDefault();
       }
       return;
@@ -267,7 +273,32 @@ export default function App() {
     )) {
       return;
     }
-    if (!spotlightOpen()) actions.cancelSwitcher();
-    setSpotlightOpen((open) => !open);
+    if (spotlightOpen()) {
+      closeSpotlight();
+      return;
+    }
+    actions.cancelSwitcher();
+    setNewTabPaneId(undefined);
+    setSpotlightOpen(true);
+  }
+
+  function openNewTabSpotlight(paneId: string) {
+    if (
+      state.logoutConfirmation ||
+      state.imageViewer ||
+      state.forwardDialog ||
+      state.fileSendConfirmation
+    ) {
+      return;
+    }
+    actions.cancelSwitcher();
+    actions.focusPane(paneId);
+    setNewTabPaneId(paneId);
+    setSpotlightOpen(true);
+  }
+
+  function closeSpotlight() {
+    setSpotlightOpen(false);
+    setNewTabPaneId(undefined);
   }
 }

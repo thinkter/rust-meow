@@ -18,7 +18,7 @@ function focusSidebarSearch() {
 }
 
 /** One accessible tab strip with pointer and keyboard movement parity. */
-export function Tabs(props: { model: AppModel; pane: Pane }) {
+export function Tabs(props: { model: AppModel; pane: Pane; onNewTab: () => void }) {
   const { state, preferences, actions } = props.model;
 
   function chatFor(chatId: string) {
@@ -211,7 +211,12 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
             );
           }}
         </For>
-        <button type="button" class="tab-add" aria-label="Search chats to open a new tab" onClick={focusSidebarSearch}>
+        <button
+          type="button"
+          class="tab-add"
+          aria-label="Open a new chat tab"
+          onClick={props.onNewTab}
+        >
           <Plus size={15} />
         </button>
       </div>
