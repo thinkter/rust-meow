@@ -16,6 +16,8 @@ export interface Pane {
   tabChatIds: string[];
   /** Which tab is showing; empty when the pane has no tabs. */
   activeChatId: string;
+  /** A browser-style picker tab. Empty `activeChatId` means it is selected. */
+  newTabOpen?: true;
 }
 
 export interface Switcher {
@@ -50,9 +52,27 @@ export function uniqueChatPanes(panes: readonly Pane[]): Pane[] {
     });
     const activeChatId = tabChatIds.includes(pane.activeChatId)
       ? pane.activeChatId
-      : (tabChatIds[0] ?? "");
+      : pane.newTabOpen && !pane.activeChatId
+        ? ""
+        : (tabChatIds[0] ?? "");
     return { ...pane, tabChatIds, activeChatId };
   });
+}
+
+/** Open (or focus) the one contact/group picker tab owned by a pane. */
+export function openNewTab(pane: Pane): Pane {
+  return { ...pane, activeChatId: "", newTabOpen: true };
+}
+
+/** Close a pane's picker tab and focus the nearest real tab to its left. */
+export function closeNewTab(pane: Pane): Pane {
+  if (!pane.newTabOpen) return pane;
+  const withoutNewTab = { ...pane };
+  delete withoutNewTab.newTabOpen;
+  return {
+    ...withoutNewTab,
+    activeChatId: pane.activeChatId || pane.tabChatIds.at(-1) || "",
+  };
 }
 
 /**
@@ -63,12 +83,21 @@ export function uniqueChatPanes(panes: readonly Pane[]): Pane[] {
  * (`openTab`) does.
  */
 export function selectTab(pane: Pane, chatId: string): Pane {
+  const replacesNewTab = pane.newTabOpen && !pane.activeChatId;
   if (pane.tabChatIds.includes(chatId)) {
-    return { ...pane, activeChatId: chatId };
+    if (!replacesNewTab) return { ...pane, activeChatId: chatId };
+    const withoutNewTab = { ...pane };
+    delete withoutNewTab.newTabOpen;
+    return { ...withoutNewTab, activeChatId: chatId };
   }
   const activeIndex = pane.tabChatIds.indexOf(pane.activeChatId);
   if (activeIndex < 0) {
-    return { ...pane, tabChatIds: [...pane.tabChatIds, chatId], activeChatId: chatId };
+    if (!replacesNewTab) {
+      return { ...pane, tabChatIds: [...pane.tabChatIds, chatId], activeChatId: chatId };
+    }
+    const withoutNewTab = { ...pane };
+    delete withoutNewTab.newTabOpen;
+    return { ...withoutNewTab, tabChatIds: [...pane.tabChatIds, chatId], activeChatId: chatId };
   }
   const tabChatIds = [...pane.tabChatIds];
   tabChatIds[activeIndex] = chatId;
@@ -93,7 +122,7 @@ export function closeTab(pane: Pane, chatId: string): Pane {
   if (index < 0) return pane;
   const tabChatIds = pane.tabChatIds.filter((id) => id !== chatId);
   if (pane.activeChatId !== chatId) return { ...pane, tabChatIds };
-  const neighbour = tabChatIds[index] ?? tabChatIds[index - 1] ?? "";
+  const neighbour = tabChatIds[index] ?? (pane.newTabOpen ? "" : undefined) ?? tabChatIds[index - 1] ?? "";
   return { ...pane, tabChatIds, activeChatId: neighbour };
 }
 
@@ -155,6 +184,22 @@ export function closeTabInWorkspace(panes: readonly Pane[], chatId: string, pane
   const pane = panes[paneIndex]!;
   if (!pane.tabChatIds.includes(chatId)) return { panes: [...panes], removedPaneId: null };
   const closed = closeTab(pane, chatId);
+  if (closed.tabChatIds.length === 0 && !closed.newTabOpen && panes.length > 1) {
+    return { panes: panes.filter((candidate) => candidate.id !== paneId), removedPaneId: paneId };
+  }
+  return {
+    panes: panes.map((candidate) => (candidate.id === paneId ? closed : candidate)),
+    removedPaneId: null,
+  };
+}
+
+/** Close a picker tab, removing an otherwise-empty split pane just like a real tab. */
+export function closeNewTabInWorkspace(panes: readonly Pane[], paneId: string): CloseTabResult {
+  const paneIndex = panes.findIndex((pane) => pane.id === paneId);
+  if (paneIndex < 0) return { panes: [...panes], removedPaneId: null };
+  const pane = panes[paneIndex]!;
+  if (!pane.newTabOpen) return { panes: [...panes], removedPaneId: null };
+  const closed = closeNewTab(pane);
   if (closed.tabChatIds.length === 0 && panes.length > 1) {
     return { panes: panes.filter((candidate) => candidate.id !== paneId), removedPaneId: paneId };
   }
@@ -269,17 +314,30 @@ export interface WorkspaceSnapshot {
 
 function normalizePane(value: unknown): Pane | undefined {
   if (typeof value !== "object" || value === null) return undefined;
-  const candidate = value as { id?: unknown; tabChatIds?: unknown; activeChatId?: unknown };
+  const candidate = value as {
+    id?: unknown;
+    tabChatIds?: unknown;
+    activeChatId?: unknown;
+    newTabOpen?: unknown;
+  };
   if (typeof candidate.id !== "string" || !candidate.id) return undefined;
   if (!Array.isArray(candidate.tabChatIds)) return undefined;
   const tabChatIds = [
     ...new Set(candidate.tabChatIds.filter((id): id is string => typeof id === "string" && id.length > 0)),
   ];
+  const newTabOpen = candidate.newTabOpen === true;
   const activeChatId =
     typeof candidate.activeChatId === "string" && tabChatIds.includes(candidate.activeChatId)
       ? candidate.activeChatId
-      : (tabChatIds[0] ?? "");
-  return { id: candidate.id, tabChatIds, activeChatId };
+      : newTabOpen && candidate.activeChatId === ""
+        ? ""
+        : (tabChatIds[0] ?? "");
+  return {
+    id: candidate.id,
+    tabChatIds,
+    activeChatId,
+    ...(newTabOpen ? { newTabOpen: true as const } : {}),
+  };
 }
 
 /**

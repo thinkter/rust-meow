@@ -11,6 +11,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Conversation } from "./components/Conversation";
 import { TitleBar } from "./components/TitleBar";
 import { MemberPanel } from "./components/MemberPanel";
+import { NewChatPicker } from "./components/NewChatPicker";
 import { ChatSwitcher } from "./components/ChatSwitcher";
 import { SpotlightSearch } from "./components/SpotlightSearch";
 import { ChatInfoPanel, SettingsPanel } from "./components/Panels";
@@ -146,7 +147,14 @@ export default function App() {
                       onPointerDown={() => actions.focusPane(pane.id)}
                       onFocusIn={() => actions.focusPane(pane.id)}
                     >
-                      <Show when={pane.activeChatId} fallback={<EmptyConversation />}>
+                      <Show
+                        when={pane.activeChatId}
+                        fallback={
+                          <Show when={pane.newTabOpen} fallback={<EmptyConversation />}>
+                            <NewChatPicker model={model} paneId={pane.id} />
+                          </Show>
+                        }
+                      >
                         <Conversation model={model} chatId={pane.activeChatId} paneId={pane.id} />
                       </Show>
                     </div>

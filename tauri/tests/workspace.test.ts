@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  closeNewTabInWorkspace,
   closeTabInWorkspace,
   conversationsToEvict,
   cycleSwitcher,
   moveTabBetweenPanes,
   samePaneDropIndex,
   normalizeWorkspaceSnapshot,
+  openNewTab,
   openSwitcher,
   openTab,
   recentChatCandidates,
@@ -25,6 +27,37 @@ test("opening a tab that is already open focuses it instead of duplicating it", 
   assert.deepEqual(first, { id: "pane-1", tabChatIds: ["a", "b"], activeChatId: "b" });
   const second = openTab(first, "a");
   assert.deepEqual(second, { id: "pane-1", tabChatIds: ["a", "b"], activeChatId: "a" });
+});
+
+test("opening a new tab adds and focuses one picker per pane", () => {
+  const first = openNewTab(pane("pane-1", ["a"], "a"));
+  assert.deepEqual(first, {
+    id: "pane-1",
+    tabChatIds: ["a"],
+    activeChatId: "",
+    newTabOpen: true,
+  });
+  assert.deepEqual(openNewTab(first), first);
+});
+
+test("choosing a chat replaces the active picker tab", () => {
+  const result = selectTab(openNewTab(pane("pane-1", ["a"], "a")), "b");
+  assert.deepEqual(result, { id: "pane-1", tabChatIds: ["a", "b"], activeChatId: "b" });
+});
+
+test("choosing an existing chat closes the picker instead of duplicating the chat", () => {
+  const result = selectTab(openNewTab(pane("pane-1", ["a", "b"], "a")), "a");
+  assert.deepEqual(result, { id: "pane-1", tabChatIds: ["a", "b"], activeChatId: "a" });
+});
+
+test("focusing an existing real tab leaves an inactive picker tab open", () => {
+  const result = openTab(openNewTab(pane("pane-1", ["a", "b"], "a")), "a");
+  assert.deepEqual(result, {
+    id: "pane-1",
+    tabChatIds: ["a", "b"],
+    activeChatId: "a",
+    newTabOpen: true,
+  });
 });
 
 test("selecting an already-open tab focuses it without touching the tab list", () => {
@@ -64,6 +97,42 @@ test("closing the last tab of the second pane removes that pane", () => {
   assert.equal(result.removedPaneId, "pane-2");
   assert.equal(result.panes.length, 1);
   assert.equal(result.panes[0]!.id, "pane-1");
+});
+
+test("closing the last real tab keeps a picker-only split pane alive", () => {
+  const panes = [
+    pane("pane-1", ["a"], "a"),
+    openNewTab(pane("pane-2", ["b"], "b")),
+  ];
+  const result = closeTabInWorkspace(panes, "b", "pane-2");
+  assert.equal(result.removedPaneId, null);
+  assert.deepEqual(result.panes[1], {
+    id: "pane-2",
+    tabChatIds: [],
+    activeChatId: "",
+    newTabOpen: true,
+  });
+});
+
+test("closing a picker restores its left-hand chat", () => {
+  const result = closeNewTabInWorkspace(
+    [openNewTab(pane("pane-1", ["a", "b"], "a"))],
+    "pane-1",
+  );
+  assert.deepEqual(result.panes[0], {
+    id: "pane-1",
+    tabChatIds: ["a", "b"],
+    activeChatId: "b",
+  });
+});
+
+test("closing a picker-only second pane removes that pane", () => {
+  const result = closeNewTabInWorkspace(
+    [pane("pane-1", ["a"], "a"), openNewTab(pane("pane-2", []))],
+    "pane-2",
+  );
+  assert.equal(result.removedPaneId, "pane-2");
+  assert.deepEqual(result.panes, [pane("pane-1", ["a"], "a")]);
 });
 
 test("closing the last tab of the only pane leaves an empty pane, not zero panes", () => {
@@ -237,6 +306,19 @@ test("normalizing a workspace snapshot accepts a well-formed payload and repairs
   });
   assert.deepEqual(snapshot?.panes[0], { id: "pane-1", tabChatIds: ["a", "b"], activeChatId: "a" });
   assert.equal(snapshot?.focusedPaneId, "pane-1");
+});
+
+test("normalizing a workspace snapshot restores an active new-chat picker", () => {
+  const snapshot = normalizeWorkspaceSnapshot({
+    panes: [{ id: "pane-1", tabChatIds: ["a"], activeChatId: "", newTabOpen: true }],
+    focusedPaneId: "pane-1",
+  });
+  assert.deepEqual(snapshot?.panes[0], {
+    id: "pane-1",
+    tabChatIds: ["a"],
+    activeChatId: "",
+    newTabOpen: true,
+  });
 });
 
 test("normalizing a workspace gives each chat one pane-local viewport", () => {

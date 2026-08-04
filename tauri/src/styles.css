@@ -1014,6 +1014,136 @@ html[data-appearance="light"] .avatar {
   background: var(--bg-app);
 }
 
+/* ── New-chat tab ── */
+
+.new-chat-picker {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  background: var(--bg-app);
+}
+
+.new-chat-picker-header {
+  width: min(680px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: calc(36px * var(--scale)) 0 calc(18px * var(--scale));
+}
+
+.new-chat-picker-title {
+  display: flex;
+  align-items: center;
+  gap: calc(13px * var(--scale));
+}
+
+.new-chat-picker-icon {
+  display: grid;
+  width: calc(48px * var(--scale));
+  height: calc(48px * var(--scale));
+  flex: none;
+  place-items: center;
+  border-radius: var(--radius-lg);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.new-chat-picker-title h2,
+.new-chat-picker-title p {
+  margin: 0;
+}
+
+.new-chat-picker-title h2 {
+  font-size: calc(20px * var(--scale));
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.new-chat-picker-title p {
+  margin-top: calc(3px * var(--scale));
+  color: var(--fg-subtle);
+  font-size: calc(13px * var(--scale));
+}
+
+.new-chat-search {
+  height: calc(40px * var(--scale));
+  margin-top: calc(20px * var(--scale));
+  background: var(--bg-panel);
+}
+
+.new-chat-picker-results {
+  width: min(680px, calc(100% - 48px));
+  min-height: 0;
+  margin: 0 auto;
+  padding-bottom: calc(28px * var(--scale));
+  overflow-y: auto;
+}
+
+.new-chat-picker-section + .new-chat-picker-section {
+  margin-top: calc(18px * var(--scale));
+}
+
+.new-chat-picker-section h3 {
+  margin: 0;
+  padding: calc(8px * var(--scale)) calc(10px * var(--scale));
+  color: var(--fg-subtle);
+  font-size: calc(11px * var(--scale));
+  font-weight: 650;
+  letter-spacing: 0.65px;
+  text-transform: uppercase;
+}
+
+.new-chat-picker-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: calc(12px * var(--scale));
+  padding: calc(9px * var(--scale)) calc(10px * var(--scale));
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.new-chat-picker-row:hover,
+.new-chat-picker-row:focus-visible {
+  outline: 0;
+  background: var(--bg-hover);
+}
+
+.new-chat-picker-row:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.new-chat-picker-copy {
+  display: block;
+  min-width: 0;
+  flex: 1;
+}
+
+.new-chat-picker-copy strong,
+.new-chat-picker-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-chat-picker-copy strong {
+  font-size: calc(13.5px * var(--scale));
+  font-weight: 550;
+}
+
+.new-chat-picker-copy span {
+  margin-top: calc(3px * var(--scale));
+  color: var(--fg-subtle);
+  font-size: calc(12px * var(--scale));
+}
+
 /* A faint dot lattice instead of a photographic pattern — token-driven so it
    works in every appearance without a separate light/dark image. */
 .conversation-shell::before {

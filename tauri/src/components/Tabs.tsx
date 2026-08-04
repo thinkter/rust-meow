@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { Plus, X } from "lucide-solid";
+import { MessageCircleMore, Plus, X } from "lucide-solid";
 import type { AppModel, Pane } from "../state/app";
 import { tabKeyboardCommand } from "../state/tab-keyboard";
 import { samePaneDropIndex } from "../state/workspace";
@@ -16,6 +16,8 @@ const DRAG_MIME = "application/x-rust-meow-tab";
 function focusSidebarSearch() {
   document.querySelector<HTMLInputElement>(".search-field input")?.focus();
 }
+
+const NEW_TAB_KEY = "__new-chat-picker__";
 
 /** One accessible tab strip with pointer and keyboard movement parity. */
 export function Tabs(props: { model: AppModel; pane: Pane }) {
@@ -65,8 +67,11 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
     actions.moveTab(payload.chatId, payload.fromPaneId, props.pane.id, index);
   }
 
-  function focusTab(paneId: string, chatId: string) {
-    requestAnimationFrame(() => document.getElementById(`tab-${paneId}-${chatId}`)?.focus());
+  function focusTab(paneId: string, tabKey: string) {
+    const id = tabKey === NEW_TAB_KEY
+      ? `tab-${paneId}-new-chat`
+      : `tab-${paneId}-${tabKey}`;
+    requestAnimationFrame(() => document.getElementById(id)?.focus());
   }
 
   function closeAndRestoreFocus(chatId: string) {
@@ -76,24 +81,38 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
       ?? state.panes.find((candidate) => candidate.id === state.focusedPaneId)
       ?? state.panes[0];
     if (remainingPane?.activeChatId) focusTab(remainingPane.id, remainingPane.activeChatId);
+    else if (remainingPane?.newTabOpen) focusTab(remainingPane.id, NEW_TAB_KEY);
     else requestAnimationFrame(focusSidebarSearch);
     actions.announceTabAction(`${title} closed`);
   }
 
+  function closeNewAndRestoreFocus() {
+    actions.closeNewTab(props.pane.id);
+    const remainingPane = state.panes.find((candidate) => candidate.id === props.pane.id)
+      ?? state.panes.find((candidate) => candidate.id === state.focusedPaneId)
+      ?? state.panes[0];
+    if (remainingPane?.activeChatId) focusTab(remainingPane.id, remainingPane.activeChatId);
+    else requestAnimationFrame(focusSidebarSearch);
+  }
+
   function moveSelection(event: KeyboardEvent, currentChatId: string) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return false;
-    const tabs = props.pane.tabChatIds;
+    const tabs = [
+      ...props.pane.tabChatIds,
+      ...(props.pane.newTabOpen ? [NEW_TAB_KEY] : []),
+    ];
     if (tabs.length === 0) return true;
-    const current = Math.max(0, tabs.indexOf(currentChatId));
+    const current = Math.max(0, tabs.indexOf(currentChatId || NEW_TAB_KEY));
     const nextIndex = event.key === "Home"
       ? 0
       : event.key === "End"
         ? tabs.length - 1
         : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-    const nextChatId = tabs[nextIndex];
-    if (nextChatId) {
-      void actions.selectChat(nextChatId, "", props.pane.id);
-      focusTab(props.pane.id, nextChatId);
+    const nextTabKey = tabs[nextIndex];
+    if (nextTabKey) {
+      if (nextTabKey === NEW_TAB_KEY) actions.openNewTab(props.pane.id);
+      else void actions.selectChat(nextTabKey, "", props.pane.id, false);
+      focusTab(props.pane.id, nextTabKey);
     }
     event.preventDefault();
     return true;
@@ -179,7 +198,7 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
                   aria-controls={`tabpanel-${props.pane.id}-${chatId}`}
                   aria-label={`${chatName(chatId)}${(chat()?.unreadCount ?? 0) > 0 ? `, ${chat()!.unreadCount} unread` : ""}`}
                   aria-keyshortcuts="Delete Alt+Shift+ArrowLeft Alt+Shift+ArrowRight Control+Shift+ArrowLeft Control+Shift+ArrowRight"
-                  onClick={() => void actions.selectChat(chatId, "", props.pane.id)}
+                  onClick={() => void actions.selectChat(chatId, "", props.pane.id, false)}
                   onKeyDown={(event) => {
                     if (!handleAccessibleCommand(event, chatId)) moveSelection(event, chatId);
                   }}
@@ -211,7 +230,50 @@ export function Tabs(props: { model: AppModel; pane: Pane }) {
             );
           }}
         </For>
-        <button type="button" class="tab-add" aria-label="Search chats to open a new tab" onClick={focusSidebarSearch}>
+        <Show when={props.pane.newTabOpen}>
+          <div class={`tab-slot ${!props.pane.activeChatId ? "active" : ""}`}>
+            <button
+              type="button"
+              id={`tab-${props.pane.id}-new-chat`}
+              class={`tab ${!props.pane.activeChatId ? "active" : ""}`}
+              role="tab"
+              tabIndex={!props.pane.activeChatId ? 0 : -1}
+              aria-selected={!props.pane.activeChatId}
+              aria-controls={`tabpanel-${props.pane.id}-new-chat`}
+              aria-label="New chat"
+              aria-keyshortcuts="Delete"
+              onClick={() => actions.openNewTab(props.pane.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Delete") {
+                  event.preventDefault();
+                  closeNewAndRestoreFocus();
+                } else {
+                  moveSelection(event, "");
+                }
+              }}
+            >
+              <MessageCircleMore class="tab-avatar" size={16 * preferences.uiScale} />
+              <span class="tab-title">New chat</span>
+            </button>
+            <button
+              type="button"
+              class="tab-close"
+              aria-label="Close new chat"
+              onClick={(event) => {
+                event.stopPropagation();
+                closeNewAndRestoreFocus();
+              }}
+            >
+              <X size={13} />
+            </button>
+          </div>
+        </Show>
+        <button
+          type="button"
+          class="tab-add"
+          aria-label="Open a new chat tab"
+          onClick={() => actions.openNewTab(props.pane.id)}
+        >
           <Plus size={15} />
         </button>
       </div>
