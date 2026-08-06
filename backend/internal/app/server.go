@@ -286,7 +286,7 @@ func (s *Server) dispatch(request *bridgev1.RpcRequest) (any, error) {
 		if req.Hello.GetMinimumProtocolVersion() > ProtocolVersion || req.Hello.GetMaximumProtocolVersion() < ProtocolVersion {
 			return nil, fmt.Errorf("protocol v%d is not supported by desktop", ProtocolVersion)
 		}
-		return &bridgev1.RpcResponse_Hello{Hello: &bridgev1.HelloResponse{BackendVersion: "1.0.0", ProtocolVersion: ProtocolVersion}}, nil
+		return &bridgev1.RpcResponse_Hello{Hello: &bridgev1.HelloResponse{BackendVersion: "0.1.0", ProtocolVersion: ProtocolVersion}}, nil
 	case *bridgev1.RpcRequest_GetAuthState:
 		return &bridgev1.RpcResponse_AuthState{AuthState: &bridgev1.AuthStateResponse{Paired: s.wa.IsPaired(), LoggedIn: s.wa.IsConnected(), OwnUserId: s.wa.OwnID(), ConnectionState: authConnectionState(s.wa)}}, nil
 	case *bridgev1.RpcRequest_Reconnect:
