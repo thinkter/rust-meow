@@ -1442,6 +1442,97 @@ html[data-appearance="light"] .message-sender {
   line-height: 1.4;
 }
 
+.message-mutation-badge {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: calc(5px * var(--scale));
+  margin-bottom: calc(7px * var(--scale));
+  padding: calc(4px * var(--scale)) calc(7px * var(--scale));
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+  font-size: calc(10.5px * var(--scale));
+  line-height: 1.2;
+}
+
+.message-mutation-badge svg {
+  flex: none;
+}
+
+.message-mutation-badge span {
+  font-weight: 750;
+}
+
+.message-mutation-badge strong {
+  padding-left: calc(5px * var(--scale));
+  border-left: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  font-size: calc(9.5px * var(--scale));
+  font-weight: 600;
+  opacity: 0.82;
+}
+
+.message-mutation-badge.edited {
+  border-color: color-mix(in srgb, var(--warning) 55%, transparent);
+  background: color-mix(in srgb, var(--warning) 13%, transparent);
+  color: color-mix(in srgb, var(--warning) 82%, var(--fg));
+}
+
+.message-history-unavailable {
+  margin: calc(5px * var(--scale)) 0 0;
+  color: var(--fg-subtle);
+  font-size: calc(10.5px * var(--scale));
+  font-style: italic;
+}
+
+.message-history-toggle {
+  display: block;
+  margin-top: calc(6px * var(--scale));
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: calc(11px * var(--scale));
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.message-history-toggle:hover {
+  text-decoration: underline;
+}
+
+.message-history {
+  display: grid;
+  gap: calc(6px * var(--scale));
+  margin-top: calc(7px * var(--scale));
+  padding-top: calc(7px * var(--scale));
+  border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.message-history-entry {
+  padding: calc(7px * var(--scale));
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.message-history-entry > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(10px * var(--scale));
+  margin-bottom: calc(5px * var(--scale));
+  color: var(--fg-subtle);
+  font-size: calc(10px * var(--scale));
+}
+
+.message-history-entry > header strong {
+  color: var(--fg-muted);
+}
+
 .whatsapp-line,
 .whatsapp-blank-line,
 .whatsapp-code-block {
@@ -2654,6 +2745,44 @@ html[data-appearance="light"] .message-sender {
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;
+}
+
+.advanced-settings-intro,
+.advanced-settings-note {
+  margin: calc(6px * var(--scale)) calc(20px * var(--scale)) calc(12px * var(--scale));
+  color: var(--fg-subtle);
+  font-size: calc(11px * var(--scale));
+  line-height: 1.45;
+}
+
+.advanced-settings-disclosure {
+  margin: calc(12px * var(--scale)) calc(20px * var(--scale));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.advanced-settings-disclosure > summary {
+  padding: calc(12px * var(--scale)) calc(14px * var(--scale));
+  color: var(--fg-muted);
+  font-size: calc(12px * var(--scale));
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.advanced-settings-disclosure[open] > summary {
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+}
+
+.advanced-settings-disclosure .setting-row {
+  padding-right: calc(14px * var(--scale));
+  padding-left: calc(14px * var(--scale));
+}
+
+.advanced-settings-disclosure .advanced-settings-note {
+  margin-right: calc(14px * var(--scale));
+  margin-left: calc(14px * var(--scale));
 }
 
 .setting-row {

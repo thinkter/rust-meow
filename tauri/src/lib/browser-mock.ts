@@ -15,7 +15,7 @@ import type {
 } from "./bridge";
 
 const OWN_USER_ID = "919900001111@s.whatsapp.net";
-const PROTOCOL_VERSION = 21;
+const PROTOCOL_VERSION = 22;
 const STARTED_AT = Date.now();
 const MINUTE = 60_000;
 const DAY = 86_400_000;
@@ -1054,6 +1054,7 @@ function makeMessage(input: {
     replyToChatId: input.replyToChatId ?? "",
     forwardingScore: 0,
     mentionTexts: [],
+    revisions: [],
     content: input.content,
   };
 }

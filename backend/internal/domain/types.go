@@ -55,6 +55,16 @@ type Message struct {
 	Location        *Location
 	LinkPreview     *LinkPreview
 	Poll            *Poll
+	// Revisions contains durable snapshots captured immediately before a
+	// newer edit or the first revoke replaces the visible message. It is not
+	// serialized into another revision snapshot, which keeps the history flat.
+	Revisions []MessageRevision `json:"-"`
+}
+
+type MessageRevision struct {
+	ReplacedAt time.Time
+	Reason     string
+	Message    Message
 }
 
 type Poll struct {

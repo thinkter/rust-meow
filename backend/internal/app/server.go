@@ -27,7 +27,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const ProtocolVersion uint32 = 21
+const ProtocolVersion uint32 = 22
 const maxTextBytes = 65_536
 const maxConcurrentMediaJobs = 4
 const maxMediaJobsInFlight = 32
@@ -1302,6 +1302,13 @@ func (s *Server) wireMessageWithIdentities(m domain.Message, identities map[stri
 		// Only advertise files that still exist so the desktop asks us to fetch
 		// an evicted image again when its virtualized row becomes visible.
 		image.LocalPath, image.ThumbnailPath = s.wa.CachedImagePaths(m.ChatJID, m.ID, image.MimeType)
+	}
+	for _, revision := range m.Revisions {
+		message.Revisions = append(message.Revisions, &bridgev1.MessageRevision{
+			ReplacedAtMs: revision.ReplacedAt.UnixMilli(),
+			Reason:       revision.Reason,
+			Snapshot:     s.wireMessageWithIdentities(revision.Message, identities),
+		})
 	}
 	if attachment := message.GetAttachment(); attachment != nil && s.wa != nil {
 		attachment.LocalPath = s.wa.CachedAttachmentPath(m.ChatJID, m.ID, m.Attachment)

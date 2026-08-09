@@ -22,7 +22,7 @@ test("poll reducer retracts and restores a complete vote intent", () => {
 });
 
 test("an older backend update cannot overwrite a newer pending intent", () => {
-  const message = (content: PollContent): Message => ({ id: "poll", chatId: "chat", senderId: "owner", senderName: "Owner", fromMe: false, timestampMs: 1, status: 3, edited: false, revoked: false, expiresAtMs: 0, senderPhoneNumber: "", senderAvatarPath: "", reactions: [], replyToMessageId: "", replyToChatId: "", content: { poll: content } });
+  const message = (content: PollContent): Message => ({ id: "poll", chatId: "chat", senderId: "owner", senderName: "Owner", fromMe: false, timestampMs: 1, status: 3, edited: false, revoked: false, expiresAtMs: 0, senderPhoneNumber: "", senderAvatarPath: "", reactions: [], replyToMessageId: "", replyToChatId: "", forwardingScore: 0, mentionTexts: [], revisions: [], content: { poll: content } });
   const current = message(optimisticPollVote(poll(), ["Sushi"]));
   const stale = message(poll());
   const merged = preservePendingPollIntent(current, stale, true);

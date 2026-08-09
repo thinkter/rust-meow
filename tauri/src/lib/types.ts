@@ -330,7 +330,14 @@ export interface Message {
   replyToChatId: string;
   forwardingScore: number;
   mentionTexts: string[];
+  revisions: MessageRevision[];
   content: MessageContent | null;
+}
+
+export interface MessageRevision {
+  replacedAtMs: number;
+  reason: "edited" | "deleted" | string;
+  snapshot: Message | null;
 }
 
 export interface ListChatsResponse {

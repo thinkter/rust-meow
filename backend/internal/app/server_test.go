@@ -404,6 +404,29 @@ func TestWireMessageIncludesReplyTarget(t *testing.T) {
 	}
 }
 
+func TestWireMessageIncludesSavedVersionHistory(t *testing.T) {
+	s := &Server{ctx: context.Background()}
+	replacedAt := time.UnixMilli(2_000)
+	message := s.wireMessage(domain.Message{
+		ID: "message", ChatJID: "chat", Kind: "revoked", Revoked: true,
+		Revisions: []domain.MessageRevision{{
+			ReplacedAt: replacedAt,
+			Reason:     "deleted",
+			Message:    domain.Message{ID: "message", ChatJID: "chat", Kind: "text", Text: "preserved original"},
+		}},
+	})
+	if len(message.GetRevisions()) != 1 {
+		t.Fatalf("revisions=%+v", message.GetRevisions())
+	}
+	revision := message.GetRevisions()[0]
+	if revision.GetReason() != "deleted" || revision.GetReplacedAtMs() != replacedAt.UnixMilli() || revision.GetSnapshot().GetText().GetText() != "preserved original" {
+		t.Fatalf("revision=%+v", revision)
+	}
+	if len(revision.GetSnapshot().GetRevisions()) != 0 {
+		t.Fatalf("revision history must stay flat: %+v", revision.GetSnapshot().GetRevisions())
+	}
+}
+
 func TestWireTextMessageIncludesLinkPreview(t *testing.T) {
 	message := wireMessage(domain.Message{Kind: "text", Text: "https://example.com", LinkPreview: &domain.LinkPreview{
 		URL: "https://example.com", Title: "Example", Description: "Preview", JPEGThumbnail: []byte{1, 2}, ThumbnailWidth: 320, ThumbnailHeight: 180,

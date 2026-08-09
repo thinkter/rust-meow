@@ -176,7 +176,7 @@ func (s *Store) OldestMessage(ctx context.Context, chatID string) (domain.Messag
 const (
 	reactionReplaySchemaVersion = 9
 	searchSchemaVersion         = 10
-	supportedSchemaVersion      = 19
+	supportedSchemaVersion      = 20
 )
 
 type ChatMerge struct {
@@ -241,7 +241,7 @@ func (s *Store) ClearAccountData(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{`DELETE FROM agent_audit`, `DELETE FROM agent_message_links`, `DELETE FROM agent_approvals`, `DELETE FROM agent_runs`, `DELETE FROM agent_grants`, `DELETE FROM agent_control_chats`, `DELETE FROM agent_workspaces`, `DELETE FROM agent_settings`, `DELETE FROM inbound_events`, `DELETE FROM inbound_messages`, `DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM history_coverage`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM storage_health`, `DELETE FROM sticker_favorites`} {
+	for _, statement := range []string{`DELETE FROM agent_audit`, `DELETE FROM agent_message_links`, `DELETE FROM agent_approvals`, `DELETE FROM agent_runs`, `DELETE FROM agent_grants`, `DELETE FROM agent_control_chats`, `DELETE FROM agent_workspaces`, `DELETE FROM agent_settings`, `DELETE FROM inbound_events`, `DELETE FROM inbound_messages`, `DELETE FROM legacy_reaction_replays`, `DELETE FROM reaction_repair_jobs`, `DELETE FROM outgoing_reactions`, `DELETE FROM outgoing_requests`, `DELETE FROM reactions`, `DELETE FROM message_versions`, `DELETE FROM messages`, `INSERT INTO message_search(message_search) VALUES('delete-all')`, `DELETE FROM history_coverage`, `DELETE FROM chats`, `DELETE FROM sync_state`, `DELETE FROM storage_health`, `DELETE FROM sticker_favorites`} {
 		if _, err = tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("clear account data: %w", err)
 		}
@@ -370,6 +370,18 @@ CREATE INDEX IF NOT EXISTS messages_page_idx ON messages(chat_jid, timestamp DES
 -- library scan otherwise reads the whole table. This partial index only
 -- covers sticker rows, which are a small fraction of most accounts' history.
 CREATE INDEX IF NOT EXISTS messages_sticker_idx ON messages(timestamp DESC, id DESC) WHERE kind='sticker';
+CREATE TABLE IF NOT EXISTS message_versions(
+  revision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_jid TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  replaced_at INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  payload_hash BLOB NOT NULL,
+  payload BLOB NOT NULL,
+  UNIQUE(chat_jid,message_id,payload_hash),
+  FOREIGN KEY(chat_jid,message_id) REFERENCES messages(chat_jid,id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS message_versions_message_idx ON message_versions(chat_jid,message_id,replaced_at,revision_id);
 CREATE TABLE IF NOT EXISTS reactions(
   chat_jid TEXT NOT NULL,
   message_id TEXT NOT NULL,
@@ -773,7 +785,7 @@ END;`
 	}
 	if currentVersion < supportedSchemaVersion {
 		if _, err = tx.ExecContext(ctx, `UPDATE schema_version SET version=?`, supportedSchemaVersion); err != nil {
-			return fmt.Errorf("record schema v19: %w", err)
+			return fmt.Errorf("record schema v20: %w", err)
 		}
 	}
 	return tx.Commit()
@@ -1123,6 +1135,10 @@ link_preview_title=CASE WHEN excluded.link_preview_title<>'' THEN excluded.link_
 link_preview_description=CASE WHEN excluded.link_preview_description<>'' THEN excluded.link_preview_description ELSE messages.link_preview_description END,
 link_preview_thumbnail=CASE WHEN length(excluded.link_preview_thumbnail)>0 THEN excluded.link_preview_thumbnail ELSE messages.link_preview_thumbnail END,
 link_preview_width=max(messages.link_preview_width,excluded.link_preview_width),link_preview_height=max(messages.link_preview_height,excluded.link_preview_height)`, winner, loser); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO message_versions(chat_jid,message_id,replaced_at,reason,payload_hash,payload)
+SELECT ?,message_id,replaced_at,reason,payload_hash,payload FROM message_versions WHERE chat_jid=?`, winner, loser); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO polls(chat_jid,message_id,question,selectable_count,total_voters,options_json,snapshot_at) SELECT ?,message_id,question,selectable_count,total_voters,options_json,snapshot_at FROM polls WHERE chat_jid=? ON CONFLICT(chat_jid,message_id) DO UPDATE SET question=excluded.question,selectable_count=excluded.selectable_count,total_voters=excluded.total_voters,options_json=excluded.options_json,snapshot_at=excluded.snapshot_at WHERE excluded.snapshot_at>=polls.snapshot_at`, winner, loser); err != nil {
@@ -1615,6 +1631,9 @@ FROM messages WHERE chat_jid=? AND kind<>'reaction' AND (timestamp < ? OR (times
 	if err = s.attachPolls(ctx, chatJID, page.Items); err != nil {
 		return page, err
 	}
+	if err = s.attachMessageRevisions(ctx, chatJID, page.Items); err != nil {
+		return page, err
+	}
 	return page, nil
 }
 
@@ -1654,6 +1673,9 @@ func (s *Store) MessagesAround(ctx context.Context, chatJID, messageID string, s
 		return domain.MessageWindow{}, err
 	}
 	if err = s.attachPolls(ctx, resolved, items); err != nil {
+		return domain.MessageWindow{}, err
+	}
+	if err = s.attachMessageRevisions(ctx, resolved, items); err != nil {
 		return domain.MessageWindow{}, err
 	}
 	return domain.MessageWindow{Items: items, HasOlder: hasOlder, HasNewer: hasNewer, AnchorID: anchor.ID}, nil
@@ -1701,6 +1723,9 @@ func (s *Store) MessagesAfter(ctx context.Context, chatJID string, timestampMS i
 		return nil, false, err
 	}
 	if err = s.attachPolls(ctx, resolved, items); err != nil {
+		return nil, false, err
+	}
+	if err = s.attachMessageRevisions(ctx, resolved, items); err != nil {
 		return nil, false, err
 	}
 	return items, hasMore, nil
@@ -2111,6 +2136,48 @@ ON CONFLICT(singleton) DO UPDATE SET last_reconciliation_at=excluded.last_reconc
 	return s.IntegrityStatus(ctx)
 }
 
+func storedMessageTx(ctx context.Context, tx *sql.Tx, chatID, messageID string) (domain.Message, error) {
+	row := tx.QueryRowContext(ctx, `SELECT id,chat_jid,transport_jid,sender_jid,text,timestamp,from_me,status,kind,reply_to_id,reply_to_chat_id,edited_at,revoked,forwarding_score,
+image_mime,image_caption,image_thumbnail,image_local_path,image_direct_path,image_media_key,image_file_sha256,image_file_enc_sha256,image_width,image_height,image_size,
+image_animated,media_file_name,media_duration,media_voice,contacts_json,location_lat,location_lng,location_name,location_address,location_url,location_live,
+link_preview_url,link_preview_title,link_preview_description,link_preview_thumbnail,link_preview_width,link_preview_height
+FROM messages WHERE chat_jid=? AND id=? AND kind<>'reaction'`, chatID, messageID)
+	message, _, err := scanStoredMessage(row)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if message.Kind == "poll" {
+		var question, optionsJSON string
+		var selectable, totalVoters uint32
+		if err = tx.QueryRowContext(ctx, `SELECT question,selectable_count,total_voters,options_json FROM polls WHERE chat_jid=? AND message_id=?`, chatID, messageID).
+			Scan(&question, &selectable, &totalVoters, &optionsJSON); err == nil {
+			options, decodeErr := decodePollOptions(optionsJSON)
+			if decodeErr != nil {
+				return domain.Message{}, decodeErr
+			}
+			message.Poll = &domain.Poll{Question: question, SelectableOptionsCount: selectable, TotalVoters: totalVoters, Options: options}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return domain.Message{}, err
+		}
+	}
+	return message, nil
+}
+
+func saveMessageRevisionTx(ctx context.Context, tx *sql.Tx, message domain.Message, replacedAt time.Time, reason string) error {
+	message.Revisions = nil
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("encode %s message revision: %w", reason, err)
+	}
+	digest := sha256.Sum256(payload)
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO message_versions(chat_jid,message_id,replaced_at,reason,payload_hash,payload) VALUES(?,?,?,?,?,?)`,
+		message.ChatJID, message.ID, replacedAt.UnixMilli(), reason, digest[:], payload)
+	if err != nil {
+		return fmt.Errorf("save %s message revision: %w", reason, err)
+	}
+	return nil
+}
+
 func applyMessageTx(ctx context.Context, tx *sql.Tx, message domain.Message, incrementUnread bool) error {
 	if message.Kind == "reaction" {
 		_, err := resolveOrCreateChatTx(ctx, tx, message.ChatJID)
@@ -2137,6 +2204,33 @@ func applyMessageTx(ctx context.Context, tx *sql.Tx, message domain.Message, inc
 	var existed bool
 	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE chat_jid=? AND id=?)`, message.ChatJID, message.ID).Scan(&existed); err != nil {
 		return err
+	}
+	if existed {
+		reason := ""
+		var currentEditedAt int64
+		var currentRevoked bool
+		if err = tx.QueryRowContext(ctx, `SELECT edited_at,revoked FROM messages WHERE chat_jid=? AND id=?`, message.ChatJID, message.ID).Scan(&currentEditedAt, &currentRevoked); err != nil {
+			return err
+		}
+		switch {
+		case message.Revoked && !currentRevoked:
+			reason = "deleted"
+		case !message.Revoked && !message.EditedAt.IsZero() && message.EditedAt.UnixMilli() > currentEditedAt:
+			reason = "edited"
+		}
+		if reason != "" {
+			current, loadErr := storedMessageTx(ctx, tx, message.ChatJID, message.ID)
+			if loadErr != nil {
+				return loadErr
+			}
+			replacedAt := message.EditedAt
+			if replacedAt.IsZero() {
+				replacedAt = time.Now()
+			}
+			if err = saveMessageRevisionTx(ctx, tx, current, replacedAt, reason); err != nil {
+				return err
+			}
+		}
 	}
 	editedAt := int64(0)
 	if !message.EditedAt.IsZero() {
@@ -2318,6 +2412,11 @@ FROM messages WHERE chat_jid=? AND id=? AND kind<>'reaction'`, chatJID, messageI
 	m, _, err = scanStoredMessage(row)
 	if err == nil && m.Kind == "poll" {
 		m.Poll, err = s.Poll(ctx, chatJID, messageID)
+	}
+	if err == nil {
+		items := []domain.Message{m}
+		err = s.attachMessageRevisions(ctx, chatJID, items)
+		m = items[0]
 	}
 	return m, err
 }
@@ -2502,6 +2601,49 @@ func (s *Store) attachPolls(ctx context.Context, chatID string, messages []domai
 	return nil
 }
 
+func (s *Store) attachMessageRevisions(ctx context.Context, chatID string, messages []domain.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	indices := make(map[string][]int, len(messages))
+	args := make([]any, 0, len(messages)+1)
+	args = append(args, chatID)
+	ids := make([]string, 0, len(messages))
+	for i := range messages {
+		messages[i].Revisions = nil
+		if _, exists := indices[messages[i].ID]; !exists {
+			ids = append(ids, messages[i].ID)
+			args = append(args, messages[i].ID)
+		}
+		indices[messages[i].ID] = append(indices[messages[i].ID], i)
+	}
+	query := `SELECT message_id,replaced_at,reason,payload FROM message_versions WHERE chat_jid=? AND message_id IN (?` + strings.Repeat(",?", len(ids)-1) + `) ORDER BY replaced_at,revision_id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID, reason string
+		var replacedAt int64
+		var payload []byte
+		if err = rows.Scan(&messageID, &replacedAt, &reason, &payload); err != nil {
+			return err
+		}
+		var snapshot domain.Message
+		if err = json.Unmarshal(payload, &snapshot); err != nil {
+			return fmt.Errorf("decode message revision %s/%s: %w", chatID, messageID, err)
+		}
+		snapshot.ChatJID = chatID
+		snapshot.Revisions = nil
+		revision := domain.MessageRevision{ReplacedAt: unixMilli(replacedAt), Reason: reason, Message: snapshot}
+		for _, index := range indices[messageID] {
+			messages[index].Revisions = append(messages[index].Revisions, revision)
+		}
+	}
+	return rows.Err()
+}
+
 func (s *Store) ApplyPollVote(ctx context.Context, vote domain.PollVote) (domain.Message, bool, error) {
 	resolved, err := s.ResolveChat(ctx, vote.ChatJID)
 	if err != nil {
@@ -2579,7 +2721,7 @@ func (s *Store) SetImageLocalPath(ctx context.Context, chatJID, messageID, local
 		return err
 	}
 	chatJID = resolved
-	result, err := s.db.ExecContext(ctx, `UPDATE messages SET image_local_path=? WHERE chat_jid=? AND id=? AND kind IN ('image','sticker')`, localPath, chatJID, messageID)
+	result, err := s.db.ExecContext(ctx, `UPDATE messages SET image_local_path=? WHERE chat_jid=? AND id=? AND kind IN ('image','sticker','revoked')`, localPath, chatJID, messageID)
 	if err != nil {
 		return err
 	}
@@ -2599,7 +2741,7 @@ func (s *Store) SetAttachmentLocalPath(ctx context.Context, chatJID, messageID, 
 		return err
 	}
 	chatJID = resolved
-	result, err := s.db.ExecContext(ctx, `UPDATE messages SET image_local_path=? WHERE chat_jid=? AND id=? AND kind IN ('video','audio','document')`, localPath, chatJID, messageID)
+	result, err := s.db.ExecContext(ctx, `UPDATE messages SET image_local_path=? WHERE chat_jid=? AND id=? AND kind IN ('video','audio','document','revoked')`, localPath, chatJID, messageID)
 	if err != nil {
 		return err
 	}

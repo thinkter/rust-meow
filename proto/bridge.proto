@@ -675,6 +675,10 @@ message Message {
   // The conversation containing reply_to_message_id. Empty means this chat.
   // A different value is a native private reply to a group message.
   string reply_to_chat_id = 17;
+  // Snapshots retained locally immediately before an observed edit or revoke.
+  // This cannot reconstruct content that was already gone before Rust Meow
+  // received it, but every locally observed version survives later changes.
+  repeated MessageRevision revisions = 18;
 
   oneof content {
     TextContent text = 20;
@@ -685,6 +689,13 @@ message Message {
     LocationContent location = 25;
     PollContent poll = 26;
   }
+}
+
+message MessageRevision {
+  int64 replaced_at_ms = 1;
+  // "edited" or "deleted".
+  string reason = 2;
+  Message snapshot = 3;
 }
 
 message Reaction {

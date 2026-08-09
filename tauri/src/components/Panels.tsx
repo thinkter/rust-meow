@@ -19,6 +19,7 @@ import {
   Pencil,
   Plus,
   ShieldCheck,
+  Settings,
   Trash2,
   UsersRound,
   X,
@@ -193,7 +194,7 @@ function formatIntegrityTime(timestampMs: number): string {
   return timestampMs > 0 ? new Date(timestampMs).toLocaleString() : "not recorded yet";
 }
 
-type SettingsSection = "appearance" | "chats" | "notifications" | "storage" | "desktop" | "about";
+type SettingsSection = "appearance" | "chats" | "notifications" | "storage" | "desktop" | "about" | "advanced";
 
 const SETTINGS_SECTIONS: ReadonlyArray<{
   id: SettingsSection;
@@ -207,6 +208,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{
   { id: "storage", label: "Storage", icon: HardDrive, iconName: "storage" },
   { id: "desktop", label: "Desktop apps", icon: Globe, iconName: "globe" },
   { id: "about", label: "About & privacy", icon: ShieldCheck, iconName: "shield" },
+  { id: "advanced", label: "Advanced", icon: Settings, iconName: "settings" },
 ];
 
 /** Human-readable labels for every themeable token, in `THEME_TOKENS` order. */
@@ -784,6 +786,29 @@ export function SettingsPanel(props: { model: AppModel }) {
                 Log out and remove local account data
               </button>
             </div>
+          </Show>
+
+          <Show when={activeSection() === "advanced"}>
+            <section class="settings-section">
+              <h3>Experimental and diagnostic options</h3>
+              <p class="advanced-settings-intro">These controls change uncommon local behavior and are intentionally kept out of the main chat settings.</p>
+              <details class="advanced-settings-disclosure">
+                <summary>Message change history</summary>
+                <SettingRow
+                  title="Show recovered edits and deletions"
+                  description="Reveal locally retained content from before WhatsApp edit or deletion events"
+                >
+                  <Toggle
+                    checked={preferences.messageRecoveryEnabled}
+                    label="Show recovered edits and deletions"
+                    onChange={(value) => prefActions.update("messageRecoveryEnabled", value)}
+                  />
+                </SettingRow>
+                <p class="advanced-settings-note">
+                  Off by default. This only changes what Rust Meow reveals in chats; saved history stays on this computer.
+                </p>
+              </details>
+            </section>
           </Show>
         </div>
       </div>

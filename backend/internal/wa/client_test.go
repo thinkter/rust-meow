@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"log/slog"
@@ -794,6 +796,31 @@ func TestDownloadImageRejectsOversizedMetadataBeforeDownload(t *testing.T) {
 	}
 }
 
+func TestDownloadDeletedImageUsesSavedVersionDescriptor(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	message := domain.Message{
+		ID: "deleted-image", ChatJID: "123@g.us", Timestamp: time.UnixMilli(1_000), Kind: "image",
+		Image: &domain.Image{MIMEType: "image/jpeg", DirectPath: "/mms/image", MediaKey: []byte{1}, FileSize: uint64(maxImageBytes + 1)},
+	}
+	if err = productStore.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	deletedAt := time.UnixMilli(2_000)
+	if err = productStore.ApplyMessage(ctx, domain.Message{ID: message.ID, ChatJID: message.ChatJID, Timestamp: deletedAt, EditedAt: deletedAt, Kind: "revoked", Revoked: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{store: productStore, mediaDir: filepath.Join(directory, "media")}
+	if _, _, err = client.DownloadImage(ctx, message.ChatJID, message.ID); !errors.Is(err, errImageDownloadLimit) {
+		t.Fatalf("download error=%v, want saved image quota error", err)
+	}
+}
+
 func TestDownloadAttachmentUsesValidLocalFilesWithoutNetwork(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()
@@ -847,6 +874,40 @@ func TestDownloadAttachmentUsesValidLocalFilesWithoutNetwork(t *testing.T) {
 	stored, err = productStore.Message(ctx, message.ChatJID, message.ID)
 	if err != nil || stored.Attachment == nil || stored.Attachment.LocalPath != cachePath {
 		t.Fatalf("stored=%+v err=%v", stored.Attachment, err)
+	}
+}
+
+func TestDownloadDeletedAttachmentUsesSavedLocalVersion(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	productStore, err := store.Open(ctx, filepath.Join(directory, "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productStore.Close()
+	sourcePath := filepath.Join(directory, "deleted.pdf")
+	contents := []byte("%PDF-1.7 saved before deletion")
+	if err = os.WriteFile(sourcePath, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	message := domain.Message{
+		ID: "deleted-document", ChatJID: "123@g.us", Timestamp: time.UnixMilli(1_000), Kind: "document",
+		Attachment: &domain.Attachment{MIMEType: "application/pdf", FileName: "deleted.pdf", LocalPath: sourcePath, FileSize: uint64(len(contents))},
+	}
+	if err = productStore.ApplyMessage(ctx, message, false); err != nil {
+		t.Fatal(err)
+	}
+	deletedAt := time.UnixMilli(2_000)
+	if err = productStore.ApplyMessage(ctx, domain.Message{ID: message.ID, ChatJID: message.ChatJID, Timestamp: deletedAt, EditedAt: deletedAt, Kind: "revoked", Revoked: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{store: productStore, mediaDir: filepath.Join(directory, "media")}
+	path, err := client.DownloadAttachment(ctx, message.ChatJID, message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(cached, contents) {
+		t.Fatalf("cached deleted attachment=%q err=%v", cached, readErr)
 	}
 }
 
@@ -995,7 +1056,7 @@ func TestImageCacheCreatesBoundedThumbnailPair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if format != "jpeg" || embeddedConfig.Width != 512 || embeddedConfig.Height != 384 {
+	if format != "jpeg" || embeddedConfig.Width != 32 || embeddedConfig.Height != 24 {
 		t.Fatalf("embedded thumbnail=%s %dx%d", format, embeddedConfig.Width, embeddedConfig.Height)
 	}
 
@@ -1019,6 +1080,36 @@ func TestImageCacheCreatesBoundedThumbnailPair(t *testing.T) {
 		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatalf("invalidated cache file %q still exists: %v", path, statErr)
 		}
+	}
+}
+
+func TestWireJPEGThumbnailUsesWhatsAppCompatibleDimensions(t *testing.T) {
+	tests := []struct {
+		name       string
+		source     image.Image
+		wantHeight int
+	}{
+		{name: "portrait screenshot", source: image.NewRGBA(image.Rect(0, 0, 720, 1600)), wantHeight: 71},
+		{name: "already small", source: image.NewRGBA(image.Rect(0, 0, 16, 8)), wantHeight: 16},
+		{name: "transparent", source: image.NewNRGBA(image.Rect(0, 0, 80, 80)), wantHeight: 32},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if transparent, ok := test.source.(*image.NRGBA); ok {
+				transparent.SetNRGBA(20, 20, color.NRGBA{R: 255, G: 80, B: 40, A: 120})
+			}
+			encoded, err := encodeWireJPEGThumbnail(test.source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config, format, err := image.DecodeConfig(bytes.NewReader(encoded))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if format != "jpeg" || config.Width != wireThumbnailWidth || config.Height != test.wantHeight {
+				t.Fatalf("wire thumbnail=%s %dx%d", format, config.Width, config.Height)
+			}
+		})
 	}
 }
 
@@ -1194,21 +1285,33 @@ func TestCanonicalMentionJIDsKeepsOnlyUserAddresses(t *testing.T) {
 
 func TestForwardedContentKeepsPayloadAndNativeForwardMetadata(t *testing.T) {
 	contextInfo := &waE2E.ContextInfo{IsForwarded: proto.Bool(true), ForwardingScore: proto.Uint32(4)}
+	var legacyThumbnail bytes.Buffer
+	if err := jpeg.Encode(&legacyThumbnail, image.NewRGBA(image.Rect(0, 0, 512, 384)), &jpeg.Options{Quality: 72}); err != nil {
+		t.Fatal(err)
+	}
 	outgoing, err := forwardedContent(domain.Message{
 		Kind: "image",
 		Image: &domain.Image{
 			Caption: "photo", MIMEType: "image/jpeg", DirectPath: "/encrypted",
 			MediaKey: []byte{1}, FileSHA256: []byte{2}, FileEncSHA256: []byte{3},
-			JPEGThumbnail: []byte{4, 5}, Width: 640, Height: 480, FileSize: 99,
+			JPEGThumbnail: legacyThumbnail.Bytes(), Width: 640, Height: 480, FileSize: 99,
 		},
 	}, contextInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	image := outgoing.GetImageMessage()
-	if image == nil || image.GetCaption() != "photo" || image.GetDirectPath() != "/encrypted" ||
-		string(image.GetJPEGThumbnail()) != "\x04\x05" || !image.GetContextInfo().GetIsForwarded() || image.GetContextInfo().GetForwardingScore() != 4 {
-		t.Fatalf("forwarded image=%+v", image)
+	imageMessage := outgoing.GetImageMessage()
+	if imageMessage == nil || imageMessage.GetCaption() != "photo" || imageMessage.GetDirectPath() != "/encrypted" ||
+		!imageMessage.GetContextInfo().GetIsForwarded() || imageMessage.GetContextInfo().GetForwardingScore() != 4 {
+		t.Fatalf("forwarded image=%+v", imageMessage)
+	}
+	thumbnailConfig, format, err := image.DecodeConfig(bytes.NewReader(imageMessage.GetJPEGThumbnail()))
+	if err != nil || format != "jpeg" || thumbnailConfig.Width != wireThumbnailWidth || thumbnailConfig.Height != 24 {
+		t.Fatalf("forwarded thumbnail=%s %dx%d err=%v", format, thumbnailConfig.Width, thumbnailConfig.Height, err)
+	}
+	malformed, err := forwardedContent(domain.Message{Kind: "image", Image: &domain.Image{JPEGThumbnail: []byte{4, 5}}}, contextInfo)
+	if err != nil || len(malformed.GetImageMessage().GetJPEGThumbnail()) != 0 {
+		t.Fatalf("malformed forwarded thumbnail was retained: message=%+v err=%v", malformed, err)
 	}
 	if _, err = forwardedContent(domain.Message{Kind: "poll"}, contextInfo); !errors.Is(err, ErrForwardUnsupported) {
 		t.Fatalf("unsupported forward error=%v", err)

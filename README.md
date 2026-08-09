@@ -18,7 +18,7 @@ WhatsApp Desktop replacement; the exact parity and release gates live in
 SolidJS + TanStack Virtual (Tauri webview)
               typed invoke + ordered Channel events
 Tauri Rust core
-              4-byte BE length + protobuf v20 Envelope
+              4-byte BE length + protobuf v22 Envelope
 Go sidecar (whatsmeow)
               session.db + client.db + bounded media cache
 ```
@@ -150,7 +150,7 @@ tauri/src-tauri/target/<target-triple>/release/bundle/deb/
 The bundle-only config is `tauri/src-tauri/tauri.bundle.conf.json`. Keeping
 `externalBin` there means normal fake development does not require a staged Go
 binary. A release is not validated merely because it bundles: unpack it and
-prove the installed app starts its adjacent sidecar and completes protocol v21
+prove the installed app starts its adjacent sidecar and completes protocol v22
 Hello without `RUST_MEOW_BACKEND`.
 
 The 2026-07-22 Linux x86-64 release measurement is:
@@ -177,6 +177,11 @@ Private state uses the existing `rust-meow` platform data directory. It
 contains linked-device credentials and must never be attached to bug reports.
 `RUST_MEOW_BACKEND` can select a development sidecar; `RUST_MEOW_DATA_DIR` and
 `RUST_MEOW_CONFIG_DIR` select isolated locations.
+
+Protocol v22 retains a local snapshot immediately before every observed edit
+or deletion and exposes those saved versions from the message bubble. It can
+only preserve content this linked client received before the mutation; a
+message that arrives as an already-deleted tombstone has no recoverable body.
 
 On Unix, startup creates or repairs the profile and cache directories to mode
 0700 and database/log files to mode 0600. An advisory profile lock prevents two

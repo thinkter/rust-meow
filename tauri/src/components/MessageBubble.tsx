@@ -14,6 +14,7 @@ import {
   ListChecks,
   MapPin,
   MessageSquareReply,
+  MessageSquareX,
   Pencil,
   Plus,
   Pin,
@@ -30,6 +31,7 @@ import {
   type ImageContent,
   type LinkPreview,
   type Message,
+  type MessageRevision,
   type PollContent,
   type PollVoter,
   type Reaction,
@@ -44,6 +46,7 @@ import {
   safeHttpUrl,
 } from "../lib/format";
 import { assetUrl } from "../lib/bridge";
+import { messageRecoveryView } from "../lib/message-recovery";
 import { parsePollFallback } from "../lib/unsupported";
 import {
   parseWhatsAppText,
@@ -82,6 +85,7 @@ export function MessageBubble(props: MessageBubbleProps) {
   const [reactionOpen, setReactionOpen] = createSignal(false);
   const [reactionExpanded, setReactionExpanded] = createSignal(false);
   const [popoverAbove, setPopoverAbove] = createSignal(true);
+  const [historyOpen, setHistoryOpen] = createSignal(false);
   let popoverRef: HTMLDivElement | undefined;
 
   const quoted = () => props.quotedMessage;
@@ -91,11 +95,20 @@ export function MessageBubble(props: MessageBubbleProps) {
     props.model.state.chats.find((chat) => chat.id === props.chatId)?.kind === ChatKind.Group;
   const replyCount = () => props.replyCount ?? 0;
   const reactionGroups = createMemo(() => groupReactions(props.message.reactions));
-  const savableMedia = createMemo(() => savableMediaInfo(props.message));
+  const recovery = createMemo(() =>
+    messageRecoveryView(props.message, props.model.preferences.messageRecoveryEnabled),
+  );
+  const revisions = () => recovery().revisions;
+  const preservedMessage = () => recovery().preservedMessage;
+  const savableMedia = createMemo(() => savableMediaInfo(preservedMessage() ?? props.message));
 
   createEffect(() => {
-    const message = props.message;
+    const message = preservedMessage() ?? props.message;
     if (message.content && "image" in message.content) void actions.hydrateImage(message, false, false, props.chatId);
+  });
+
+  createEffect(() => {
+    if (!props.model.preferences.messageRecoveryEnabled) setHistoryOpen(false);
   });
 
   // The popover is clipped to `.message-scroller` (it uses layout/paint
@@ -173,10 +186,60 @@ export function MessageBubble(props: MessageBubbleProps) {
         </button>
       </Show>
 
-      <MessageContent message={props.message} model={props.model} chatId={props.chatId} />
+      <Show when={recovery().event === "deleted"}>
+        <div class="message-mutation-badge deleted" aria-label="WhatsApp deletion detected; content recovered locally">
+          <MessageSquareX size={14} />
+          <span>WhatsApp deletion detected</span>
+          <strong>Recovered locally</strong>
+        </div>
+      </Show>
+
+      <Show when={recovery().event === "edited"}>
+        <div class="message-mutation-badge edited" aria-label="WhatsApp edit detected; earlier content saved">
+          <Pencil size={13} />
+          <span>WhatsApp edit detected</span>
+          <strong>Earlier version saved</strong>
+        </div>
+      </Show>
+
+      <MessageContent
+        message={preservedMessage() ?? props.message}
+        model={props.model}
+        chatId={props.chatId}
+      />
+
+      <Show when={recovery().event === "deleted" && !preservedMessage()}>
+        <p class="message-history-unavailable">Original unavailable — it was deleted before Rust Meow saved a copy.</p>
+      </Show>
+
+      <Show when={revisions().length > 0}>
+        <button
+          type="button"
+          class="message-history-toggle"
+          aria-expanded={historyOpen()}
+          onClick={() => setHistoryOpen((open) => !open)}
+        >
+          {historyOpen() ? "Hide history" : `${revisions().length} saved ${revisions().length === 1 ? "version" : "versions"}`}
+        </button>
+      </Show>
+
+      <Show when={historyOpen()}>
+        <div class="message-history" aria-label="Message version history">
+          <For each={[...revisions()].reverse()}>
+            {(revision, index) => (
+              <MessageRevisionView
+                revision={revision}
+                index={revisions().length - index()}
+                model={props.model}
+                chatId={props.chatId}
+              />
+            )}
+          </For>
+        </div>
+      </Show>
 
       <div class="message-meta">
-        <Show when={props.message.edited}><span>edited</span></Show>
+        <Show when={props.message.edited && !props.message.revoked && recovery().event !== "edited"}><span>edited</span></Show>
         <span>{formatTime(props.message.timestampMs)}</span>
         <Show when={props.message.fromMe}><MessageStatusIcon status={props.message.status} /></Show>
       </div>
@@ -302,6 +365,27 @@ export function MessageBubble(props: MessageBubbleProps) {
         </div>
       </Show>
     </div>
+  );
+}
+
+function MessageRevisionView(props: {
+  revision: MessageRevision;
+  index: number;
+  model: AppModel;
+  chatId: string;
+}) {
+  return (
+    <Show when={props.revision.snapshot}>
+      {(snapshot) => (
+        <section class="message-history-entry">
+          <header>
+            <strong>Version {props.index}</strong>
+            <span>{props.revision.reason === "deleted" ? "before deletion" : "before edit"} · {formatTime(props.revision.replacedAtMs)}</span>
+          </header>
+          <MessageContent message={snapshot()} model={props.model} chatId={props.chatId} />
+        </section>
+      )}
+    </Show>
   );
 }
 
