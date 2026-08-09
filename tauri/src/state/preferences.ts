@@ -9,6 +9,7 @@ import {
   type Theme,
 } from "../lib/theme";
 import { isMessageRecoveryEnabled } from "../lib/message-recovery";
+import { isAgentControlExperimentEnabled } from "../lib/agent-control-gate";
 
 const STORAGE_KEY = "rust-meow-preferences";
 const OPTIONAL_MEMBER_PANEL_MIGRATION_KEY = "rust-meow-member-panel-opt-in-v1";
@@ -43,6 +44,8 @@ export interface Preferences {
   notificationPreviews: boolean;
   /** Reveal locally retained message content from before an edit or deletion. */
   messageRecoveryEnabled: boolean;
+  /** Reveal the experimental WhatsApp-to-Codex controller configuration UI. */
+  agentControlExperimentEnabled: boolean;
 }
 
 const defaults: Preferences = {
@@ -62,6 +65,7 @@ const defaults: Preferences = {
   notificationsEnabled: true,
   notificationPreviews: true,
   messageRecoveryEnabled: false,
+  agentControlExperimentEnabled: false,
 };
 
 function readStored(): Partial<Preferences> {
@@ -128,6 +132,11 @@ export function sanitizePreferences(stored: Partial<Preferences>): Preferences {
     // This is deliberately opt-in, including for preferences written by an
     // older release where the field does not exist.
     messageRecoveryEnabled: isMessageRecoveryEnabled(stored.messageRecoveryEnabled),
+    // Agent Control is intentionally absent after upgrades until the user
+    // explicitly opts in through the nested Advanced settings disclosure.
+    agentControlExperimentEnabled: isAgentControlExperimentEnabled(
+      stored.agentControlExperimentEnabled,
+    ),
   };
 }
 

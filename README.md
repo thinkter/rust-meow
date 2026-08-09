@@ -87,15 +87,21 @@ you administer.
 To configure it:
 
 1. Build and launch Rust Meow with `make dev` or `make build`.
-2. Open **Agent Control** from the left navigation.
-3. In **Workspaces**, register a repository folder and a short alias such as
+2. Open **Settings > Advanced > Experimental features** and opt in to
+   **Agent Control**. It is hidden and disabled by default.
+3. Open **Agent Control** from the left navigation.
+4. In **Workspaces**, register a repository folder and a short alias such as
    `rust-meow`.
-4. In **Control chats**, enable each direct message or group allowed to carry
+5. In **Control chats**, enable each direct message or group allowed to carry
    agent commands.
-5. Optionally use **Access** to grant a contact an Operator or Viewer role for a
+6. Optionally use **Access** to grant a contact an Operator or Viewer role for a
    workspace.
-6. In **Overview**, choose the agent alias, verify the Codex executable
+7. In **Overview**, choose the agent alias, verify the Codex executable
    (normally `codex`), and enable Agent Control.
+
+Turning the experiment back off first disables the persisted backend controller
+and then removes Agent Control from the navigation. Its workspace and trust
+configuration remain local so you can deliberately opt in again later.
 
 The linked-device owner is recognized automatically and does not need an
 explicit grant. Owners can access every registered workspace. Operators can

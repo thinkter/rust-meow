@@ -2785,6 +2785,13 @@ html[data-appearance="light"] .message-sender {
   margin-left: calc(14px * var(--scale));
 }
 
+.advanced-settings-error {
+  margin: 0 calc(14px * var(--scale)) calc(12px * var(--scale));
+  color: var(--danger);
+  font-size: calc(11px * var(--scale));
+  line-height: 1.45;
+}
+
 .setting-row {
   display: flex;
   min-height: 52px;

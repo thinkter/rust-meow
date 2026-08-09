@@ -28,11 +28,13 @@ import type { AppModel } from "../state/app";
 import { ChatKind } from "../lib/types";
 import { formatDay } from "../lib/format";
 import {
+  bridge,
   listDesktopApplications,
   normalizeBridgeError,
   openFile,
   type DesktopApplications,
 } from "../lib/bridge";
+import { disableAgentControlIfNeeded } from "../lib/agent-control-gate";
 import { exportTheme, THEME_TOKENS, type Theme, type ThemeToken } from "../lib/theme";
 import { Avatar } from "./Avatar";
 import { ParticipantList } from "./ParticipantList";
@@ -274,6 +276,8 @@ export function SettingsPanel(props: { model: AppModel }) {
   const [storageError, setStorageError] = createSignal("");
   const [desktopApplications, setDesktopApplications] = createSignal<DesktopApplications | null>(null);
   const [desktopApplicationsError, setDesktopApplicationsError] = createSignal("");
+  const [agentControlSettingBusy, setAgentControlSettingBusy] = createSignal(false);
+  const [agentControlSettingError, setAgentControlSettingError] = createSignal("");
   const linuxDesktopHost = navigator.userAgent.includes("Linux");
 
   const editingTheme = () => preferences.customThemes.find((theme) => theme.id === editingThemeId());
@@ -368,6 +372,24 @@ export function SettingsPanel(props: { model: AppModel }) {
       if (path) prefActions.update("downloadDir", path);
     } catch (error) {
       setStorageError(normalizeBridgeError(error).message);
+    }
+  }
+
+  async function setAgentControlExperimentEnabled(enabled: boolean) {
+    setAgentControlSettingError("");
+    if (enabled) {
+      prefActions.update("agentControlExperimentEnabled", true);
+      return;
+    }
+
+    setAgentControlSettingBusy(true);
+    try {
+      await disableAgentControlIfNeeded(bridge);
+      prefActions.update("agentControlExperimentEnabled", false);
+    } catch (error) {
+      setAgentControlSettingError(normalizeBridgeError(error).message);
+    } finally {
+      setAgentControlSettingBusy(false);
     }
   }
 
@@ -807,6 +829,26 @@ export function SettingsPanel(props: { model: AppModel }) {
                 <p class="advanced-settings-note">
                   Off by default. This only changes what Rust Meow reveals in chats; saved history stays on this computer.
                 </p>
+              </details>
+              <details class="advanced-settings-disclosure">
+                <summary>Experimental features</summary>
+                <SettingRow
+                  title="Agent Control"
+                  description="Reveal local Codex agent controls for explicitly trusted WhatsApp chats"
+                >
+                  <Toggle
+                    checked={preferences.agentControlExperimentEnabled}
+                    label="Experimental Agent Control"
+                    disabled={agentControlSettingBusy()}
+                    onChange={(value) => void setAgentControlExperimentEnabled(value)}
+                  />
+                </SettingRow>
+                <p class="advanced-settings-note">
+                  Off by default. Opting in only reveals Agent Control; you must still configure a trusted chat and enable the controller there.
+                </p>
+                <Show when={agentControlSettingError()}>
+                  <p class="advanced-settings-error" role="alert">{agentControlSettingError()}</p>
+                </Show>
               </details>
             </section>
           </Show>

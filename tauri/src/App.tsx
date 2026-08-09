@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   Files,
   MessageCircle,
@@ -29,8 +29,9 @@ import {
 import { IconButton } from "./components/Primitives";
 import { ThemeIcon } from "./components/ThemeIcon";
 import { AgentControlPanel } from "./components/AgentControlPanel";
-import { listenForFileDrops } from "./lib/bridge";
+import { bridge, listenForFileDrops } from "./lib/bridge";
 import { classifyDroppedFiles } from "./lib/file-drop";
+import { disableAgentControlIfNeeded } from "./lib/agent-control-gate";
 
 export default function App() {
   const model = createAppModel();
@@ -46,11 +47,17 @@ export default function App() {
   const [spotlightOpen, setSpotlightOpen] = createSignal(false);
   const [fileDropActive, setFileDropActive] = createSignal(false);
   const [agentControlOpen, setAgentControlOpen] = createSignal(false);
+  const agentControlVisible = () =>
+    preferences.agentControlExperimentEnabled && agentControlOpen();
   let unlistenFileDrops: (() => void) | undefined;
   let disposed = false;
 
   onMount(() => {
-    void actions.bootstrap();
+    void actions.bootstrap().then(async () => {
+      if (!preferences.agentControlExperimentEnabled) {
+        await disableAgentControlIfNeeded(bridge);
+      }
+    }).catch(actions.notifyError);
     // A restored session snapshot (see `state/workspace.ts`) already wins if
     // it has two panes; this only kicks in for a fresh session (no snapshot,
     // or a single-pane one) where "split view" was left on last time.
@@ -85,6 +92,9 @@ export default function App() {
       else unlistenFileDrops = unlisten;
     }).catch(actions.notifyError);
   });
+  createEffect(() => {
+    if (!preferences.agentControlExperimentEnabled) setAgentControlOpen(false);
+  });
   onCleanup(() => {
     disposed = true;
     unlistenFileDrops?.();
@@ -111,8 +121,8 @@ export default function App() {
       <Show when={state.screen === "chats"}>
         <main
           class={`app-shell ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""}`}
-          inert={Boolean(spotlightOpen() || agentControlOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
-          aria-hidden={spotlightOpen() || agentControlOpen() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
+          inert={Boolean(spotlightOpen() || agentControlVisible() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
+          aria-hidden={spotlightOpen() || agentControlVisible() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
         >
           <TitleBar model={model} />
           <nav class="nav-rail" aria-label="Primary navigation">
@@ -126,9 +136,11 @@ export default function App() {
             >
               <ThemeIcon icon={MessageCircle} name="chat" size={21} />
             </IconButton>
-            <IconButton label="Agent Control" active={agentControlOpen()} onClick={() => setAgentControlOpen(true)}>
-              <ThemeIcon icon={Bot} name="chat" size={20} />
-            </IconButton>
+            <Show when={preferences.agentControlExperimentEnabled}>
+              <IconButton label="Agent Control" active={agentControlOpen()} onClick={() => setAgentControlOpen(true)}>
+                <ThemeIcon icon={Bot} name="chat" size={20} />
+              </IconButton>
+            </Show>
             <IconButton label="Quick search (Ctrl+K)" onClick={toggleSpotlight}>
               <ThemeIcon icon={Search} name="search" size={20} />
             </IconButton>
@@ -168,7 +180,7 @@ export default function App() {
           </div>
         </main>
       </Show>
-      <Show when={agentControlOpen()}><AgentControlPanel model={model} onClose={() => setAgentControlOpen(false)} /></Show>
+      <Show when={agentControlVisible()}><AgentControlPanel model={model} onClose={() => setAgentControlOpen(false)} /></Show>
       <ChatSwitcher model={model} />
       <SpotlightSearch model={model} open={spotlightOpen()} onClose={() => setSpotlightOpen(false)} />
       <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
