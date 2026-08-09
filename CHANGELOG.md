@@ -20,5 +20,8 @@ versions are tracked separately in `docs/VERSIONING.md`.
   retaining a higher-quality local preview.
 - Agent Control is disabled in the backend before its experimental UI is
   hidden.
+- Animated GIF images and WhatsApp GIF videos now play inline; Linux playback
+  uses bounded blob URLs to avoid WebKitGTK local-media protocol failures.
+- Sticker-only messages no longer render standard bubble chrome.
 
 [0.2.0]: https://github.com/thinkter/rust-meow/releases/tag/v0.2.0
