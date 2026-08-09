@@ -19,6 +19,7 @@ import {
   Pencil,
   Plus,
   ShieldCheck,
+  Settings,
   Trash2,
   UsersRound,
   X,
@@ -27,11 +28,13 @@ import type { AppModel } from "../state/app";
 import { ChatKind } from "../lib/types";
 import { formatDay } from "../lib/format";
 import {
+  bridge,
   listDesktopApplications,
   normalizeBridgeError,
   openFile,
   type DesktopApplications,
 } from "../lib/bridge";
+import { disableAgentControlIfNeeded } from "../lib/agent-control-gate";
 import { exportTheme, THEME_TOKENS, type Theme, type ThemeToken } from "../lib/theme";
 import { Avatar } from "./Avatar";
 import { ParticipantList } from "./ParticipantList";
@@ -193,7 +196,7 @@ function formatIntegrityTime(timestampMs: number): string {
   return timestampMs > 0 ? new Date(timestampMs).toLocaleString() : "not recorded yet";
 }
 
-type SettingsSection = "appearance" | "chats" | "notifications" | "storage" | "desktop" | "about";
+type SettingsSection = "appearance" | "chats" | "notifications" | "storage" | "desktop" | "about" | "advanced";
 
 const SETTINGS_SECTIONS: ReadonlyArray<{
   id: SettingsSection;
@@ -207,6 +210,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{
   { id: "storage", label: "Storage", icon: HardDrive, iconName: "storage" },
   { id: "desktop", label: "Desktop apps", icon: Globe, iconName: "globe" },
   { id: "about", label: "About & privacy", icon: ShieldCheck, iconName: "shield" },
+  { id: "advanced", label: "Advanced", icon: Settings, iconName: "settings" },
 ];
 
 /** Human-readable labels for every themeable token, in `THEME_TOKENS` order. */
@@ -272,6 +276,8 @@ export function SettingsPanel(props: { model: AppModel }) {
   const [storageError, setStorageError] = createSignal("");
   const [desktopApplications, setDesktopApplications] = createSignal<DesktopApplications | null>(null);
   const [desktopApplicationsError, setDesktopApplicationsError] = createSignal("");
+  const [agentControlSettingBusy, setAgentControlSettingBusy] = createSignal(false);
+  const [agentControlSettingError, setAgentControlSettingError] = createSignal("");
   const linuxDesktopHost = navigator.userAgent.includes("Linux");
 
   const editingTheme = () => preferences.customThemes.find((theme) => theme.id === editingThemeId());
@@ -366,6 +372,24 @@ export function SettingsPanel(props: { model: AppModel }) {
       if (path) prefActions.update("downloadDir", path);
     } catch (error) {
       setStorageError(normalizeBridgeError(error).message);
+    }
+  }
+
+  async function setAgentControlExperimentEnabled(enabled: boolean) {
+    setAgentControlSettingError("");
+    if (enabled) {
+      prefActions.update("agentControlExperimentEnabled", true);
+      return;
+    }
+
+    setAgentControlSettingBusy(true);
+    try {
+      await disableAgentControlIfNeeded(bridge);
+      prefActions.update("agentControlExperimentEnabled", false);
+    } catch (error) {
+      setAgentControlSettingError(normalizeBridgeError(error).message);
+    } finally {
+      setAgentControlSettingBusy(false);
     }
   }
 
@@ -784,6 +808,49 @@ export function SettingsPanel(props: { model: AppModel }) {
                 Log out and remove local account data
               </button>
             </div>
+          </Show>
+
+          <Show when={activeSection() === "advanced"}>
+            <section class="settings-section">
+              <h3>Experimental and diagnostic options</h3>
+              <p class="advanced-settings-intro">These controls change uncommon local behavior and are intentionally kept out of the main chat settings.</p>
+              <details class="advanced-settings-disclosure">
+                <summary>Message change history</summary>
+                <SettingRow
+                  title="Show recovered edits and deletions"
+                  description="Reveal locally retained content from before WhatsApp edit or deletion events"
+                >
+                  <Toggle
+                    checked={preferences.messageRecoveryEnabled}
+                    label="Show recovered edits and deletions"
+                    onChange={(value) => prefActions.update("messageRecoveryEnabled", value)}
+                  />
+                </SettingRow>
+                <p class="advanced-settings-note">
+                  Off by default. This only changes what Rust Meow reveals in chats; saved history stays on this computer.
+                </p>
+              </details>
+              <details class="advanced-settings-disclosure">
+                <summary>Experimental features</summary>
+                <SettingRow
+                  title="Agent Control"
+                  description="Reveal local Codex agent controls for explicitly trusted WhatsApp chats"
+                >
+                  <Toggle
+                    checked={preferences.agentControlExperimentEnabled}
+                    label="Experimental Agent Control"
+                    disabled={agentControlSettingBusy()}
+                    onChange={(value) => void setAgentControlExperimentEnabled(value)}
+                  />
+                </SettingRow>
+                <p class="advanced-settings-note">
+                  Off by default. Opting in only reveals Agent Control; you must still configure a trusted chat and enable the controller there.
+                </p>
+                <Show when={agentControlSettingError()}>
+                  <p class="advanced-settings-error" role="alert">{agentControlSettingError()}</p>
+                </Show>
+              </details>
+            </section>
           </Show>
         </div>
       </div>

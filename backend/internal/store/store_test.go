@@ -417,6 +417,9 @@ func TestMessageMutationPreservesOriginalTimestampAndTimelinePosition(t *testing
 	if !got.Timestamp.Equal(originalAt) || got.Text != "after" || !got.EditedAt.Equal(edited.EditedAt) {
 		t.Fatalf("edited message=%+v", got)
 	}
+	if len(got.Revisions) != 1 || got.Revisions[0].Reason != "edited" || got.Revisions[0].Message.Text != "before" || !got.Revisions[0].ReplacedAt.Equal(edited.EditedAt) {
+		t.Fatalf("edit revisions=%+v", got.Revisions)
+	}
 	chat, err := s.Chat(ctx, original.ChatJID)
 	if err != nil {
 		t.Fatal(err)
@@ -441,12 +444,68 @@ func TestMessageMutationPreservesOriginalTimestampAndTimelinePosition(t *testing
 	if !got.Timestamp.Equal(originalAt) || !got.Revoked || got.Kind != "revoked" {
 		t.Fatalf("revoked message=%+v", got)
 	}
+	if len(got.Revisions) != 2 || got.Revisions[1].Reason != "deleted" || got.Revisions[1].Message.Text != "after" || !got.Revisions[1].ReplacedAt.Equal(revoked.EditedAt) {
+		t.Fatalf("revoke revisions=%+v", got.Revisions)
+	}
+	if err = s.ApplyMessage(ctx, revoked, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Message(ctx, original.ChatJID, original.ID)
+	if err != nil || len(got.Revisions) != 2 {
+		t.Fatalf("replayed revoke duplicated revisions: revisions=%+v err=%v", got.Revisions, err)
+	}
 	chat, err = s.Chat(ctx, original.ChatJID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if chat.LastMessageID != newer.ID || !chat.LastMessageAt.Equal(newer.Timestamp) {
 		t.Fatalf("revoke moved chat summary: %+v", chat)
+	}
+}
+
+func TestDeletedMessageRevisionPreservesRichContentAndClearsWithAccount(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	original := domain.Message{
+		ID: "photo", ChatJID: "chat@g.us", SenderJID: "sender@s.whatsapp.net",
+		Kind: "image", Timestamp: time.UnixMilli(1_000),
+		Image: &domain.Image{
+			Caption: "private caption", MIMEType: "image/jpeg", LocalPath: "/tmp/preserved.jpg",
+			JPEGThumbnail: []byte{1, 2, 3}, DirectPath: "/remote", MediaKey: []byte{4, 5},
+			FileSHA256: []byte{6}, FileEncSHA256: []byte{7}, Width: 640, Height: 480, FileSize: 1234,
+		},
+	}
+	if err = s.ApplyMessage(ctx, original, false); err != nil {
+		t.Fatal(err)
+	}
+	deletedAt := time.UnixMilli(2_000)
+	if err = s.ApplyMessage(ctx, domain.Message{
+		ID: original.ID, ChatJID: original.ChatJID, Timestamp: deletedAt,
+		EditedAt: deletedAt, Kind: "revoked", Text: "Message deleted", Revoked: true,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Message(ctx, original.ChatJID, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Revisions) != 1 || got.Revisions[0].Reason != "deleted" || got.Revisions[0].Message.Image == nil {
+		t.Fatalf("deleted image revision=%+v", got.Revisions)
+	}
+	preserved := got.Revisions[0].Message.Image
+	if preserved.Caption != original.Image.Caption || preserved.LocalPath != original.Image.LocalPath || !slices.Equal(preserved.JPEGThumbnail, original.Image.JPEGThumbnail) || !slices.Equal(preserved.MediaKey, original.Image.MediaKey) {
+		t.Fatalf("preserved image=%+v", preserved)
+	}
+	if err = s.ClearAccountData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var versions int
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM message_versions`).Scan(&versions); err != nil || versions != 0 {
+		t.Fatalf("message versions after account clear=%d err=%v", versions, err)
 	}
 }
 

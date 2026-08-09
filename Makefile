@@ -30,7 +30,7 @@ endif
 LINUX_SIDECAR := $(TAURI_CRATE_DIR)/binaries/rust-meow-backend-$(LINUX_TARGET)
 LINUX_BUNDLE_DIR := $(TAURI_CRATE_DIR)/target/$(LINUX_TARGET)/release/bundle/deb
 
-.PHONY: help deps check test build desktop backend backend-release frontend-build tauri-check \
+.PHONY: help deps check version-check test build desktop backend backend-release frontend-build tauri-check \
 	tauri-test tauri-build dev dev-real dev-fake fake guard-linux \
 	sidecar-linux release release-linux legacy-check legacy-test legacy-build \
 	legacy-release clean
@@ -52,7 +52,10 @@ help:
 deps:
 	pnpm --dir $(TAURI_DIR) install --frozen-lockfile
 
-check: backend-check tauri-check
+check: version-check backend-check tauri-check
+
+version-check:
+	node scripts/check-version.mjs
 
 .PHONY: backend-check
 backend-check:

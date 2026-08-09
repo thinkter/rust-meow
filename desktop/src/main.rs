@@ -1963,6 +1963,9 @@ impl RustMeow {
             // Pinned-message browsing is implemented by the primary Tauri
             // shell; the legacy GPUI behavioral reference has no surface.
             Some(backend_event::Event::PinnedMessagesChanged(_)) => {}
+            // Agent Control is configured and monitored in the primary Tauri
+            // shell; the legacy GPUI behavioral reference has no surface.
+            Some(backend_event::Event::AgentControlChanged(_)) => {}
             Some(backend_event::Event::Problem(problem)) => {
                 if problem.fatal {
                     self.store.screen = Screen::Fatal;

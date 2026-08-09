@@ -158,7 +158,7 @@ func TestMediaJobAdmissionIsBounded(t *testing.T) {
 	}
 }
 
-func TestSuccessWrapsPollAndPinResponses(t *testing.T) {
+func TestSuccessWrapsExtendedResponses(t *testing.T) {
 	tests := []struct {
 		name   string
 		result any
@@ -167,6 +167,15 @@ func TestSuccessWrapsPollAndPinResponses(t *testing.T) {
 		{"vote poll", &bridgev1.RpcResponse_VotePoll{VotePoll: &bridgev1.VotePollResponse{}}},
 		{"set message pin", &bridgev1.RpcResponse_SetMessagePin{SetMessagePin: &bridgev1.SetMessagePinResponse{}}},
 		{"list pinned messages", &bridgev1.RpcResponse_ListPinnedMessages{ListPinnedMessages: &bridgev1.ListPinnedMessagesResponse{}}},
+		{"agent control state", &bridgev1.RpcResponse_AgentControlState{AgentControlState: &bridgev1.GetAgentControlStateResponse{}}},
+		{"save agent settings", &bridgev1.RpcResponse_SaveAgentSettings{SaveAgentSettings: &bridgev1.SaveAgentSettingsResponse{}}},
+		{"save agent workspace", &bridgev1.RpcResponse_SaveAgentWorkspace{SaveAgentWorkspace: &bridgev1.SaveAgentWorkspaceResponse{}}},
+		{"delete agent workspace", &bridgev1.RpcResponse_DeleteAgentWorkspace{DeleteAgentWorkspace: &bridgev1.DeleteAgentWorkspaceResponse{}}},
+		{"set agent control chat", &bridgev1.RpcResponse_SetAgentControlChat{SetAgentControlChat: &bridgev1.SetAgentControlChatResponse{}}},
+		{"save agent grant", &bridgev1.RpcResponse_SaveAgentGrant{SaveAgentGrant: &bridgev1.SaveAgentGrantResponse{}}},
+		{"delete agent grant", &bridgev1.RpcResponse_DeleteAgentGrant{DeleteAgentGrant: &bridgev1.DeleteAgentGrantResponse{}}},
+		{"interrupt agent run", &bridgev1.RpcResponse_InterruptAgentRun{InterruptAgentRun: &bridgev1.InterruptAgentRunResponse{}}},
+		{"resolve agent approval", &bridgev1.RpcResponse_ResolveAgentApproval{ResolveAgentApproval: &bridgev1.ResolveAgentApprovalResponse{}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -341,6 +350,24 @@ func TestUnsupportedEventDoesNotConsumeSequence(t *testing.T) {
 	}
 }
 
+func TestControllerOnlyMessageDoesNotReachDesktopEventStream(t *testing.T) {
+	var output bytes.Buffer
+	s := &Server{ctx: context.Background(), codec: bridge.NewCodec(nil, &output)}
+	s.handshaken.Store(true)
+
+	s.Emit(wa.Event{
+		Kind: "message", ControllerOnly: true,
+		Message: domain.Message{ID: "owner-command", Kind: "text", Text: "!meow agent @repo inspect it", FromMe: true},
+	})
+
+	if got := s.sequence.Load(); got != 0 {
+		t.Fatalf("sequence=%d, want 0", got)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("controller-only event wrote %d desktop bytes", output.Len())
+	}
+}
+
 func TestHandshakeRequired(t *testing.T) {
 	s := &Server{ctx: context.Background()}
 	request := &bridgev1.Envelope{ProtocolVersion: 1, Body: &bridgev1.Envelope_Request{Request: &bridgev1.RpcRequest{Request: &bridgev1.RpcRequest_ListChats{ListChats: &bridgev1.ListChatsRequest{}}}}}
@@ -374,6 +401,29 @@ func TestWireMessageIncludesReplyTarget(t *testing.T) {
 	}
 	if message.GetForwardingScore() != 3 {
 		t.Fatalf("forwarding score=%d", message.GetForwardingScore())
+	}
+}
+
+func TestWireMessageIncludesSavedVersionHistory(t *testing.T) {
+	s := &Server{ctx: context.Background()}
+	replacedAt := time.UnixMilli(2_000)
+	message := s.wireMessage(domain.Message{
+		ID: "message", ChatJID: "chat", Kind: "revoked", Revoked: true,
+		Revisions: []domain.MessageRevision{{
+			ReplacedAt: replacedAt,
+			Reason:     "deleted",
+			Message:    domain.Message{ID: "message", ChatJID: "chat", Kind: "text", Text: "preserved original"},
+		}},
+	})
+	if len(message.GetRevisions()) != 1 {
+		t.Fatalf("revisions=%+v", message.GetRevisions())
+	}
+	revision := message.GetRevisions()[0]
+	if revision.GetReason() != "deleted" || revision.GetReplacedAtMs() != replacedAt.UnixMilli() || revision.GetSnapshot().GetText().GetText() != "preserved original" {
+		t.Fatalf("revision=%+v", revision)
+	}
+	if len(revision.GetSnapshot().GetRevisions()) != 0 {
+		t.Fatalf("revision history must stay flat: %+v", revision.GetSnapshot().GetRevisions())
 	}
 }
 

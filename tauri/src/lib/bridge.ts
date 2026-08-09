@@ -51,6 +51,17 @@ import type {
   GetHistoryOverviewResponse,
   GetIntegrityStatusResponse,
   RepairLocalCacheResponse,
+  AgentWorkspace,
+  AgentGrant,
+  GetAgentControlStateResponse,
+  SaveAgentSettingsResponse,
+  SaveAgentWorkspaceResponse,
+  DeleteAgentWorkspaceResponse,
+  SetAgentControlChatResponse,
+  SaveAgentGrantResponse,
+  DeleteAgentGrantResponse,
+  InterruptAgentRunResponse,
+  ResolveAgentApprovalResponse,
 } from "./types";
 
 export type BackendEventHandler = (
@@ -371,6 +382,15 @@ export interface BridgeApi {
   getHistoryOverview(): Promise<GetHistoryOverviewResponse>;
   getIntegrityStatus(): Promise<GetIntegrityStatusResponse>;
   repairLocalCache(): Promise<RepairLocalCacheResponse>;
+  getAgentControlState(): Promise<GetAgentControlStateResponse>;
+  saveAgentSettings(enabled: boolean, alias: string, codexPath: string): Promise<SaveAgentSettingsResponse>;
+  saveAgentWorkspace(workspace: AgentWorkspace): Promise<SaveAgentWorkspaceResponse>;
+  deleteAgentWorkspace(workspaceId: string): Promise<DeleteAgentWorkspaceResponse>;
+  setAgentControlChat(chatId: string, enabled: boolean): Promise<SetAgentControlChatResponse>;
+  saveAgentGrant(grant: AgentGrant): Promise<SaveAgentGrantResponse>;
+  deleteAgentGrant(grantId: string): Promise<DeleteAgentGrantResponse>;
+  interruptAgentRun(runId: string): Promise<InterruptAgentRunResponse>;
+  resolveAgentApproval(ownerCode: string, approve: boolean): Promise<ResolveAgentApprovalResponse>;
   listChats(cursor?: string, limit?: number): Promise<ListChatsResponse>;
   listMessages(
     chatId: string,
@@ -491,6 +511,24 @@ const nativeBridge: BridgeApi = {
     invokeCommand<GetIntegrityStatusResponse>("get_integrity_status"),
   repairLocalCache: () =>
     invokeCommand<RepairLocalCacheResponse>("repair_local_cache"),
+  getAgentControlState: () =>
+    invokeCommand<GetAgentControlStateResponse>("get_agent_control_state"),
+  saveAgentSettings: (enabled, alias, codexPath) =>
+    invokeCommand<SaveAgentSettingsResponse>("save_agent_settings", { enabled, alias, codexPath }),
+  saveAgentWorkspace: (workspace) =>
+    invokeCommand<SaveAgentWorkspaceResponse>("save_agent_workspace", { workspace }),
+  deleteAgentWorkspace: (workspaceId) =>
+    invokeCommand<DeleteAgentWorkspaceResponse>("delete_agent_workspace", { workspaceId }),
+  setAgentControlChat: (chatId, enabled) =>
+    invokeCommand<SetAgentControlChatResponse>("set_agent_control_chat", { chatId, enabled }),
+  saveAgentGrant: (grant) =>
+    invokeCommand<SaveAgentGrantResponse>("save_agent_grant", { grant }),
+  deleteAgentGrant: (grantId) =>
+    invokeCommand<DeleteAgentGrantResponse>("delete_agent_grant", { grantId }),
+  interruptAgentRun: (runId) =>
+    invokeCommand<InterruptAgentRunResponse>("interrupt_agent_run", { runId }),
+  resolveAgentApproval: (ownerCode, approve) =>
+    invokeCommand<ResolveAgentApprovalResponse>("resolve_agent_approval", { ownerCode, approve }),
   listChats: (cursor = "", limit = 100) =>
     invokeCommand<ListChatsResponse>("list_chats", { cursor, limit }),
   listMessages: (

@@ -92,6 +92,7 @@ enum FrontendEventKind {
     StickersChanged(proto::StickersChanged),
     BridgeLifecycle(BridgeLifecycle),
     PinnedMessagesChanged(proto::PinnedMessagesChanged),
+    AgentControlChanged(proto::AgentControlChanged),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -182,6 +183,7 @@ impl From<proto::BackendEvent> for Option<FrontendEvent> {
             Event::TypingChanged(value) => FrontendEventKind::TypingChanged(value),
             Event::StickersChanged(value) => FrontendEventKind::StickersChanged(value),
             Event::PinnedMessagesChanged(value) => FrontendEventKind::PinnedMessagesChanged(value),
+            Event::AgentControlChanged(value) => FrontendEventKind::AgentControlChanged(value),
         };
         Some(FrontendEvent { sequence, event })
     }
@@ -1527,6 +1529,42 @@ rpc_commands! {
         rpc_request::Request::RepairLocalCache(proto::RepairLocalCacheRequest {}),
         WRITE_TIMEOUT => RepairLocalCache
     }
+    get_agent_control_state() -> proto::GetAgentControlStateResponse {
+        rpc_request::Request::GetAgentControlState(proto::GetAgentControlStateRequest {}),
+        READ_TIMEOUT => AgentControlState
+    }
+    save_agent_settings(enabled: bool, alias: String, codex_path: String) -> proto::SaveAgentSettingsResponse {
+        rpc_request::Request::SaveAgentSettings(proto::SaveAgentSettingsRequest { enabled, alias, codex_path }),
+        WRITE_TIMEOUT => SaveAgentSettings
+    }
+    save_agent_workspace(workspace: proto::AgentWorkspace) -> proto::SaveAgentWorkspaceResponse {
+        rpc_request::Request::SaveAgentWorkspace(proto::SaveAgentWorkspaceRequest { workspace: Some(workspace) }),
+        WRITE_TIMEOUT => SaveAgentWorkspace
+    }
+    delete_agent_workspace(workspace_id: String) -> proto::DeleteAgentWorkspaceResponse {
+        rpc_request::Request::DeleteAgentWorkspace(proto::DeleteAgentWorkspaceRequest { workspace_id }),
+        WRITE_TIMEOUT => DeleteAgentWorkspace
+    }
+    set_agent_control_chat(chat_id: String, enabled: bool) -> proto::SetAgentControlChatResponse {
+        rpc_request::Request::SetAgentControlChat(proto::SetAgentControlChatRequest { chat_id, enabled }),
+        WRITE_TIMEOUT => SetAgentControlChat
+    }
+    save_agent_grant(grant: proto::AgentGrant) -> proto::SaveAgentGrantResponse {
+        rpc_request::Request::SaveAgentGrant(proto::SaveAgentGrantRequest { grant: Some(grant) }),
+        WRITE_TIMEOUT => SaveAgentGrant
+    }
+    delete_agent_grant(grant_id: String) -> proto::DeleteAgentGrantResponse {
+        rpc_request::Request::DeleteAgentGrant(proto::DeleteAgentGrantRequest { grant_id }),
+        WRITE_TIMEOUT => DeleteAgentGrant
+    }
+    interrupt_agent_run(run_id: String) -> proto::InterruptAgentRunResponse {
+        rpc_request::Request::InterruptAgentRun(proto::InterruptAgentRunRequest { run_id }),
+        WRITE_TIMEOUT => InterruptAgentRun
+    }
+    resolve_agent_approval(owner_code: String, approve: bool) -> proto::ResolveAgentApprovalResponse {
+        rpc_request::Request::ResolveAgentApproval(proto::ResolveAgentApprovalRequest { owner_code, approve }),
+        WRITE_TIMEOUT => ResolveAgentApproval
+    }
     list_chats(cursor: String, limit: u32) -> proto::ListChatsResponse {
         rpc_request::Request::ListChats(proto::ListChatsRequest { cursor, limit }),
         READ_TIMEOUT => ListChats
@@ -1915,6 +1953,15 @@ pub fn run() {
             get_history_overview,
             get_integrity_status,
             repair_local_cache,
+            get_agent_control_state,
+            save_agent_settings,
+            save_agent_workspace,
+            delete_agent_workspace,
+            set_agent_control_chat,
+            save_agent_grant,
+            delete_agent_grant,
+            interrupt_agent_run,
+            resolve_agent_approval,
             list_chats,
             list_messages,
             open_message_window,

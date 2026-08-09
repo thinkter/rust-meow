@@ -18,6 +18,16 @@ test("ships dark and light skeuomorphic themes without changing the default", ()
   assert.equal(BUILTIN_THEMES[1]?.appearance, "light");
 });
 
+test("ships Rust Red as a built-in dark theme", () => {
+  const rustRed = BUILTIN_THEMES.find((theme) => theme.id === "rust-red");
+
+  assert.equal(rustRed?.name, "Rust Red");
+  assert.equal(rustRed?.appearance, "dark");
+  assert.equal(rustRed?.visualStyle, "modern");
+  assert.equal(rustRed?.tokens.accent, "#e5484d");
+  assert.equal(rustRed?.tokens["bubble-out-bg"], "#9f1239");
+});
+
 test("legacy and invalid theme styles normalize to modern", () => {
   const legacy = normalizeTheme({
     id: "legacy",

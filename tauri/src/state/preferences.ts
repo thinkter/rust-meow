@@ -8,6 +8,8 @@ import {
   normalizeTheme,
   type Theme,
 } from "../lib/theme";
+import { isMessageRecoveryEnabled } from "../lib/message-recovery";
+import { isAgentControlExperimentEnabled } from "../lib/agent-control-gate";
 
 const STORAGE_KEY = "rust-meow-preferences";
 const OPTIONAL_MEMBER_PANEL_MIGRATION_KEY = "rust-meow-member-panel-opt-in-v1";
@@ -40,6 +42,10 @@ export interface Preferences {
   notificationsEnabled: boolean;
   /** Include message text in the operating system notification. */
   notificationPreviews: boolean;
+  /** Reveal locally retained message content from before an edit or deletion. */
+  messageRecoveryEnabled: boolean;
+  /** Reveal the experimental WhatsApp-to-Codex controller configuration UI. */
+  agentControlExperimentEnabled: boolean;
 }
 
 const defaults: Preferences = {
@@ -58,6 +64,8 @@ const defaults: Preferences = {
   batterySaver: false,
   notificationsEnabled: true,
   notificationPreviews: true,
+  messageRecoveryEnabled: false,
+  agentControlExperimentEnabled: false,
 };
 
 function readStored(): Partial<Preferences> {
@@ -93,7 +101,7 @@ function legacyPreferences(): Partial<Preferences> {
   return migrated;
 }
 
-function sanitize(stored: Partial<Preferences>): Preferences {
+export function sanitizePreferences(stored: Partial<Preferences>): Preferences {
   const customThemes = Array.isArray(stored.customThemes)
     ? stored.customThemes
         .map((theme) => normalizeTheme(theme))
@@ -121,11 +129,19 @@ function sanitize(stored: Partial<Preferences>): Preferences {
     batterySaver: stored.batterySaver ?? defaults.batterySaver,
     notificationsEnabled: stored.notificationsEnabled ?? defaults.notificationsEnabled,
     notificationPreviews: stored.notificationPreviews ?? defaults.notificationPreviews,
+    // This is deliberately opt-in, including for preferences written by an
+    // older release where the field does not exist.
+    messageRecoveryEnabled: isMessageRecoveryEnabled(stored.messageRecoveryEnabled),
+    // Agent Control is intentionally absent after upgrades until the user
+    // explicitly opts in through the nested Advanced settings disclosure.
+    agentControlExperimentEnabled: isAgentControlExperimentEnabled(
+      stored.agentControlExperimentEnabled,
+    ),
   };
 }
 
 export function createPreferences() {
-  const [preferences, setPreferences] = createStore<Preferences>(sanitize(readStored()));
+  const [preferences, setPreferences] = createStore<Preferences>(sanitizePreferences(readStored()));
 
   function persist() {
     try {

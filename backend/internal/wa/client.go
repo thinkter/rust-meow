@@ -56,6 +56,7 @@ import (
 
 type Event struct {
 	Kind                              string
+	ControllerOnly                    bool
 	Message                           domain.Message
 	Reaction                          domain.Reaction
 	Chat                              domain.Chat
@@ -947,6 +948,18 @@ func (c *Client) identityJIDs(ctx context.Context, rawJIDs ...string) []types.JI
 		}
 	}
 	return candidates
+}
+
+// IdentityAliases returns every currently known PN/LID address for the same
+// WhatsApp principal. Agent Control uses the complete set for RBAC so a
+// transport-address migration cannot create a new security identity.
+func (c *Client) IdentityAliases(ctx context.Context, rawJIDs ...string) []string {
+	jids := c.identityJIDs(ctx, rawJIDs...)
+	aliases := make([]string, 0, len(jids))
+	for _, jid := range jids {
+		aliases = append(aliases, jid.ToNonAD().String())
+	}
+	return aliases
 }
 
 func explicitIdentityJIDs(rawJIDs ...string) []types.JID {
@@ -1942,6 +1955,10 @@ func (c *Client) EditText(ctx context.Context, chatID, messageID, text string) (
 	if err = c.store.ApplyMessage(ctx, message, false); err != nil {
 		return domain.Message{}, err
 	}
+	message, err = c.store.Message(ctx, message.ChatJID, message.ID)
+	if err != nil {
+		return domain.Message{}, err
+	}
 	c.emitChat(message.ChatJID)
 	return message, nil
 }
@@ -1970,7 +1987,7 @@ func forwardedContent(message domain.Message, contextInfo *waE2E.ContextInfo) (*
 			Height: proto.Uint32(media.Height), Width: proto.Uint32(media.Width),
 			MediaKey: append([]byte(nil), media.MediaKey...), FileEncSHA256: append([]byte(nil), media.FileEncSHA256...),
 			DirectPath: proto.String(media.DirectPath), ContextInfo: contextInfo,
-			JPEGThumbnail: append([]byte(nil), media.JPEGThumbnail...),
+			JPEGThumbnail: normalizeWireJPEGThumbnail(media.JPEGThumbnail),
 		}}, nil
 	case "sticker":
 		if message.Image == nil {
@@ -2259,6 +2276,9 @@ const mediaCacheBytes int64 = 512 * 1024 * 1024
 const maxImagePixels int64 = 16_000_000
 const maxImageEdge = 8192
 const thumbnailMaxEdge = 512
+const wireThumbnailWidth = 32
+const wireThumbnailJPEGQuality = 50
+const maxEmbeddedThumbnailBytes = 256 * 1024
 const maxStaticStickerBytes = 100 * 1024
 const maxAnimatedStickerBytes = 500 * 1024
 const stickerEdge = 512
@@ -2747,6 +2767,22 @@ func (c *Client) writeThumbnail(originalPath, thumbnailPath string) error {
 	return nil
 }
 
+func encodeWireJPEGThumbnail(source image.Image) ([]byte, error) {
+	width, height := source.Bounds().Dx(), source.Bounds().Dy()
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("thumbnail source has invalid dimensions")
+	}
+	wireHeight := max(1, height*wireThumbnailWidth/width)
+	thumbnail := image.NewRGBA(image.Rect(0, 0, wireThumbnailWidth, wireHeight))
+	xdraw.CatmullRom.Scale(thumbnail, thumbnail.Bounds(), source, source.Bounds(), xdraw.Over, nil)
+
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, thumbnail, &jpeg.Options{Quality: wireThumbnailJPEGQuality}); err != nil {
+		return nil, fmt.Errorf("encode embedded thumbnail: %w", err)
+	}
+	return encoded.Bytes(), nil
+}
+
 func embeddedJPEGThumbnail(path string) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -2759,11 +2795,33 @@ func embeddedJPEGThumbnail(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode embedded thumbnail: %w", err)
 	}
-	var encoded bytes.Buffer
-	if err = jpeg.Encode(&encoded, thumbnail, &jpeg.Options{Quality: 72}); err != nil {
-		return nil, fmt.Errorf("encode embedded thumbnail: %w", err)
+	return encodeWireJPEGThumbnail(thumbnail)
+}
+
+// normalizeWireJPEGThumbnail repairs thumbnails stored by older Rust Meow
+// builds before re-forwarding them. Official-client 32-pixel JPEGs are kept
+// byte-for-byte; malformed or unexpectedly large blobs are safely omitted.
+func normalizeWireJPEGThumbnail(data []byte) []byte {
+	if len(data) == 0 || len(data) > maxEmbeddedThumbnailBytes {
+		return nil
 	}
-	return encoded.Bytes(), nil
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || config.Width <= 0 || config.Height <= 0 ||
+		config.Width > thumbnailMaxEdge || config.Height > thumbnailMaxEdge {
+		return nil
+	}
+	if format == "jpeg" && config.Width == wireThumbnailWidth {
+		return append([]byte(nil), data...)
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	normalized, err := encodeWireJPEGThumbnail(decoded)
+	if err != nil {
+		return nil
+	}
+	return normalized
 }
 
 // cachedImagePaths returns an all-or-nothing cache pair. Legacy originals only
@@ -3407,6 +3465,14 @@ func (c *Client) DownloadImage(ctx context.Context, chatID, messageID string) (s
 	if err != nil {
 		return "", "", err
 	}
+	if message.Image == nil && message.Revoked {
+		for i := len(message.Revisions) - 1; i >= 0; i-- {
+			if message.Revisions[i].Message.Image != nil {
+				message = message.Revisions[i].Message
+				break
+			}
+		}
+	}
 	chatID = message.ChatJID
 	if message.Image == nil {
 		return "", "", fmt.Errorf("message is not an image")
@@ -3692,8 +3758,13 @@ func (c *Client) DownloadAttachment(ctx context.Context, chatID, messageID strin
 	if err != nil {
 		return "", err
 	}
-	if message.Revoked {
-		return "", fmt.Errorf("attachment was deleted")
+	if message.Attachment == nil && message.Revoked {
+		for i := len(message.Revisions) - 1; i >= 0; i-- {
+			if message.Revisions[i].Message.Attachment != nil {
+				message = message.Revisions[i].Message
+				break
+			}
+		}
 	}
 	chatID = message.ChatJID
 	attachment := message.Attachment
@@ -4858,9 +4929,23 @@ func (c *Client) reduceMessage(evt *events.Message, unread bool) {
 	if !messagePersisted {
 		return
 	}
+	// Publish the authoritative row, not the incoming mutation wrapper. The
+	// store adds the just-captured edit/delete revision and preserves fields a
+	// revoke event does not carry.
+	if stored, loadErr := c.store.Message(c.ctx, m.ChatJID, m.ID); loadErr == nil {
+		m = stored
+	} else {
+		c.log.Warn("load persisted message for event", "chat_id", m.ChatJID, "message_id", m.ID, "error", loadErr)
+	}
 	if unread {
 		c.sink(Event{Kind: "message", Message: m})
 		c.emitChat(m.ChatJID)
+	} else {
+		// Messages sent from another linked device are already read, so they
+		// should not create a desktop notification/update event. Agent Control
+		// still needs to inspect them to support commands in the owner's
+		// "Message yourself" conversation.
+		c.sink(Event{Kind: "message", Message: m, ControllerOnly: true})
 	}
 }
 
@@ -4949,7 +5034,13 @@ func (c *Client) applyJournaledInbound(entry store.InboundMessage, replay bool) 
 		return false
 	}
 	if replay {
-		c.sink(Event{Kind: "message", Message: entry.Message})
+		message := entry.Message
+		if stored, loadErr := c.store.Message(c.ctx, entry.Message.ChatJID, entry.Message.ID); loadErr == nil {
+			message = stored
+		} else {
+			c.log.Warn("load replayed message for event", "chat_id", entry.Message.ChatJID, "message_id", entry.Message.ID, "error", loadErr)
+		}
+		c.sink(Event{Kind: "message", Message: message})
 		c.emitChat(entry.Message.ChatJID)
 	}
 	return true
