@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rust-meow/rust-meow/backend/internal/productversion"
 )
 
 type appEvent struct {
@@ -69,7 +71,7 @@ func StartAppServer(ctx context.Context, codexPath string) (*AppServer, error) {
 		UserAgent string `json:"userAgent"`
 	}
 	if err = server.Call(ctx, "initialize", map[string]any{
-		"clientInfo": map[string]string{"name": "rust-meow", "title": "Rust Meow", "version": "0.1.0"},
+		"clientInfo": map[string]string{"name": "rust-meow", "title": "Rust Meow", "version": productversion.Version},
 		"capabilities": map[string]any{
 			"experimentalApi":           true,
 			"optOutNotificationMethods": []string{"item/agentMessage/delta", "item/reasoning/textDelta"},
