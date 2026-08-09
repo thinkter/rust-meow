@@ -5,7 +5,7 @@ import {
   SyncPhase,
   HistoryCoverageState,
   MessageStatus,
-  type AttachmentContent, type Chat, type ChatInfo, type ChatParticipant,
+  type AttachmentContent, type ImageContent, type Chat, type ChatInfo, type ChatParticipant,
   type FrontendEventPayload, type Message, type MessageContent, type Reaction, type PinnedMessage,
   type AgentControlState, type AgentWorkspace, type AgentGrant,
 } from "./types";
@@ -25,6 +25,7 @@ const MOCK_EMBEDDED_IMAGE_THUMBNAIL = Array.from(
     (value) => value.charCodeAt(0),
   ),
 );
+const MOCK_ANIMATED_GIF_DATA_URL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAAQABAAACAkQBACH5BAAKAAAALAAAAAABAAEAAAICTAEAOw==";
 
 interface BrowserFileMetadata { fileName: string; mimeType: string; fileSize: number }
 
@@ -951,6 +952,8 @@ function familyMessages(): Message[] {
     makeMessage({ id: "family-05", chatId, timestampMs: STARTED_AT - DAY - 41 * MINUTE, fromMe: false, senderId: leela, senderName: "Leela", senderPhoneNumber: "+91 98111 12222", content: { attachment: attachmentContent("document", "weekend-plan.pdf", "application/pdf", "Packing checklist", 184_220) }, status: MessageStatus.Read }),
     makeMessage({ id: "family-06", chatId, timestampMs: STARTED_AT - DAY - 24 * MINUTE, fromMe: false, senderId: aarav, senderName: "Aarav", senderPhoneNumber: "+91 98200 01010", content: { location: { latitude: 12.4244, longitude: 75.7382, name: "Madikeri Homestay", address: "Galibeedu Road, Madikeri", url: "https://www.openstreetmap.org/?mlat=12.4244&mlon=75.7382", live: false } }, status: MessageStatus.Read }),
     makeMessage({ id: "family-07", chatId, timestampMs: STARTED_AT - 17 * MINUTE, fromMe: false, senderId: leela, senderName: "Leela", senderPhoneNumber: "+91 98111 12222", content: { contacts: { contacts: [{ displayName: "Homestay host", vcard: "BEGIN:VCARD\nFN:Homestay host\nTEL:+919900001234\nEND:VCARD" }] } }, status: MessageStatus.Read }),
+    makeMessage({ id: "family-gif-image", chatId, timestampMs: STARTED_AT - 15 * MINUTE, fromMe: false, senderId: aarav, senderName: "Aarav", senderPhoneNumber: "+91 98200 01010", content: { image: gifContent("Inline GIF should animate here") }, status: MessageStatus.Read }),
+    makeMessage({ id: "family-gif-video", chatId, timestampMs: STARTED_AT - 14 * MINUTE, fromMe: false, senderId: leela, senderName: "Leela", senderPhoneNumber: "+91 98111 12222", content: { attachment: gifAttachmentContent("") }, status: MessageStatus.Read }),
     makeMessage({ id: "family-08", chatId, timestampMs: STARTED_AT - 12 * MINUTE, fromMe: true, senderId: OWN_USER_ID, senderName: "You", content: { image: stickerContent("🚗") }, status: MessageStatus.Read }),
     makeMessage({ id: "family-09", chatId, timestampMs: STARTED_AT - 9 * MINUTE, fromMe: false, senderId: aarav, senderName: "Aarav", senderPhoneNumber: "+91 98200 01010", content: { text: textContent("I’ll pick everyone up near the metro.") }, status: MessageStatus.Read }),
     makeMessage({ id: "family-10", chatId, timestampMs: STARTED_AT - 6 * MINUTE, fromMe: false, senderId: leela, senderName: "Leela", senderPhoneNumber: "+91 98111 12222", content: { text: textContent("I have snacks covered ✅") }, status: MessageStatus.Read }),
@@ -1084,6 +1087,20 @@ function imageContent(caption: string, localPath: string) {
     thumbnailPath: "", jpegThumbnail: [],
   };
 }
+function gifContent(caption: string): ImageContent {
+  return {
+    ...imageContent(caption, MOCK_ANIMATED_GIF_DATA_URL),
+    mimeType: "image/gif",
+    width: 1,
+    height: 1,
+    fileSize: 85,
+    downloadable: false,
+    sticker: false,
+    animated: true,
+    thumbnailPath: mockPhoto("Static GIF thumbnail"),
+  };
+}
+
 
 function stickerContent(label: string) {
   const path = mockSticker(label);
@@ -1109,6 +1126,18 @@ function attachmentContent(
     animated: false, voiceNote: false, downloadable: true,
   };
 }
+function gifAttachmentContent(caption: string): AttachmentContent {
+  return {
+    ...attachmentContent("video", "weekend-loop.mp4", "video/mp4", caption, 84_200),
+    animated: true,
+    durationSeconds: 2,
+    width: 1280,
+    height: 720,
+    localPath: "",
+    downloadable: true,
+  };
+}
+
 
 function reaction(
   chatId: string,
