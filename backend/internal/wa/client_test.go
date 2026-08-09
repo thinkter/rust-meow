@@ -911,6 +911,15 @@ func TestDownloadDeletedAttachmentUsesSavedLocalVersion(t *testing.T) {
 	}
 }
 
+func TestAttachmentExtensionUsesMP4SuffixForVideoPlayback(t *testing.T) {
+	if got := attachmentExtension("video/mp4", ""); got != ".mp4" {
+		t.Fatalf("video/mp4 extension=%q, want .mp4", got)
+	}
+	if got := attachmentExtension("video/mp4", "CLIP.MP4"); got != ".mp4" {
+		t.Fatalf("named video/mp4 extension=%q, want .mp4", got)
+	}
+}
+
 func TestCachedAttachmentPathNeverExposesExternalOrSymlinkedFiles(t *testing.T) {
 	directory := t.TempDir()
 	mediaDir := filepath.Join(directory, "media")

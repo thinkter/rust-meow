@@ -2482,6 +2482,9 @@ func attachmentExtension(mimeType, fileName string) string {
 	}
 	mediaType, _, err := mime.ParseMediaType(mimeType)
 	if err == nil {
+		if mediaType == "video/mp4" {
+			return ".mp4"
+		}
 		if extensions, extensionErr := mime.ExtensionsByType(mediaType); extensionErr == nil {
 			for _, extension := range extensions {
 				extension = strings.ToLower(extension)
