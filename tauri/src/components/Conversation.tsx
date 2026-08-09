@@ -684,7 +684,10 @@ function estimateMessageHeight(
     } else if ("image" in message.content) {
       height += message.content.image.sticker ? (compact ? 165 : 200) : compact ? 230 : 285;
     } else if ("attachment" in message.content) {
-      height += compact ? 50 : 62;
+      const { attachment } = message.content;
+      height += attachment.kind === "video" && attachment.animated
+        ? compact ? 230 : 285
+        : compact ? 50 : 62;
     } else if ("contacts" in message.content) {
       height += message.content.contacts.contacts.length * (compact ? 48 : 60);
     } else {

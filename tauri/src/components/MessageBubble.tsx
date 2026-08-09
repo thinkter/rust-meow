@@ -45,7 +45,7 @@ import {
   messageText,
   safeHttpUrl,
 } from "../lib/format";
-import { assetUrl } from "../lib/bridge";
+import { assetUrl, browserMockEnabled } from "../lib/bridge";
 import { messageRecoveryView } from "../lib/message-recovery";
 import { parsePollFallback } from "../lib/unsupported";
 import {
@@ -62,6 +62,7 @@ import { ThemeIcon } from "./ThemeIcon";
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 const RECENT_REACTION_KEY = "rust-meow-recent-emoji";
 const EDIT_WINDOW_MS = 20 * 60_000;
+const MAX_INLINE_GIF_VIDEO_BYTES = 32 * 1024 * 1024;
 interface MessageBubbleProps {
   message: Message;
   model: AppModel;
@@ -79,6 +80,24 @@ interface MessageBubbleProps {
   firstReplyMessageId?: string;
   onScrollToMessage: (messageId: string) => void;
 }
+function isInlineGifImage(image: ImageContent | undefined): boolean {
+  return (image?.mimeType ?? "").toLowerCase() === "image/gif" ||
+    Boolean(image?.animated && !image?.sticker);
+}
+
+function imageRenderPath(image: ImageContent | undefined): string {
+  if (!image) return "";
+  return isInlineGifImage(image)
+    ? image.localPath || image.thumbnailPath || ""
+    : image.thumbnailPath || image.localPath || "";
+}
+
+function isStickerOnlyMessage(message: Message): boolean {
+  const content = message.content;
+  return !message.revoked &&
+    Boolean(content && "image" in content && content.image.sticker && content.image.caption.trim() === "");
+}
+
 
 export function MessageBubble(props: MessageBubbleProps) {
   const { actions } = props.model;
@@ -100,6 +119,8 @@ export function MessageBubble(props: MessageBubbleProps) {
   );
   const revisions = () => recovery().revisions;
   const preservedMessage = () => recovery().preservedMessage;
+  const renderedMessage = () => preservedMessage() ?? props.message;
+  const stickerOnly = () => !props.message.revoked && isStickerOnlyMessage(renderedMessage());
   const savableMedia = createMemo(() => savableMediaInfo(preservedMessage() ?? props.message));
 
   createEffect(() => {
@@ -145,7 +166,7 @@ export function MessageBubble(props: MessageBubbleProps) {
 
   return (
     <div
-      class={`message-bubble ${props.highlighted ? "highlight" : ""}`}
+      class={`message-bubble ${stickerOnly() ? "sticker-only" : ""} ${props.highlighted ? "highlight" : ""}`}
       style={{ "--sender-hue": `${hueFor(props.message.senderId || props.message.senderName)}` }}
       data-message-id={props.message.id}
     >
@@ -203,7 +224,7 @@ export function MessageBubble(props: MessageBubbleProps) {
       </Show>
 
       <MessageContent
-        message={preservedMessage() ?? props.message}
+        message={renderedMessage()}
         model={props.model}
         chatId={props.chatId}
       />
@@ -695,7 +716,7 @@ function ImageMessage(props: { message: Message; model: AppModel; chatId: string
     const content = props.message.content;
     return content && "image" in content ? content.image : undefined;
   };
-  const path = () => image()?.thumbnailPath || image()?.localPath || "";
+  const path = () => imageRenderPath(image());
   const source = () => assetUrl(path()) || jpegDataUrl(image()?.jpegThumbnail ?? []);
   const error = () => props.model.state.imageFailures[`${props.chatId}\u0000${props.message.id}`];
   return (
@@ -755,16 +776,67 @@ function AttachmentMessage(props: {
   chatId: string;
 }) {
   const [playbackFailed, setPlaybackFailed] = createSignal(false);
+  const [blobSource, setBlobSource] = createSignal("");
   let videoRef: HTMLVideoElement | undefined;
-  const source = () => assetUrl(props.attachment.localPath);
   const isAudio = () => props.attachment.kind === "audio" || props.attachment.voiceNote;
   const isVideo = () => props.attachment.kind === "video";
   const isGif = () => isVideo() && props.attachment.animated;
+  const needsLinuxBlob = () =>
+    !browserMockEnabled && navigator.userAgent.includes("Linux") && isGif();
+  const source = () =>
+    needsLinuxBlob() ? blobSource() : assetUrl(props.attachment.localPath);
   const failure = () => props.model.state.attachmentFailures[`${props.chatId}\u0000${props.message.id}`];
   const icon = () => (isAudio() ? <FileAudio size={23} /> : isVideo() ? <FileVideo size={23} /> : <FileText size={23} />);
 
   createEffect(() => {
-    if (!videoRef || !isGif()) return;
+    const path = props.attachment.localPath;
+    if (
+      !needsLinuxBlob() ||
+      !path ||
+      props.attachment.fileSize > MAX_INLINE_GIF_VIDEO_BYTES
+    ) {
+      setBlobSource("");
+      return;
+    }
+    const directUrl = assetUrl(path);
+    if (!directUrl) return;
+
+    let disposed = false;
+    let objectUrl = "";
+    void fetch(directUrl)
+      .then((response) => {
+        if (!response.ok) throw new Error(`Media request failed with ${response.status}`);
+        return response.blob();
+      })
+      .then((blob) => {
+        if (disposed) return;
+        const typedBlob = blob.slice(
+          0,
+          blob.size,
+          props.attachment.mimeType || "video/mp4",
+        );
+        objectUrl = URL.createObjectURL(typedBlob);
+        setBlobSource(objectUrl);
+        setPlaybackFailed(false);
+      })
+      .catch(() => {
+        if (!disposed) setPlaybackFailed(true);
+      });
+
+    onCleanup(() => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    });
+  });
+
+  createEffect(() => {
+    if (isGif() && !props.attachment.localPath) {
+      void props.model.actions.hydrateAttachment(props.message, false, props.chatId);
+    }
+  });
+
+  createEffect(() => {
+    if (!source() || !videoRef || !isGif()) return;
     if (props.model.preferences.batterySaver) videoRef.pause();
     else void videoRef.play().catch(() => undefined);
   });

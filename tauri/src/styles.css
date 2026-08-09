@@ -1360,11 +1360,33 @@ html[data-appearance="light"] .avatar {
   color: var(--bubble-in-fg);
   user-select: text;
 }
+.message-bubble.sticker-only {
+  position: relative;
+  display: flex;
+  width: fit-content;
+  max-width: min(240px, 74%);
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  overflow-wrap: normal;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--fg);
+  user-select: none;
+}
+
 
 .message-row.from-me .message-bubble {
   background: var(--bubble-out-bg);
   color: var(--bubble-out-fg);
 }
+.message-row.from-me .message-bubble.sticker-only {
+  align-items: flex-end;
+  background: transparent;
+  color: var(--fg);
+}
+
 
 .message-bubble.highlight {
   animation: message-highlight 2.4s ease;
@@ -1661,6 +1683,10 @@ html[data-appearance="light"] .message-sender {
   margin: 0;
   background: transparent;
 }
+.message-bubble.sticker-only .message-image.sticker {
+  margin: 0;
+}
+
 
 .message-image.gif {
   max-height: calc(360px * var(--scale));
@@ -1981,6 +2007,16 @@ html[data-appearance="light"] .message-sender {
   line-height: 1;
   opacity: 0.75;
 }
+.message-bubble.sticker-only .message-meta {
+  align-self: flex-end;
+  margin: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--bg-elevated) 82%, transparent);
+  color: var(--fg-muted);
+  opacity: 0.82;
+}
+
 
 .message-meta .read {
   color: var(--info);
@@ -3988,6 +4024,11 @@ html[data-density="compact"] .message-meta {
   font-size: 10px;
   opacity: 0.6;
 }
+html[data-density="compact"] .message-bubble.sticker-only .message-meta {
+  float: none;
+  margin: 0;
+}
+
 
 html[data-density="compact"] .reaction-row {
   margin-top: 2px;
@@ -4650,6 +4691,17 @@ html[data-theme-style="skeuomorphic"] .message-row.from-me .message-bubble::afte
   background: color-mix(in srgb, var(--bubble-out-bg) 84%, #000);
   clip-path: polygon(0 0, 100% 100%, 0 100%);
 }
+html[data-theme-style="skeuomorphic"] .message-bubble.sticker-only,
+html[data-theme-style="skeuomorphic"] .message-row.from-me .message-bubble.sticker-only {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+html[data-theme-style="skeuomorphic"] .message-bubble.sticker-only::after {
+  content: none;
+}
+
 
 html[data-theme-style="skeuomorphic"] .message-actions,
 html[data-theme-style="skeuomorphic"] .popover,
