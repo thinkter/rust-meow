@@ -50,6 +50,7 @@ interface SpotlightSection {
 export function SpotlightSearch(props: {
   model: AppModel;
   open: boolean;
+  newTabPaneId?: string;
   onClose: () => void;
 }) {
   const { state, actions, preferences } = props.model;
@@ -97,7 +98,7 @@ export function SpotlightSearch(props: {
         rows: groups.map((result) => ({ type: "group" as const, result })),
       });
     }
-    if (remote.messages.length > 0) {
+    if (!props.newTabPaneId && remote.messages.length > 0) {
       next.push({
         label: "Messages",
         rows: remote.messages.map((result) => ({ type: "message" as const, result })),
@@ -180,7 +181,7 @@ export function SpotlightSearch(props: {
           class="spotlight"
           role="dialog"
           aria-modal="true"
-          aria-label="Quick search"
+          aria-label={props.newTabPaneId ? "Open a new chat tab" : "Quick search"}
           onPointerDown={(event) => event.stopPropagation()}
         >
           <label class="spotlight-input">
@@ -189,8 +190,8 @@ export function SpotlightSearch(props: {
               ref={input}
               type="search"
               value={query()}
-              placeholder="Search chats and messages"
-              aria-label="Search people, groups, and messages"
+              placeholder={props.newTabPaneId ? "Search chats, contacts, and groups" : "Search chats and messages"}
+              aria-label={props.newTabPaneId ? "Search chats, contacts, and groups" : "Search people, groups, and messages"}
               autocomplete="off"
               onInput={(event) => setQuery(event.currentTarget.value)}
               onKeyDown={handleKeyDown}
@@ -207,7 +208,11 @@ export function SpotlightSearch(props: {
               </Match>
               <Match when={!loading() && selectableRows().length === 0}>
                 <EmptyState
-                  title={query().trim() ? "No people, groups, or messages found" : "No chats loaded yet"}
+                  title={query().trim()
+                    ? props.newTabPaneId
+                      ? "No chats, contacts, or groups found"
+                      : "No people, groups, or messages found"
+                    : "No chats loaded yet"}
                 >
                   <ThemeIcon icon={Search} name="search" size={24} />
                 </EmptyState>
@@ -240,7 +245,7 @@ export function SpotlightSearch(props: {
 
           <footer class="spotlight-footer">
             <span><ArrowUp size={13} /><ArrowDown size={13} /> navigate</span>
-            <span><CornerDownLeft size={13} /> open</span>
+            <span><CornerDownLeft size={13} /> {props.newTabPaneId ? "open in new tab" : "open"}</span>
             <span><kbd>esc</kbd> close</span>
             <span class="spotlight-footer-spacer" />
             <span><Command size={13} /> Quick search</span>
@@ -273,7 +278,12 @@ export function SpotlightSearch(props: {
   }
 
   async function activate(row: SpotlightRow) {
-    if (row.type === "chat") await actions.selectChat(row.match.chat.id);
+    const paneId = props.newTabPaneId;
+    if (paneId) {
+      if (row.type === "chat") await actions.openInNewTab(row.match.chat.id, paneId);
+      else if (row.type === "contact") await actions.openContact(row.result, paneId, true);
+      else if (row.type === "group") await actions.openInNewTab(row.result.id, paneId);
+    } else if (row.type === "chat") await actions.selectChat(row.match.chat.id);
     else if (row.type === "contact") await actions.openContact(row.result);
     else if (row.type === "group") await actions.selectChat(row.result.id);
     else await actions.openMessageResult(row.result);

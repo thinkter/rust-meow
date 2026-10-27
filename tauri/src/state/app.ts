@@ -1275,16 +1275,23 @@ export function createAppModel(lifecycleHooks: AppModelLifecycleHooks = {}) {
     });
   }
 
-  async function openContact(result: ContactSearchResult) {
+  async function openContact(
+    result: ContactSearchResult,
+    paneId = state.focusedPaneId,
+    openAsNewTab = false,
+  ) {
+    const openChat = (chatId: string) => openAsNewTab
+      ? openInNewTab(chatId, paneId)
+      : selectChat(chatId, "", paneId);
     if (result.chatId) {
-      await selectChat(result.chatId);
+      await openChat(result.chatId);
       return;
     }
     try {
       const response = await bridge.openContact(result.contactJid);
       if (!response.chat) throw new Error("The contact did not produce a chat");
       upsertChat(response.chat);
-      await selectChat(response.chat.id);
+      await openChat(response.chat.id);
     } catch (error) {
       toast(normalizeBridgeError(error).message);
     }
