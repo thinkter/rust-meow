@@ -101,7 +101,9 @@ function normalizeCatalog(entries: readonly EmojiCatalogEntry[]): readonly Norma
  * Ranks the picker catalog for a shortcode query.
  *
  * Exact keyword matches come first, followed by word-prefix matches and then
- * substring matches. Catalog order breaks ties, so results remain stable.
+ * substring matches. Within a score, the earlier matching keyword wins (so a
+ * CLDR name such as `rocket` beats a tag that merely mentions it), then catalog
+ * order, which keeps results stable.
  */
 export function rankEmojiSuggestions(
   query: string,
@@ -111,7 +113,7 @@ export function rankEmojiSuggestions(
   if (!Number.isInteger(limit) || limit <= 0) return [];
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const ranked: Array<EmojiSuggestion & { score: number; order: number }> = [];
+  const ranked: Array<EmojiSuggestion & { score: number; position: number; order: number }> = [];
   const seen = new Set<string>();
 
   for (const { emoji, keywords } of normalizeCatalog(entries)) {
@@ -126,12 +128,13 @@ export function rankEmojiSuggestions(
       label: match.keyword,
       keywords,
       score: match.score,
+      position: match.position,
       order: ranked.length,
     });
   }
 
   return ranked
-    .sort((left, right) => left.score - right.score || left.order - right.order)
+    .sort((left, right) => left.score - right.score || left.position - right.position || left.order - right.order)
     .slice(0, limit)
     .map(({ emoji, label, keywords }) => ({ emoji, label, keywords }));
 }
@@ -176,21 +179,26 @@ export function applyEmojiSuggestion(
   };
 }
 
-function bestKeywordMatch(
-  query: string,
-  keywords: readonly string[],
-): { keyword: string; score: number } | null {
+interface KeywordMatch {
+  keyword: string;
+  /** 0 exact, 1 prefix, 2 substring, 3 bare query. */
+  score: number;
+  /** Index of the matching keyword within the entry's keyword list. */
+  position: number;
+}
+
+function bestKeywordMatch(query: string, keywords: readonly string[]): KeywordMatch | null {
   if (keywords.length === 0) return null;
-  if (!query) return { keyword: keywords[0], score: 3 };
+  if (!query) return { keyword: keywords[0], score: 3, position: 0 };
 
-  const exact = keywords.find((keyword) => keyword === query);
-  if (exact) return { keyword: exact, score: 0 };
+  const exact = keywords.findIndex((keyword) => keyword === query);
+  if (exact !== -1) return { keyword: keywords[exact], score: 0, position: exact };
 
-  const prefix = keywords.find((keyword) => keyword.startsWith(query));
-  if (prefix) return { keyword: prefix, score: 1 };
+  const prefix = keywords.findIndex((keyword) => keyword.startsWith(query));
+  if (prefix !== -1) return { keyword: keywords[prefix], score: 1, position: prefix };
 
-  const substring = keywords.find((keyword) => keyword.includes(query));
-  if (substring) return { keyword: substring, score: 2 };
+  const substring = keywords.findIndex((keyword) => keyword.includes(query));
+  if (substring !== -1) return { keyword: keywords[substring], score: 2, position: substring };
 
   return null;
 }
