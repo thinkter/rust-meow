@@ -291,10 +291,10 @@ export function ForwardDialog(props: { model: AppModel }) {
 
 export function FileSendDialog(props: { model: AppModel }) {
   const { state, actions } = props.model;
-  let cancelButton: HTMLButtonElement | undefined;
+  let sendButton: HTMLButtonElement | undefined;
 
   createEffect(() => {
-    if (state.fileSendConfirmation) queueMicrotask(() => cancelButton?.focus());
+    if (state.fileSendConfirmation) queueMicrotask(() => sendButton?.focus());
   });
 
   const request = () => state.fileSendConfirmation;
@@ -359,10 +359,10 @@ export function FileSendDialog(props: { model: AppModel }) {
               </p>
             </Show>
             <div class="dialog-actions">
-              <button ref={cancelButton} type="button" class="secondary-button" disabled={state.sending} onClick={() => actions.cancelFileSend()}>
+              <button type="button" class="secondary-button" disabled={state.sending} onClick={() => actions.cancelFileSend()}>
                 Cancel
               </button>
-              <button type="button" class="primary-button" disabled={state.sending} onClick={() => void actions.confirmFileSend()}>
+              <button ref={sendButton} type="button" class="primary-button" disabled={state.sending} onClick={() => void actions.confirmFileSend()}>
                 {value().mode === "sticker" ? "Create and send" : "Send"} {count()}
               </button>
             </div>

@@ -13,6 +13,7 @@ versions are tracked separately in `docs/VERSIONING.md`.
 - Stabilized message scrolling while new messages arrive and older history is
   prepended.
 - Removed the redundant per-conversation “Connected” status label.
+- File-send confirmation now focuses Send so Enter confirms pasted images.
 
 ## [0.2.0] - 2026-08-09
 
