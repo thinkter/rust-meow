@@ -3119,11 +3119,14 @@ html[data-appearance="light"] .message-sender {
   place-items: center;
   background: var(--bg-app);
 }
+.conversation-empty {
+  padding-top: 32px;
+}
 
 .startup-card,
 .pairing-card,
 .fatal-card,
-.conversation-empty-card {
+.conversation-empty-content {
   display: flex;
   max-width: 520px;
   align-items: center;
@@ -3145,7 +3148,7 @@ html[data-appearance="light"] .message-sender {
 .startup-card h2,
 .pairing-card h2,
 .fatal-card h2,
-.conversation-empty-card h2 {
+.conversation-empty-content h2 {
   margin: 0 0 10px;
   font-size: calc(20px * var(--scale));
   font-weight: 500;
@@ -3155,34 +3158,28 @@ html[data-appearance="light"] .message-sender {
 .startup-card p,
 .pairing-card p,
 .fatal-card p,
-.conversation-empty-card p {
+.conversation-empty-content p {
   margin: 0;
   color: var(--fg-subtle);
   line-height: 1.55;
 }
 
-.conversation-empty-card {
-  width: min(520px, calc(100% - 32px));
-  padding: calc(36px * var(--scale)) calc(30px * var(--scale));
-  border: 1px solid var(--border);
-  border-radius: calc(24px * var(--scale));
-  background: color-mix(in srgb, var(--bg-panel) 86%, var(--accent) 14%);
-  box-shadow: var(--shadow-lg);
+.conversation-empty-content {
+  width: min(420px, calc(100% - 32px));
 }
 
-.conversation-empty-card .hero-icon {
-  width: 104px;
-  height: 104px;
-  border-radius: 30px;
-  box-shadow: 0 14px 34px color-mix(in srgb, var(--accent) 18%, transparent);
+.conversation-empty-content h2 {
+  margin-bottom: 8px;
+  font-size: calc(18px * var(--scale));
+  letter-spacing: 0;
+}
+
+.conversation-empty-content p {
+  line-height: 1.5;
 }
 
 .keyboard-hint {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  margin-top: 14px !important;
+  margin-top: 18px !important;
   color: var(--fg-muted) !important;
   font-size: 12px;
 }

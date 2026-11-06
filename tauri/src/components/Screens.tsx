@@ -9,7 +9,6 @@ import {
   MessageCircleMore,
   RefreshCw,
   Search,
-  ShieldCheck,
   X,
 } from "lucide-solid";
 import type { AppModel } from "../state/app";
@@ -94,14 +93,10 @@ export function PairingScreen(props: { model: AppModel }) {
 export function EmptyConversation() {
   return (
     <section class="conversation-empty">
-      <div class="conversation-empty-card">
-        <div class="hero-icon"><ThemeIcon icon={MessageCircleMore} name="messages" size={60} /></div>
-        <h2>Rust Meow for desktop</h2>
-        <p>Select a conversation or search for a contact to start chatting.</p>
-        <p class="keyboard-hint"><kbd>j</kbd><kbd>k</kbd> browse chats · <kbd>Enter</kbd> open · <kbd>?</kbd> shortcuts</p>
-        <p style={{ "margin-top": "15px", display: "flex", "align-items": "center", gap: "7px" }}>
-          <ThemeIcon icon={ShieldCheck} name="shield" size={15} /> Your linked-device credentials never enter the webview.
-        </p>
+      <div class="conversation-empty-content">
+        <h2>Choose a conversation</h2>
+        <p>Select a chat from the sidebar to start.</p>
+        <p class="keyboard-hint">j/k navigate · Enter open · / search</p>
       </div>
     </section>
   );

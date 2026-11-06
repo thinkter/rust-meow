@@ -1,91 +1,66 @@
 # Rust Meow
 
-A small WhatsApp desktop client. The UI is SolidJS in a Tauri webview. A Go
-sidecar built on [whatsmeow](https://github.com/tulir/whatsmeow) does the real
-work and owns the databases.
+Rust Meow is an unofficial WhatsApp desktop client for private testing. It uses a
+SolidJS frontend in a Tauri shell and a Go/whatsmeow sidecar for WhatsApp,
+local storage, and media.
 
-<img width="1912" height="1160" alt="Rust Meow screenshot" src="https://github.com/user-attachments/assets/dfd4818f-f273-443c-a701-8c7873359ce0" />
+## Quick start
 
-Private testing only. It's an unofficial client and not a WhatsApp Desktop
-replacement, so don't treat it like one.
-
-## Running it
-
-You need Go 1.25+, Rust (stable), Node 22, pnpm 10.28.2, and the Tauri Linux
-deps. The apt list is in `.github/workflows/release.yml`. Codex CLI is only for
-Agent Control.
+Requirements: Go 1.25+, stable Rust, Node.js 22, pnpm 10.28.2, and the Tauri
+Linux packages when developing on Linux.
 
 ```sh
 make deps
-make dev-fake   # fake data, no account. good for layout, nothing else
-make dev        # real sidecar. scan the QR under WhatsApp > Linked devices
+make dev-fake   # deterministic data; no WhatsApp account needed
+make dev        # real backend; scan the QR code in WhatsApp > Linked devices
 ```
 
-On Windows, run these from Git Bash. For a throwaway profile, prefix `make dev`
-with `RUST_MEOW_DATA_DIR="$(mktemp -d)"`.
+Use an isolated profile when pairing or testing logout:
 
-## Checks and builds
-
-- `make check`: Go tests, TypeScript and Rust lint
-- `make test`: Go, frontend and Tauri tests
-- `make build` or `make release-linux`: release binary or `.deb`. The `.deb`
-  target runs `make check` first.
-
-## Keyboard navigation
-
-Normal mode is always available outside text fields:
-
-```text
-j/k or arrows  move chats, tabs, or messages
-g g / G        first / last item
-h/l            move panes, sidebar, conversation, or composer
-i              focus the composer
-/              focus chat search
-o              open quick search
-r/e/f/p         reply, edit, forward, pin the focused message
-x or d          close the current chat tab
-c/m/s           chat info, members, settings
-?              show the shortcut guide
-Esc             close the active overlay or clear search
+```sh
+RUST_MEOW_DATA_DIR="$(mktemp -d)" make dev
 ```
 
+The profile contains linked-device credentials. Do not put it in bug reports.
 
-Pushing a `v*` tag builds installers for every supported platform and publishes
-a GitHub Release. Run the Release workflow by hand if you only want artifacts.
+## Common commands
+
+| Command | Purpose |
+| --- | --- |
+| `make check` | Version check, Go tests/vet, TypeScript check, Rust clippy |
+| `make test` | Backend, frontend, performance, and Tauri tests/build |
+| `make build` | Unbundled optimized desktop binary plus sidecar |
+| `make release-linux` | Linux `.deb` with the Go sidecar |
+| `make legacy-test` | Tests the old GPUI client kept as a migration reference |
+
+The Makefile is a small project-level wrapper: it builds the Go sidecar, runs
+checks across Go/TypeScript/Rust, stages Tauri's sidecar, and keeps release
+commands reproducible. It is not another build system. Run `make help` for the
+full target list.
+
+## Repository layout
+
+- `backend/` — Go WhatsApp/whatsmeow sidecar, databases, media, and bridge logic.
+- `tauri/` — current desktop app: SolidJS/Vite UI and Tauri/Rust host.
+- `desktop/` — previous GPUI desktop, retained until the Tauri migration is complete.
+- `proto/` — protobuf contract shared by the sidecar and desktop clients.
+- `scripts/` — version, release, and performance tooling.
+- `docs/` — migration, release, QA, and performance notes.
+- `plugins/` — the optional Agent Control plugin.
+
+`build/`, `tauri/node_modules/`, `tauri/dist/`, Cargo targets, and
+`tauri/src-tauri/binaries/` are generated or local-only and ignored by Git.
+Release scripts populate the binaries directory with the sidecar for the target
+being packaged.
 
 ## Agent Control
 
-Experimental. Allowlisted WhatsApp chats can start and watch Codex runs on your
-machine. Only use it on machines and chats you control.
+Agent Control is experimental and off by default. When enabled, allowlisted
+WhatsApp chats can start Codex runs with full filesystem and network access.
+Only enable it on machines and chats you control.
 
-**Read this first.** Runs get `:danger-full-access` with network access and no
-approval prompts. Owners and Operators can run any command and touch files
-outside the workspace. Only the Access list and Control chats decide who gets
-in, so pick carefully.
+## More detail
 
-Turn it on under **Settings > Advanced > Experimental features**. In the Agent
-Control panel, add a workspace folder, enable the chats that can send commands,
-then enable the controller under **Overview**.
-
-Owners (the linked-device account) can use every workspace. Operators can start
-and stop runs in granted workspaces. Viewers can only check status. Replies go
-back to the chat, so the whole group can read them.
-
-```text
-!meow agent @rust-meow summarize this repository
-!meow agent status
-!meow agent stop 12AB34CD
-```
-
-Leave out `@rust-meow` for the default workspace. Reply to a run to continue it.
-One active run per workspace, three per machine.
-
-## Data
-
-Your profile is in `~/.local/share/rust-meow` on Linux (`~/Library/Application
-Support/rust-meow` on macOS, `%LOCALAPPDATA%\rust-meow` on Windows). It holds
-linked-device credentials, so keep it out of bug reports. Logout erases the
-local databases and media cache, but not backups or snapshots.
-
-More detail, including architecture and troubleshooting, is in
-[tauri/README.md](tauri/README.md).
+- [Tauri development and release notes](tauri/README.md)
+- [Versioning and release checklist](docs/VERSIONING.md)
+- [Changelog](CHANGELOG.md)
