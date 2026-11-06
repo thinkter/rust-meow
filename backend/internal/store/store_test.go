@@ -1192,6 +1192,44 @@ func TestEnsureConversationMergesPNAndLIDWithoutLosingTransport(t *testing.T) {
 	}
 }
 
+func TestEnsureConversationMergePreservesEarliestDuplicateMessageTimestamp(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	pn := "919999890760@s.whatsapp.net"
+	lid := "207236550930675@lid"
+	pnChat, _, err := s.EnsureConversation(ctx, pn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lidChat, _, err := s.EnsureConversation(ctx, lid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalAt := time.Unix(1, 0)
+	lateReplayAt := originalAt.Add(24 * time.Hour)
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "same", ChatJID: pnChat, TransportJID: pn, Text: "original", Kind: "image", Timestamp: originalAt, Image: &domain.Image{MIMEType: "image/jpeg"}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ApplyMessage(ctx, domain.Message{ID: "same", ChatJID: lidChat, TransportJID: lid, Text: "replayed", Kind: "image", Timestamp: lateReplayAt, Image: &domain.Image{MIMEType: "image/jpeg"}}, false); err != nil {
+		t.Fatal(err)
+	}
+	winner, _, err := s.EnsureConversation(ctx, lid, pn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Message(ctx, winner, "same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Timestamp.Equal(originalAt) {
+		t.Fatalf("merged duplicate timestamp=%v want %v", got.Timestamp, originalAt)
+	}
+}
+
 func TestEnsureConversationKeepsNewestSelfReactionPerMessage(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "client.db"))

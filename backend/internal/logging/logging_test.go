@@ -1,11 +1,38 @@
 package logging
 
 import (
+	"bytes"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+
+	signallogger "go.mau.fi/libsignal/logger"
 )
+
+func TestInstallSignalLoggerRoutesToSlog(t *testing.T) {
+	var buf bytes.Buffer
+	InstallSignalLogger(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() {
+		InstallSignalLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	})
+
+	signallogger.Error("Unable to verify ciphertext mac: mismatching MAC in signal message")
+
+	line := buf.String()
+	if !strings.Contains(line, `"level":"ERROR"`) {
+		t.Fatalf("libsignal log missing error level: %q", line)
+	}
+	if !strings.Contains(line, "Unable to verify ciphertext mac") {
+		t.Fatalf("libsignal log missing message: %q", line)
+	}
+	if !strings.Contains(line, `"caller":`) {
+		t.Fatalf("libsignal log missing caller: %q", line)
+	}
+}
 
 func TestNewRestrictsExistingLogFileMode(t *testing.T) {
 	if runtime.GOOS == "windows" {

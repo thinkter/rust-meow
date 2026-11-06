@@ -56,6 +56,11 @@ func run() error {
 	if closer != nil {
 		defer closer.Close()
 	}
+	logging.InstallSignalLogger(log)
+	// Reserve the real stdout for the framed bridge protocol. Third-party code
+	// that prints to os.Stdout would otherwise desynchronise the frame reader.
+	wireStdout := os.Stdout
+	os.Stdout = os.Stderr
 	base, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithCancel(base)
@@ -65,7 +70,7 @@ func run() error {
 		return err
 	}
 	defer productStore.Close()
-	codec := bridge.NewCodec(os.Stdin, os.Stdout)
+	codec := bridge.NewCodec(os.Stdin, wireStdout)
 	server := app.New(ctx, cancel, codec, productStore)
 	client, err := wa.New(ctx, abs, productStore, server.Emit, log)
 	if err != nil {

@@ -1107,7 +1107,10 @@ link_preview_url,link_preview_title,link_preview_description,link_preview_thumbn
 FROM messages WHERE chat_jid=? AND true
 ON CONFLICT(chat_jid,id) DO UPDATE SET
 transport_jid=CASE WHEN excluded.transport_jid LIKE '%@lid' OR messages.transport_jid='' THEN excluded.transport_jid ELSE messages.transport_jid END,
-sender_jid=excluded.sender_jid,timestamp=max(messages.timestamp,excluded.timestamp),from_me=excluded.from_me,
+sender_jid=excluded.sender_jid,timestamp=CASE
+  WHEN messages.timestamp=0 THEN excluded.timestamp
+  WHEN excluded.timestamp=0 THEN messages.timestamp
+  ELSE min(messages.timestamp,excluded.timestamp) END,from_me=excluded.from_me,
 status=CASE WHEN excluded.status=5 AND messages.status<=1 THEN 5 WHEN excluded.status=5 THEN messages.status WHEN messages.status=5 THEN excluded.status ELSE max(messages.status,excluded.status) END,
 kind=excluded.kind,reply_to_id=excluded.reply_to_id,reply_to_chat_id=excluded.reply_to_chat_id,
 text=CASE WHEN excluded.edited_at>=messages.edited_at THEN excluded.text ELSE messages.text END,
