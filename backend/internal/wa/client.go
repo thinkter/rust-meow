@@ -1657,6 +1657,13 @@ func (c *Client) cancelAndWaitPairing(ctx context.Context) error {
 	}
 }
 
+func replyParticipant(message domain.Message, ownID string) string {
+	if message.FromMe && ownID != "" {
+		return ownID
+	}
+	return message.SenderJID
+}
+
 func (c *Client) replyContext(ctx context.Context, chatID, messageID string) (*waE2E.ContextInfo, error) {
 	if messageID == "" {
 		return nil, nil
@@ -1665,9 +1672,13 @@ func (c *Client) replyContext(ctx context.Context, chatID, messageID string) (*w
 	if err != nil {
 		return nil, err
 	}
+	ownID := ""
+	if c.wa != nil {
+		ownID = c.OwnID()
+	}
 	return &waE2E.ContextInfo{
 		StanzaID:      proto.String(target.ID),
-		Participant:   proto.String(target.SenderJID),
+		Participant:   proto.String(replyParticipant(target, ownID)),
 		RemoteJID:     proto.String(target.TransportJID),
 		QuotedMessage: quotedMessage(target),
 	}, nil

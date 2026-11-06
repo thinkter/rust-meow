@@ -320,6 +320,25 @@ func TestReplyContextPreservesPrivateReplySourceGroup(t *testing.T) {
 		t.Fatalf("quoted message=%+v", reply.GetQuotedMessage())
 	}
 }
+func TestReplyParticipantUsesOwnIdentityForOwnMessage(t *testing.T) {
+	message := domain.Message{
+		SenderJID: "123@g.us",
+		FromMe:    true,
+	}
+	if got := replyParticipant(message, "456@s.whatsapp.net"); got != "456@s.whatsapp.net" {
+		t.Fatalf("participant=%q", got)
+	}
+}
+
+func TestReplyParticipantKeepsIncomingSender(t *testing.T) {
+	message := domain.Message{
+		SenderJID: "456@s.whatsapp.net",
+		FromMe:    false,
+	}
+	if got := replyParticipant(message, "789@s.whatsapp.net"); got != message.SenderJID {
+		t.Fatalf("participant=%q", got)
+	}
+}
 
 func TestDomainMessagePreservesExtendedTextLinkPreview(t *testing.T) {
 	chat, _ := types.ParseJID("123@g.us")
