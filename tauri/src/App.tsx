@@ -33,7 +33,14 @@ import { AgentControlPanel } from "./components/AgentControlPanel";
 import { bridge, listenForFileDrops } from "./lib/bridge";
 import { classifyDroppedFiles } from "./lib/file-drop";
 import { disableAgentControlIfNeeded } from "./lib/agent-control-gate";
-import { isEditableTarget, resolveVimCommand, type VimCommand } from "./lib/vim-navigation";
+import {
+  VIM_MESSAGE_EVENT,
+  isEditableTarget,
+  resolveVimCommand,
+  type VimCommand,
+  type VimMessageCommand,
+  type VimMessageEventDetail,
+} from "./lib/vim-navigation";
 
 export default function App() {
   const model = createAppModel();
@@ -343,23 +350,33 @@ export default function App() {
       case "toggle-shortcuts":
         setShortcutsOpen((open) => !open);
         return true;
-  }
     }
+  }
 
 
   function moveVimVertical(direction: -1 | 1, boundary: boolean) {
     const active = document.activeElement;
-    if (active?.closest(".message-scroller, .message-row")) {
-      window.dispatchEvent(new CustomEvent("rust-meow-vim-message", {
-        detail: { chatId: state.selectedChatId, direction, boundary },
-      }));
-      return;
-    }
+    // Modal dialogs own their keys; never move the chat list or message cursor behind them.
+    if (active?.closest("[role='dialog']")) return;
     if (active?.closest(".tab")) {
       moveVimTabs(direction, boundary);
       return;
     }
-    navigateVimChats(direction, boundary);
+    if (active?.closest(".sidebar") || !state.selectedChatId) {
+      navigateVimChats(direction, boundary);
+      return;
+    }
+    // Message navigation targets the focused pane's chat regardless of where
+    // focus sits inside the chat surface; the pane's Conversation owns the cursor.
+    const command: VimMessageCommand = boundary
+      ? { kind: "edge", edge: direction > 0 ? "last" : "first" }
+      : { kind: "step", direction };
+    const detail: VimMessageEventDetail = {
+      paneId: state.focusedPaneId,
+      chatId: state.selectedChatId,
+      command,
+    };
+    window.dispatchEvent(new CustomEvent<VimMessageEventDetail>(VIM_MESSAGE_EVENT, { detail }));
   }
 
   function moveVimHorizontal(direction: -1 | 1) {

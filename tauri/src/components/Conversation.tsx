@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import {
   ArrowDown,
@@ -18,6 +18,16 @@ import type { Density } from "../state/preferences";
 import { ChatKind, ConnectionState, HistoryCoverageState, SyncPhase, type Message } from "../lib/types";
 import { connectionLabel, dayKey, formatDay, formatTime, messageText } from "../lib/format";
 import { indexMessages } from "../lib/performance";
+import {
+  VIM_MESSAGE_EVENT,
+  resolveVimCursorIndex,
+  resolveVimMessageIndex,
+  resolveVisibleIndexRange,
+  type VimMessageCommand,
+  type VimMessageCursor,
+  type VimMessageEventDetail,
+  type VisibleIndexRange,
+} from "../lib/vim-navigation";
 import {
   captureScrollSnapshot,
   resolveScrollRestore,
@@ -135,37 +145,95 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
     },
   });
 
-  onMount(() => {
-    const handleVimMessageNavigation = (event: Event) => {
-      const detail = (event as CustomEvent<{ chatId: string; direction: -1 | 1; boundary: boolean }>).detail;
-      if (detail?.chatId !== props.chatId || state.selectedChatId !== props.chatId) return;
-      navigateVimMessage(detail.direction, detail.boundary);
-    };
-    window.addEventListener("rust-meow-vim-message", handleVimMessageNavigation);
-    onCleanup(() => window.removeEventListener("rust-meow-vim-message", handleVimMessageNavigation));
+  // Virtual message cursor: the message `j`/`k`/`gg`/`G` act on. It is stored
+  // as id + index and never derived from mounted DOM, so it survives unmounted
+  // rows, prepends/trims, and repeated presses before the virtualizer settles.
+  const [vimCursor, setVimCursor] = createSignal<VimMessageCursor | null>(null);
+  const messageIds = createMemo(() => messages().map((message) => message.id));
+  // Message id whose row should take focus as soon as it is mounted.
+  let vimPendingFocusId: string | null = null;
+
+  createEffect(on(() => props.chatId, () => {
+    setVimCursor(null);
+    vimPendingFocusId = null;
+  }));
+
+  function mountedMessageRow(id: string): HTMLElement | null {
+    for (const row of scrollRef?.querySelectorAll<HTMLElement>(".message-row") ?? []) {
+      if (row.dataset.messageId === id) return row;
+    }
+    return null;
+  }
+
+  /** Focus the pending row once mounted; keep focus on the scroller until then. */
+  function settleVimFocus() {
+    if (vimPendingFocusId === null || !scrollRef) return;
+    if (!scrollRef.contains(document.activeElement)) {
+      vimPendingFocusId = null;
+      return;
+    }
+    const row = mountedMessageRow(vimPendingFocusId);
+    if (!row) return;
+    vimPendingFocusId = null;
+    row.focus({ preventScroll: true });
+  }
+
+  // Retry the pending focus whenever the rendered window or message list changes.
+  createEffect(() => {
+    virtualizer.getVirtualItems();
+    messageIds();
+    settleVimFocus();
   });
 
-  function navigateVimMessage(direction: -1 | 1, boundary: boolean) {
-    const count = messages().length;
-    if (count === 0) return;
-    const activeRow = document.activeElement?.closest<HTMLElement>(".message-row");
-    const activeIndex = activeRow ? Number.parseInt(activeRow.dataset.index ?? "", 10) : Number.NaN;
-    const start = Number.isInteger(activeIndex) ? activeIndex : (direction > 0 ? -1 : count);
-    const index = boundary
-      ? (direction > 0 ? 0 : count - 1)
-      : Math.max(0, Math.min(count - 1, start + direction));
-    virtualizer.scrollToIndex(index, { align: "center" });
-    let attempts = 0;
-    const focusRow = () => {
-      const row = scrollRef?.querySelector<HTMLElement>(`.message-row[data-index="${index}"]`);
-      if (row) {
-        row.focus();
-        return;
-      }
-      if (attempts++ < 3) requestAnimationFrame(focusRow);
-    };
-    requestAnimationFrame(focusRow);
+  function visibleMessageRange(): VisibleIndexRange | null {
+    const scroller = scrollRef;
+    const canvas = scroller?.querySelector<HTMLElement>(".message-canvas");
+    if (!scroller || !canvas) return null;
+    // Virtual item offsets are relative to the canvas, which may sit below
+    // the history banner inside the scroller.
+    const viewportTop = scroller.getBoundingClientRect().top - canvas.getBoundingClientRect().top;
+    return resolveVisibleIndexRange(virtualizer.getVirtualItems(), viewportTop, viewportTop + scroller.clientHeight);
   }
+
+  function handleVimMessageCommand(command: VimMessageCommand) {
+    const ids = messageIds();
+    const target = resolveVimMessageIndex({
+      count: ids.length,
+      current: resolveVimCursorIndex(ids, vimCursor()),
+      command,
+      visible: visibleMessageRange(),
+    });
+    if (target === null) return;
+    const id = ids[target];
+    if (id === undefined) return;
+    setVimCursor({ id, index: target });
+    vimPendingFocusId = id;
+    let align: "auto" | "start" | "end" = "auto";
+    if (command.kind === "edge") align = command.edge === "first" ? "start" : "end";
+    virtualizer.scrollToIndex(target, { align });
+    scrollRef?.focus({ preventScroll: true });
+    settleVimFocus();
+  }
+
+  /** Clicking or tabbing into a row makes that row the cursor, so commands continue from it. */
+  function handleMessageFocusIn(event: FocusEvent) {
+    if (!(event.target instanceof HTMLElement)) return;
+    const id = event.target.closest<HTMLElement>(".message-row")?.dataset.messageId;
+    if (!id) return;
+    const index = messageIds().indexOf(id);
+    if (index < 0) return;
+    vimPendingFocusId = null;
+    setVimCursor({ id, index });
+  }
+
+  const handleVimMessageEvent = (event: Event) => {
+    const detail = (event as CustomEvent<VimMessageEventDetail>).detail;
+    if (detail.paneId !== props.paneId || detail.chatId !== props.chatId) return;
+    if (state.selectedChatId !== props.chatId) return;
+    handleVimMessageCommand(detail.command);
+  };
+  window.addEventListener(VIM_MESSAGE_EVENT, handleVimMessageEvent);
+  onCleanup(() => window.removeEventListener(VIM_MESSAGE_EVENT, handleVimMessageEvent));
 
 
   // Chat switched within this pane (tab click, `selectChat`, …) — drop any
@@ -418,6 +486,7 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
         aria-label="Messages"
         aria-live="polite"
         onScroll={scheduleScrollStateUpdate}
+        onFocusIn={handleMessageFocusIn}
       >
         <Show when={!conversation().loading && !conversation().hasOlder && historyCoverage()}>
           {(coverage) => (
@@ -484,7 +553,7 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
                 const showAvatarGutter = () => isGroup() && Boolean(message()) && !message()!.fromMe;
                 return (
                   <div
-                    class={`message-row ${message()?.fromMe ? "from-me" : ""} ${dateChanged() ? "with-date" : ""} ${firstUnread() ? "with-unread" : ""}`}
+                    class={`message-row ${message()?.fromMe ? "from-me" : ""} ${dateChanged() ? "with-date" : ""} ${firstUnread() ? "with-unread" : ""} ${vimCursor()?.id === message()?.id ? "vim-cursor" : ""}`}
                     data-index={virtualRow.index}
                     data-message-id={message()?.id}
                     tabIndex={-1}
