@@ -478,6 +478,27 @@ a:focus-visible,
   flex: 1;
 }
 
+.shortcut-help-button {
+  display: grid;
+  width: calc(34px * var(--scale));
+  height: calc(34px * var(--scale));
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font: 600 calc(14px * var(--scale))/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  transition: background-color 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out;
+}
+
+.shortcut-help-button:hover,
+.shortcut-help-button:focus-visible {
+  border-color: var(--border-focus);
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
 .brand-mark {
   display: grid;
   width: calc(34px * var(--scale));
@@ -1122,6 +1143,23 @@ html[data-appearance="light"] .avatar {
   color: var(--accent);
 }
 
+.conversation-heading .connection-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  color: var(--success);
+  font-size: calc(10px * var(--scale));
+}
+
+.connection-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: currentColor;
+}
+
 .connection-banner {
   display: flex;
   min-height: calc(34px * var(--scale));
@@ -1175,15 +1213,15 @@ html[data-appearance="light"] .avatar {
   align-items: center;
   gap: 6px;
   text-align: center;
-  color: var(--text-secondary);
-  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  color: var(--fg-muted);
+  background: color-mix(in srgb, var(--bg-panel) 94%, transparent);
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: var(--shadow-sm);
 }
 
 .history-coverage strong {
-  color: var(--text-primary);
+  color: var(--fg);
 }
 
 .history-coverage .secondary-button {
@@ -1203,7 +1241,7 @@ html[data-appearance="light"] .avatar {
   padding: 7px 10px;
   border-top: 1px solid var(--border);
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--fg-muted);
 }
 
 .history-sync-controls .secondary-button {
@@ -3079,6 +3117,29 @@ html[data-appearance="light"] .message-sender {
   line-height: 1.55;
 }
 
+.keyboard-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 14px !important;
+  color: var(--fg-muted) !important;
+  font-size: 12px;
+}
+
+.keyboard-hint kbd,
+.shortcuts-dialog kbd {
+  min-width: 22px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font: 600 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: center;
+}
+
 .pairing-card {
   width: min(620px, 100%);
   padding: 30px;
@@ -3525,6 +3586,79 @@ html[data-appearance="light"] .message-sender {
   border-radius: var(--radius-lg);
   background: var(--bg-panel);
   box-shadow: var(--shadow-lg);
+}
+
+.shortcuts-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: auto;
+}
+
+.shortcuts-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.shortcuts-heading p {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.shortcuts-close {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.shortcuts-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.shortcuts-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.shortcuts-group h3 {
+  margin: 0 0 9px;
+  color: var(--fg);
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.shortcut-row {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.shortcut-row kbd {
+  flex: none;
+}
+
+.shortcuts-footer {
+  margin-top: 20px !important;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  text-align: center;
 }
 
 .dialog-card h2 {
@@ -4944,5 +5078,12 @@ html[data-theme-style="skeuomorphic"][data-appearance="light"] .settings-nav-ite
 
   html[data-theme-style="skeuomorphic"] .message-bubble {
     max-width: min(560px, 86%);
+  }
+}
+
+@media (max-width: 760px) {
+  .shortcuts-groups {
+    grid-template-columns: 1fr;
+    gap: 14px;
   }
 }

@@ -14,6 +14,7 @@ import { TitleBar } from "./components/TitleBar";
 import { MemberPanel } from "./components/MemberPanel";
 import { ChatSwitcher } from "./components/ChatSwitcher";
 import { SpotlightSearch } from "./components/SpotlightSearch";
+import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
 import { ChatInfoPanel, SettingsPanel } from "./components/Panels";
 import {
   EmptyConversation,
@@ -45,9 +46,11 @@ export default function App() {
     };
   }
   let searchInput: HTMLInputElement | undefined;
+  let shortcutHelpButton: HTMLButtonElement | undefined;
   const [spotlightOpen, setSpotlightOpen] = createSignal(false);
-  const [fileDropActive, setFileDropActive] = createSignal(false);
+  const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
   const [agentControlOpen, setAgentControlOpen] = createSignal(false);
+  const [fileDropActive, setFileDropActive] = createSignal(false);
   const agentControlVisible = () =>
     preferences.agentControlExperimentEnabled && agentControlOpen();
   let unlistenFileDrops: (() => void) | undefined;
@@ -124,8 +127,8 @@ export default function App() {
       <Show when={state.screen === "chats"}>
         <main
           class={`app-shell ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""}`}
-          inert={Boolean(spotlightOpen() || agentControlVisible() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
-          aria-hidden={spotlightOpen() || agentControlVisible() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
+          inert={Boolean(spotlightOpen() || shortcutsOpen() || agentControlVisible() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation)}
+          aria-hidden={spotlightOpen() || shortcutsOpen() || agentControlVisible() || state.logoutConfirmation || state.imageViewer || state.forwardDialog || state.fileSendConfirmation ? "true" : undefined}
         >
           <TitleBar model={model} />
           <nav class="nav-rail" aria-label="Primary navigation">
@@ -147,6 +150,7 @@ export default function App() {
             <IconButton label="Quick search (Ctrl+K)" onClick={toggleSpotlight}>
               <ThemeIcon icon={Search} name="search" size={20} />
             </IconButton>
+            <button ref={shortcutHelpButton} type="button" class="shortcut-help-button" aria-label="Keyboard shortcuts (?)" aria-keyshortcuts="?" onClick={() => setShortcutsOpen(true)}>?</button>
             <div class="nav-spacer" />
             <IconButton label="Privacy architecture" onClick={() => actions.toggleSettings(true)}>
               <ThemeIcon icon={ShieldCheck} name="shield" size={20} />
@@ -186,6 +190,7 @@ export default function App() {
       <Show when={agentControlVisible()}><AgentControlPanel model={model} onClose={() => setAgentControlOpen(false)} /></Show>
       <ChatSwitcher model={model} />
       <SpotlightSearch model={model} open={spotlightOpen()} onClose={() => setSpotlightOpen(false)} />
+      <KeyboardShortcuts open={shortcutsOpen()} onClose={closeShortcuts} />
       <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {state.tabAnnouncement}
       </p>
@@ -228,6 +233,13 @@ export default function App() {
     if (spotlightOpen()) {
       if (event.key === "Escape") {
         setSpotlightOpen(false);
+        event.preventDefault();
+      }
+      return;
+    }
+    if (shortcutsOpen()) {
+      if (event.key === "Escape") {
+        closeShortcuts();
         event.preventDefault();
       }
       return;
@@ -328,8 +340,12 @@ export default function App() {
       case "settings":
         actions.toggleSettings();
         return true;
-    }
+      case "toggle-shortcuts":
+        setShortcutsOpen((open) => !open);
+        return true;
   }
+    }
+
 
   function moveVimVertical(direction: -1 | 1, boundary: boolean) {
     const active = document.activeElement;
@@ -457,6 +473,11 @@ export default function App() {
       actions.splitPane();
     }
     prefActions.update("splitView", state.panes.length >= 2);
+  }
+
+  function closeShortcuts() {
+    setShortcutsOpen(false);
+    requestAnimationFrame(() => shortcutHelpButton?.focus());
   }
 
   function toggleSpotlight() {

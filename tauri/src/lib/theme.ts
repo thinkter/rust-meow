@@ -57,12 +57,12 @@ export interface Theme {
 }
 
 const vercelDark: ThemeTokens = {
-  "bg-app": "#000000",
-  "bg-panel": "#0a0a0a",
-  "bg-elevated": "#111111",
-  "bg-hover": "#1a1a1a",
-  "bg-active": "#242424",
-  "bg-input": "#0a0a0a",
+  "bg-app": "#080808",
+  "bg-panel": "#0d0d0d",
+  "bg-elevated": "#151515",
+  "bg-hover": "#1d1d1d",
+  "bg-active": "#262626",
+  "bg-input": "#0d0d0d",
   "bg-overlay": "rgba(0, 0, 0, 0.72)",
   border: "#2e2e2e",
   "border-strong": "#454545",
@@ -75,7 +75,7 @@ const vercelDark: ThemeTokens = {
   "accent-hover": "#3291ff",
   "accent-fg": "#ffffff",
   "accent-soft": "rgba(0, 114, 245, 0.16)",
-  "bubble-in-bg": "#161616",
+  "bubble-in-bg": "#1b1b1b",
   "bubble-in-fg": "#ededed",
   "bubble-out-bg": "#0059c1",
   "bubble-out-fg": "#ffffff",

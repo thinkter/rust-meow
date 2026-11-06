@@ -44,7 +44,8 @@ i              focus the composer
 o              open quick search
 r/e/f/p         reply, edit, forward, pin the focused message
 x or d          close the current chat tab
-c/m/s            chat info, members, settings
+c/m/s           chat info, members, settings
+?              show the shortcut guide
 Esc             close the active overlay or clear search
 ```
 

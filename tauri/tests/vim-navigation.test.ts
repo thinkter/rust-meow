@@ -9,6 +9,7 @@ test("normal mode maps navigation and app actions", () => {
   assert.equal(resolveVimCommand({ key: "g" }), "pending-g");
   assert.equal(resolveVimCommand({ key: "i" }), "focus-composer");
   assert.equal(resolveVimCommand({ key: "r" }), "reply");
+  assert.equal(resolveVimCommand({ key: "?" }), "toggle-shortcuts");
   assert.equal(resolveVimCommand({ key: "x" }), "close-tab");
 });
 

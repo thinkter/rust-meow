@@ -15,7 +15,8 @@ export type VimCommand =
   | "pin"
   | "toggle-members"
   | "chat-info"
-  | "settings";
+  | "settings"
+  | "toggle-shortcuts";
 
 export interface VimKeyInput {
   key: string;
@@ -69,10 +70,14 @@ export function resolveVimCommand(input: VimKeyInput): VimCommand | null {
       return "chat-info";
     case "s":
       return "settings";
+    case "?":
+      return "toggle-shortcuts";
     default:
       return null;
   }
 }
+
+
 
 export function isEditableTarget(target: EventTarget | null): boolean {
   return (

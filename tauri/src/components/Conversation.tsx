@@ -288,6 +288,9 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
                         <span class={actions.typingLabel(value().id) ? "typing" : ""}>
                           {actions.typingLabel(value().id) || conversationSubtitle(value().kind, value().phoneNumber)}
                         </span>
+                        <Show when={state.connection === ConnectionState.Connected}>
+                          <span class="connection-status"><span class="connection-status-dot" />Connected</span>
+                        </Show>
                       </span>
                     </>
                   )}
@@ -485,7 +488,7 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
                     data-index={virtualRow.index}
                     data-message-id={message()?.id}
                     tabIndex={-1}
-                    aria-label={`Message ${virtualRow.index + 1}`}
+                    aria-label={`${message()?.fromMe ? "You" : message()?.senderName || "Message"}: ${message() ? messageText(message()!).slice(0, 120) : ""}`}
                     ref={(element) => {
                       element.dataset.index = String(virtualRow.index);
                       requestAnimationFrame(() => {
