@@ -31,6 +31,24 @@ with `RUST_MEOW_DATA_DIR="$(mktemp -d)"`.
 - `make build` or `make release-linux`: release binary or `.deb`. The `.deb`
   target runs `make check` first.
 
+## Keyboard navigation
+
+Normal mode is always available outside text fields:
+
+```text
+j/k or arrows  move chats, tabs, or messages
+g g / G        first / last item
+h/l            move panes, sidebar, conversation, or composer
+i              focus the composer
+/              focus chat search
+o              open quick search
+r/e/f/p         reply, edit, forward, pin the focused message
+x or d          close the current chat tab
+c/m/s            chat info, members, settings
+Esc             close the active overlay or clear search
+```
+
+
 Pushing a `v*` tag builds installers for every supported platform and publishes
 a GitHub Release. Run the Release workflow by hand if you only want artifacts.
 

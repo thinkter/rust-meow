@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import {
   ArrowDown,
@@ -135,6 +135,39 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
     },
   });
 
+  onMount(() => {
+    const handleVimMessageNavigation = (event: Event) => {
+      const detail = (event as CustomEvent<{ chatId: string; direction: -1 | 1; boundary: boolean }>).detail;
+      if (detail?.chatId !== props.chatId || state.selectedChatId !== props.chatId) return;
+      navigateVimMessage(detail.direction, detail.boundary);
+    };
+    window.addEventListener("rust-meow-vim-message", handleVimMessageNavigation);
+    onCleanup(() => window.removeEventListener("rust-meow-vim-message", handleVimMessageNavigation));
+  });
+
+  function navigateVimMessage(direction: -1 | 1, boundary: boolean) {
+    const count = messages().length;
+    if (count === 0) return;
+    const activeRow = document.activeElement?.closest<HTMLElement>(".message-row");
+    const activeIndex = activeRow ? Number.parseInt(activeRow.dataset.index ?? "", 10) : Number.NaN;
+    const start = Number.isInteger(activeIndex) ? activeIndex : (direction > 0 ? -1 : count);
+    const index = boundary
+      ? (direction > 0 ? 0 : count - 1)
+      : Math.max(0, Math.min(count - 1, start + direction));
+    virtualizer.scrollToIndex(index, { align: "center" });
+    let attempts = 0;
+    const focusRow = () => {
+      const row = scrollRef?.querySelector<HTMLElement>(`.message-row[data-index="${index}"]`);
+      if (row) {
+        row.focus();
+        return;
+      }
+      if (attempts++ < 3) requestAnimationFrame(focusRow);
+    };
+    requestAnimationFrame(focusRow);
+  }
+
+
   // Chat switched within this pane (tab click, `selectChat`, …) — drop any
   // state that belonged to the previous chat immediately, independent of
   // whether the new chat's window has finished loading yet. Without this a
@@ -165,10 +198,7 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
           const highlightedIndex = messages().findIndex((message) => message.id === highlightedMessageId);
           if (highlightedIndex >= 0) {
             initializedViewportKey = viewportKey;
-            requestAnimationFrame(() => {
-              virtualizer.scrollToIndex(highlightedIndex, { align: "center" });
-              restoringViewport = false;
-            });
+            revealMessageIndex(highlightedIndex, () => { restoringViewport = false; });
           }
           return;
         }
@@ -381,6 +411,8 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
       <div
         ref={scrollRef}
         class="message-scroller"
+        tabIndex={0}
+        aria-label="Messages"
         aria-live="polite"
         onScroll={scheduleScrollStateUpdate}
       >
@@ -451,6 +483,9 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
                   <div
                     class={`message-row ${message()?.fromMe ? "from-me" : ""} ${dateChanged() ? "with-date" : ""} ${firstUnread() ? "with-unread" : ""}`}
                     data-index={virtualRow.index}
+                    data-message-id={message()?.id}
+                    tabIndex={-1}
+                    aria-label={`Message ${virtualRow.index + 1}`}
                     ref={(element) => {
                       element.dataset.index = String(virtualRow.index);
                       requestAnimationFrame(() => {
@@ -580,10 +615,26 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
   function scrollToMessage(messageId: string) {
     const index = messages().findIndex((message) => message.id === messageId);
     if (index >= 0) {
-      virtualizer.scrollToIndex(index, { align: "center" });
+      revealMessageIndex(index);
       return;
     }
     void actions.selectChat(props.chatId, messageId, props.paneId);
+  }
+
+  /** Dynamic message heights can change after a virtual jump mounts the row
+   * (quoted previews and media are common examples). Re-run the indexed jump
+   * after measurement, then center the mounted row itself so distant reply
+   * targets land reliably instead of stopping near their old estimate. */
+  function revealMessageIndex(index: number, settled?: () => void) {
+    virtualizer.scrollToIndex(index, { align: "center" });
+    requestAnimationFrame(() => {
+      virtualizer.scrollToIndex(index, { align: "center" });
+      requestAnimationFrame(() => {
+        const row = scrollRef?.querySelector<HTMLElement>(`.message-row[data-index="${index}"]`);
+        row?.scrollIntoView({ block: "center" });
+        settled?.();
+      });
+    });
   }
 
   function openSearch() {

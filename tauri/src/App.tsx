@@ -32,6 +32,7 @@ import { AgentControlPanel } from "./components/AgentControlPanel";
 import { bridge, listenForFileDrops } from "./lib/bridge";
 import { classifyDroppedFiles } from "./lib/file-drop";
 import { disableAgentControlIfNeeded } from "./lib/agent-control-gate";
+import { isEditableTarget, resolveVimCommand, type VimCommand } from "./lib/vim-navigation";
 
 export default function App() {
   const model = createAppModel();
@@ -51,7 +52,8 @@ export default function App() {
     preferences.agentControlExperimentEnabled && agentControlOpen();
   let unlistenFileDrops: (() => void) | undefined;
   let disposed = false;
-
+  let vimPendingG = false;
+  let vimPendingTimer: number | undefined;
   onMount(() => {
     void actions.bootstrap().then(async () => {
       if (!preferences.agentControlExperimentEnabled) {
@@ -97,6 +99,7 @@ export default function App() {
   });
   onCleanup(() => {
     disposed = true;
+    if (vimPendingTimer !== undefined) window.clearTimeout(vimPendingTimer);
     unlistenFileDrops?.();
     actions.dispose();
     window.removeEventListener("keydown", handleGlobalKeyDown, true);
@@ -208,12 +211,18 @@ export default function App() {
 
   function handleGlobalKeyDown(event: KeyboardEvent) {
     if (state.screen !== "chats") return;
-    const target = event.target as HTMLElement | null;
-    const editing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable;
+    const editing = isEditableTarget(event.target);
 
     if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
       toggleSpotlight();
       event.preventDefault();
+      return;
+    }
+    if (editing) {
+      if (event.key === "Escape") {
+        (event.target as HTMLElement).blur();
+        event.preventDefault();
+      }
       return;
     }
     if (spotlightOpen()) {
@@ -244,12 +253,16 @@ export default function App() {
       event.preventDefault();
       return;
     }
-    if (!editing && event.key === "/") {
-      searchInput?.focus();
-      event.preventDefault();
-      return;
+    if (!editing) {
+      if (vimPendingG && event.key !== "g") resetVimPending();
+      const command = resolveVimCommand(event);
+      if (command && handleVimCommand(command)) {
+        event.preventDefault();
+        return;
+      }
     }
     if (event.key === "Escape") {
+      resetVimPending();
       if (state.switcher) actions.cancelSwitcher();
       else if (state.fileSendConfirmation) actions.cancelFileSend();
       else if (state.forwardDialog) actions.cancelForward();
@@ -260,6 +273,168 @@ export default function App() {
       else if (state.searchQuery) actions.clearSearch();
     }
   }
+
+  function handleVimCommand(command: VimCommand): boolean {
+    if (command === "pending-g") {
+      if (vimPendingG) {
+        resetVimPending();
+        moveVimVertical(-1, true);
+      } else {
+        vimPendingG = true;
+        vimPendingTimer = window.setTimeout(resetVimPending, 700);
+      }
+      return true;
+    }
+    resetVimPending();
+    switch (command) {
+      case "move-up":
+        moveVimVertical(-1, false);
+        return true;
+      case "move-down":
+        moveVimVertical(1, false);
+        return true;
+      case "move-left":
+        moveVimHorizontal(-1);
+        return true;
+      case "move-right":
+        moveVimHorizontal(1);
+        return true;
+      case "last":
+        moveVimVertical(1, true);
+        return true;
+      case "focus-composer":
+        focusComposer();
+        return true;
+      case "focus-search":
+        focusSidebarSearch();
+        return true;
+      case "toggle-spotlight":
+        toggleSpotlight();
+        return true;
+      case "close-tab":
+        if (state.selectedChatId) actions.closeChat();
+        return true;
+      case "reply":
+      case "edit":
+      case "forward":
+      case "pin":
+        return invokeSelectedMessageAction(command);
+      case "toggle-members":
+        prefActions.update("memberPanelOpen", !preferences.memberPanelOpen);
+        return true;
+      case "chat-info":
+        void actions.showChatInfo();
+        return true;
+      case "settings":
+        actions.toggleSettings();
+        return true;
+    }
+  }
+
+  function moveVimVertical(direction: -1 | 1, boundary: boolean) {
+    const active = document.activeElement;
+    if (active?.closest(".message-scroller, .message-row")) {
+      window.dispatchEvent(new CustomEvent("rust-meow-vim-message", {
+        detail: { chatId: state.selectedChatId, direction, boundary },
+      }));
+      return;
+    }
+    if (active?.closest(".tab")) {
+      moveVimTabs(direction, boundary);
+      return;
+    }
+    navigateVimChats(direction, boundary);
+  }
+
+  function moveVimHorizontal(direction: -1 | 1) {
+    const active = document.activeElement;
+    if (active?.closest(".message-scroller, .message-row")) {
+      if (direction < 0) focusSidebarSearch();
+      else focusComposer();
+      return;
+    }
+    if (active?.closest(".chat-row")) {
+      if (direction > 0) focusMessageSurface();
+      else focusSidebarSearch();
+      return;
+    }
+    if (active?.closest(".tab")) {
+      moveVimTabs(direction, false);
+      return;
+    }
+    const paneIndex = state.panes.findIndex((pane) => pane.id === state.focusedPaneId);
+    const nextPane = state.panes[paneIndex + direction];
+    if (nextPane) actions.focusPane(nextPane.id);
+    else if (direction > 0) focusMessageSurface();
+    else focusSidebarSearch();
+  }
+
+  function navigateVimChats(direction: -1 | 1, boundary: boolean) {
+    const chats = actions.filteredChats();
+    if (chats.length === 0) return;
+    const current = chats.findIndex((chat) => chat.id === state.selectedChatId);
+    const index = boundary
+      ? (direction > 0 ? chats.length - 1 : 0)
+      : Math.max(0, Math.min(chats.length - 1, (current < 0 ? (direction > 0 ? -1 : chats.length) : current) + direction));
+    const chat = chats[index];
+    if (!chat) return;
+    void actions.selectChat(chat.id);
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`.chat-row[aria-current="page"]`)?.focus());
+  }
+
+  function moveVimTabs(direction: -1 | 1, boundary: boolean) {
+    const tabs = [...document.querySelectorAll<HTMLButtonElement>(".pane-focused .tab")];
+    if (tabs.length === 0) return;
+    const active = document.activeElement?.closest<HTMLButtonElement>(".tab");
+    const current = active ? tabs.indexOf(active) : -1;
+    const index = boundary
+      ? (direction > 0 ? tabs.length - 1 : 0)
+      : Math.max(0, Math.min(tabs.length - 1, (current < 0 ? (direction > 0 ? -1 : tabs.length) : current) + direction));
+    const next = tabs[index];
+    if (next) {
+      next.focus();
+      next.click();
+    }
+  }
+
+  function focusComposer() {
+    document.querySelector<HTMLTextAreaElement>(".pane-focused .composer-input")?.focus();
+  }
+
+  function focusMessageSurface() {
+    document.querySelector<HTMLElement>(".pane-focused .message-scroller")?.focus();
+  }
+
+  function focusSidebarSearch() {
+    if (preferences.sidebarCollapsed) prefActions.update("sidebarCollapsed", false);
+    requestAnimationFrame(() => searchInput?.focus());
+  }
+
+  function invokeSelectedMessageAction(command: Extract<VimCommand, "reply" | "edit" | "forward" | "pin">): boolean {
+    const row = document.activeElement?.closest<HTMLElement>(".message-row");
+    const chatId = state.selectedChatId;
+    const messageId = row?.dataset.messageId;
+    if (!chatId || !messageId) return false;
+    const message = state.conversations[chatId]?.messages.find((candidate) => candidate.id === messageId);
+    if (!message) return false;
+    if (command === "reply") actions.replyTo(messageId, chatId);
+    else if (command === "edit") actions.editMessage(messageId, chatId);
+    else if (command === "forward") actions.startForward(messageId, chatId);
+    else void actions.setMessagePin(
+      messageId,
+      !(state.pinnedMessages[chatId] ?? []).some((pin) => pin.messageId === messageId),
+      chatId,
+    );
+    return true;
+  }
+  function resetVimPending() {
+    vimPendingG = false;
+    if (vimPendingTimer !== undefined) {
+      window.clearTimeout(vimPendingTimer);
+      vimPendingTimer = undefined;
+    }
+  }
+
 
   /** Releasing Ctrl commits the chat switcher's highlighted row (G4). */
   function handleGlobalKeyUp(event: KeyboardEvent) {
