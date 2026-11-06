@@ -20,3 +20,10 @@ test("native media elements may load trusted local attachment URLs", () => {
     assert.ok(mediaSources.has(source), `media-src must allow ${source}`);
   }
 });
+
+test("local attachment blobs may be fetched on Linux for inline GIF playback", () => {
+  const connectSources = directiveSources(tauriConfig.app.security.csp, "connect-src");
+  for (const source of ["asset:", "http://asset.localhost"]) {
+    assert.ok(connectSources.has(source), `connect-src must allow ${source}`);
+  }
+});

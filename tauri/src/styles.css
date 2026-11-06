@@ -9,9 +9,27 @@
 
 /* ── Tokens / reset ── */
 
+/* Colour emoji. Only the emoji code points in unicode-range are routed to this
+   face, so ordinary text, digits, ©/®/™ and icon-font private-use glyphs keep
+   their existing fonts. Sources are local() only: nothing is downloaded or
+   bundled. Apple Color Emoji is listed first, so macOS and iOS hosts use Apple's
+   glyphs. Apple's font is proprietary and is not redistributed here; on Windows
+   and Linux the first installed colour emoji font is used instead (Segoe UI Emoji
+   or Noto Color Emoji). Hosts with no installed colour emoji font fall back to
+   the generic stack below. Text-default symbols that only become emoji with
+   U+FE0F are covered by the same range, so they also render in colour. */
+@font-face {
+  font-family: "Rust Meow Emoji";
+  src: local("Apple Color Emoji"), local("Segoe UI Emoji"), local("Noto Color Emoji");
+  unicode-range: U+20E3, U+203C, U+2049, U+231A-231B, U+23E9-23FA, U+24C2, U+25AA-25AB,
+    U+25B6, U+25C0, U+25FB-25FE, U+2600-27BF, U+2934-2935, U+2B05-2B07, U+2B1B-2B1C,
+    U+2B50, U+2B55, U+3030, U+303D, U+3297, U+3299, U+1F000-1FAFF;
+}
+
 :root {
   font-family:
-    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    "Rust Meow Emoji", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 
@@ -1173,22 +1191,6 @@ html[data-appearance="light"] .avatar {
   color: var(--accent);
 }
 
-.conversation-heading .connection-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 3px;
-  color: var(--success);
-  font-size: calc(10px * var(--scale));
-}
-
-.connection-status-dot {
-  width: 6px;
-  height: 6px;
-  flex: none;
-  border-radius: var(--radius-full);
-  background: currentColor;
-}
 
 .connection-banner {
   display: flex;
@@ -1680,7 +1682,9 @@ html[data-appearance="light"] .message-sender {
 .whatsapp-format-monospace,
 .whatsapp-format-inline-code,
 .whatsapp-code-block {
-  font-family: var(--font-mono, "SFMono-Regular", Consolas, "Liberation Mono", monospace);
+  font-family:
+    "Rust Meow Emoji", var(--font-mono, "SFMono-Regular", Consolas, "Liberation Mono", monospace),
+    "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
 }
 
 .whatsapp-format-monospace,
@@ -4590,7 +4594,9 @@ html[data-battery-saver="true"] .modal-backdrop {
 }
 
 html[data-theme-style="skeuomorphic"] {
-  font-family: "Nimbus Sans", "Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif;
+  font-family:
+    "Rust Meow Emoji", "Nimbus Sans", "Helvetica Neue", Helvetica, Arial, "Liberation Sans",
+    sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
   -webkit-font-smoothing: antialiased;
   --radius-sm: calc(5px * var(--scale));
   --radius-md: calc(7px * var(--scale));

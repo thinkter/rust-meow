@@ -1,4 +1,6 @@
-export type EmojiCatalogEntry = readonly [emoji: string, keywords: string];
+import type { EmojiCatalogEntry } from "./emoji-catalog";
+
+export type { EmojiCatalogEntry };
 
 export interface ActiveEmojiShortcode {
   /** Inclusive offset of the leading colon. */
@@ -71,6 +73,30 @@ export function findActiveEmojiShortcode(
   };
 }
 
+interface NormalizedEmojiEntry {
+  emoji: string;
+  keywords: readonly string[];
+}
+
+/**
+ * Lowercased, split keywords per catalog. The catalog is ~4k entries and ranking
+ * runs on every keystroke inside an open shortcode, so normalize once per array.
+ * Catalogs are treated as immutable.
+ */
+const normalizedCatalogs = new WeakMap<readonly EmojiCatalogEntry[], readonly NormalizedEmojiEntry[]>();
+
+function normalizeCatalog(entries: readonly EmojiCatalogEntry[]): readonly NormalizedEmojiEntry[] {
+  const cached = normalizedCatalogs.get(entries);
+  if (cached) return cached;
+
+  const normalized = entries.map(([emoji, keywordText]) => ({
+    emoji,
+    keywords: keywordText.toLocaleLowerCase().split(/\s+/).filter(Boolean),
+  }));
+  normalizedCatalogs.set(entries, normalized);
+  return normalized;
+}
+
 /**
  * Ranks the picker catalog for a shortcode query.
  *
@@ -88,13 +114,9 @@ export function rankEmojiSuggestions(
   const ranked: Array<EmojiSuggestion & { score: number; order: number }> = [];
   const seen = new Set<string>();
 
-  for (const [emoji, keywordText] of entries) {
+  for (const { emoji, keywords } of normalizeCatalog(entries)) {
     if (seen.has(emoji)) continue;
 
-    const keywords = keywordText
-      .toLocaleLowerCase()
-      .split(/\s+/)
-      .filter(Boolean);
     const match = bestKeywordMatch(normalizedQuery, keywords);
     if (!match) continue;
 

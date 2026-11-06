@@ -775,7 +775,7 @@ function AttachmentMessage(props: {
   model: AppModel;
   chatId: string;
 }) {
-  const [playbackFailed, setPlaybackFailed] = createSignal(false);
+  const [playbackError, setPlaybackError] = createSignal("");
   const [blobSource, setBlobSource] = createSignal("");
   let videoRef: HTMLVideoElement | undefined;
   const isAudio = () => props.attachment.kind === "audio" || props.attachment.voiceNote;
@@ -783,6 +783,8 @@ function AttachmentMessage(props: {
   const isGif = () => isVideo() && props.attachment.animated;
   const needsLinuxBlob = () =>
     !browserMockEnabled && navigator.userAgent.includes("Linux") && isGif();
+  const blobPending = () =>
+    needsLinuxBlob() && !!props.attachment.localPath && props.attachment.fileSize <= MAX_INLINE_GIF_VIDEO_BYTES && !source() && !playbackError();
   const source = () =>
     needsLinuxBlob() ? blobSource() : assetUrl(props.attachment.localPath);
   const failure = () => props.model.state.attachmentFailures[`${props.chatId}\u0000${props.message.id}`];
@@ -817,10 +819,10 @@ function AttachmentMessage(props: {
         );
         objectUrl = URL.createObjectURL(typedBlob);
         setBlobSource(objectUrl);
-        setPlaybackFailed(false);
+        setPlaybackError("");
       })
-      .catch(() => {
-        if (!disposed) setPlaybackFailed(true);
+      .catch((error: unknown) => {
+        if (!disposed) setPlaybackError(`Could not load GIF: ${error instanceof Error ? error.message : "unknown error"}`);
       });
 
     onCleanup(() => {
@@ -843,7 +845,7 @@ function AttachmentMessage(props: {
 
   return (
     <>
-      <Show when={isVideo() && !playbackFailed() ? source() : undefined}>
+      <Show when={isVideo() && !playbackError() ? source() : undefined}>
         {(url) => (
           <video
             ref={videoRef}
@@ -856,14 +858,17 @@ function AttachmentMessage(props: {
             preload={isGif() && !props.model.preferences.batterySaver ? "auto" : "metadata"}
             src={url()}
             aria-label={props.attachment.fileName || (isGif() ? "Animated GIF" : "Video")}
-            onError={() => setPlaybackFailed(true)}
+            onError={() => setPlaybackError("Playback failed")}
           />
         )}
+      </Show>
+      <Show when={blobPending()}>
+        <div class="message-image gif" role="img" aria-label="Loading GIF" />
       </Show>
       <Show when={isAudio() && source()}>
         {(url) => <audio controls preload="metadata" src={url()} aria-label={props.attachment.fileName || "Audio message"} />}
       </Show>
-      <Show when={!(isVideo() && source() && !playbackFailed()) && !(isAudio() && source())}>
+      <Show when={!(isVideo() && !playbackError() && source()) && !blobPending() && !(isAudio() && source())}>
         <button
           type="button"
           class="attachment-card"
@@ -883,7 +888,7 @@ function AttachmentMessage(props: {
           </Show>
         </button>
       </Show>
-      <Show when={failure()}>
+      <Show when={failure() || playbackError()}>
         {(error) => (
           <button
             type="button"

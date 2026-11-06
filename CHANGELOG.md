@@ -4,6 +4,16 @@ Rust Meow follows [Semantic Versioning](https://semver.org/). Product releases
 are tagged as `vMAJOR.MINOR.PATCH`; transport protocol and database schema
 versions are tracked separately in `docs/VERSIONING.md`.
 
+## Unreleased
+
+- Expanded the emoji picker and reactions to the full Unicode catalog, with
+  native color-emoji font preference where available.
+- Fixed Linux GIF playback so animated GIFs render inline instead of falling
+  back to generic attachment cards.
+- Stabilized message scrolling while new messages arrive and older history is
+  prepended.
+- Removed the redundant per-conversation “Connected” status label.
+
 ## [0.2.0] - 2026-08-09
 
 ### Added

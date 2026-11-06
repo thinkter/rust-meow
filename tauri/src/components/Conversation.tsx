@@ -309,9 +309,8 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
       () => {
         if (!scrollRef || messages().length === 0) return;
         const distance = scrollRef.scrollHeight - scrollRef.scrollTop - scrollRef.clientHeight;
-        const latest = messages().at(-1);
-        if (latest?.fromMe || distance < 180) {
-          requestAnimationFrame(() => scrollToLatest(preferredScrollBehavior()));
+        if (distance < 80) {
+          requestAnimationFrame(() => scrollToLatest("auto"));
           setNewMessages(0);
         } else {
           setNewMessages((count) => count + 1);
@@ -356,9 +355,6 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
                         <span class={actions.typingLabel(value().id) ? "typing" : ""}>
                           {actions.typingLabel(value().id) || conversationSubtitle(value().kind, value().phoneNumber)}
                         </span>
-                        <Show when={state.connection === ConnectionState.Connected}>
-                          <span class="connection-status"><span class="connection-status-dot" />Connected</span>
-                        </Show>
                       </span>
                     </>
                   )}
@@ -643,12 +639,20 @@ export function Conversation(props: { model: AppModel; chatId: string; paneId: s
 
   async function loadOlderAnchored() {
     if (!scrollRef) return;
-    const previousHeight = scrollRef.scrollHeight;
-    const previousTop = scrollRef.scrollTop;
+    let previousHeight = scrollRef.scrollHeight;
     await actions.loadOlder(props.chatId);
-    requestAnimationFrame(() => {
-      if (scrollRef) scrollRef.scrollTop = previousTop + scrollRef.scrollHeight - previousHeight;
-    });
+    const settle = (pass: number) => {
+      requestAnimationFrame(() => {
+        if (!scrollRef) return;
+        const heightDelta = scrollRef.scrollHeight - previousHeight;
+        if (heightDelta !== 0) {
+          scrollRef.scrollTop += heightDelta;
+          previousHeight = scrollRef.scrollHeight;
+        }
+        if (pass < 2) settle(pass + 1);
+      });
+    };
+    settle(0);
   }
 
   function scrollToLatest(behavior: ScrollBehavior = "auto") {
